@@ -1,6 +1,8 @@
 # MnemOS Global Networking Protocol
 
-An ephemeral repo for specifying the MnemOS Global Networking Protocol
+An ephemeral repo for specifying the MnemOS Global Networking Protocol.
+
+This is very early stage, and we are still figuring things out.
 
 ## License
 
