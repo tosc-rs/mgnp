@@ -1,0 +1,30 @@
+[package]
+name = "mgnp-pitch"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+heapless = "0.7.16"
+
+[dependencies.serde]
+version = "1.0.188"
+default-features = false
+features = ["derive"]
+
+[dependencies.uuid]
+version = "1.4.1"
+default-features = false
+features = ["v4"]
+
+[dependencies.spitebuf]
+git = "https://github.com/tosc-rs/mnemos"
+rev = "699928d4c677689b49bdc4e8b6abe8a04b24da6f"
+
+[dependencies.maitake]
+version = "0.1"
+
+[patch.crates-io.maitake]
+git = "https://github.com/hawkw/mycelium.git"
+rev = "101a4abaa19afdd131b334a16d92c9fb4909c064"
