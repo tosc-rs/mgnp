@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, ManuallyDrop, transmute};
+use std::mem::{transmute, ManuallyDrop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::mpsc;
 
@@ -54,8 +54,9 @@ pub struct Receiver<T> {
     d: ReceiverDropFunc,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum RecvError {
-    Oops
+    Oops,
 }
 
 impl<T> Receiver<T> {
@@ -65,9 +66,7 @@ impl<T> Receiver<T> {
         let outref: *mut Never = outref.cast();
 
         match (self.f)(self.rx.deref(), outref) {
-            DeserOutcome::Given => {
-                Ok(unsafe { outbox.assume_init() })
-            },
+            DeserOutcome::Given => Ok(unsafe { outbox.assume_init() }),
             DeserOutcome::Ungiven => Err(RecvError::Oops),
         }
     }
@@ -81,12 +80,8 @@ impl<T> Drop for Receiver<T> {
 
 pub fn channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::sync_channel::<T>(bound);
-    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe {
-        transmute(ManuallyDrop::new(tx))
-    };
-    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe {
-        transmute(ManuallyDrop::new(rx))
-    };
+    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
+    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
 
     let tx: Sender<T> = Sender {
         _pd: PhantomData,
@@ -107,25 +102,21 @@ pub fn channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
 
 pub fn ser_channel<T: Serialize>(bound: usize) -> (Sender<T>, Receiver<Vec<u8>>) {
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(bound);
-    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe {
-        transmute(ManuallyDrop::new(tx))
-    };
-    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe {
-        transmute(ManuallyDrop::new(rx))
-    };
+    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
+    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
 
     let tx: Sender<T> = Sender {
         _pd: PhantomData,
         tx,
         f: ser_sender::<T>,
-        d: type_drop_sender::<T>,
+        d: type_drop_sender::<Vec<u8>>,
     };
 
     let rx: Receiver<Vec<u8>> = Receiver {
         _pd: PhantomData,
         rx,
-        f: bypass_receiver::<T>,
-        d: type_drop_receiver::<T>,
+        f: bypass_receiver::<Vec<u8>>,
+        d: type_drop_receiver::<Vec<u8>>,
     };
 
     (tx, rx)
@@ -133,25 +124,21 @@ pub fn ser_channel<T: Serialize>(bound: usize) -> (Sender<T>, Receiver<Vec<u8>>)
 
 pub fn deser_channel<T: DeserializeOwned>(bound: usize) -> (Sender<Vec<u8>>, Receiver<T>) {
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(bound);
-    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe {
-        transmute(ManuallyDrop::new(tx))
-    };
-    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe {
-        transmute(ManuallyDrop::new(rx))
-    };
+    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
+    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
 
     let tx: Sender<Vec<u8>> = Sender {
         _pd: PhantomData,
         tx,
-        f: bypass_sender::<T>,
-        d: type_drop_sender::<T>,
+        f: bypass_sender::<Vec<u8>>,
+        d: type_drop_sender::<Vec<u8>>,
     };
 
     let rx: Receiver<T> = Receiver {
         _pd: PhantomData,
         rx,
         f: deser_receiver::<T>,
-        d: type_drop_receiver::<T>,
+        d: type_drop_receiver::<Vec<u8>>,
     };
 
     (tx, rx)
@@ -176,7 +163,7 @@ fn ser_sender<T: Serialize>(tx: *const mpsc::SyncSender<Never>, t: *const Never)
 
     match tx.send(ser) {
         Ok(()) => SerOutcome::Taken,
-        Err(mpsc::SendError(t)) => {
+        Err(mpsc::SendError(_unsent_vec)) => {
             core::mem::forget(t);
             SerOutcome::Untaken
         }
@@ -218,19 +205,14 @@ fn deser_receiver<T: DeserializeOwned>(
     }
 }
 
-fn bypass_receiver<T>(
-    rx: *const mpsc::Receiver<Never>,
-    t: *mut Never,
-) -> DeserOutcome {
+fn bypass_receiver<T>(rx: *const mpsc::Receiver<Never>, t: *mut Never) -> DeserOutcome {
     let rx: &mpsc::Receiver<T> = unsafe { &*rx.cast() };
     match rx.recv() {
         Ok(rec) => unsafe {
             t.cast::<T>().write(rec);
             DeserOutcome::Given
         },
-        Err(_) => {
-            DeserOutcome::Ungiven
-        }
+        Err(_) => DeserOutcome::Ungiven,
     }
 }
 
@@ -242,4 +224,253 @@ unsafe fn type_drop_sender<T>(container: &mut ManuallyDrop<mpsc::SyncSender<Neve
 unsafe fn type_drop_receiver<T>(container: &mut ManuallyDrop<mpsc::Receiver<Never>>) {
     let container: &mut ManuallyDrop<mpsc::Receiver<T>> = core::mem::transmute(container);
     ManuallyDrop::drop(container);
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Serialize, PartialEq)]
+    struct SerStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct DeStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct SerDeStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct UnSerStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[test]
+    fn normal_smoke() {
+        let (tx, rx) = channel::<UnSerStruct>(4);
+        tx.send(UnSerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        })
+        .unwrap();
+
+        tx.send(UnSerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        })
+        .unwrap();
+
+        tx.send(UnSerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            UnSerStruct {
+                a: 240,
+                b: -6_000,
+                c: 100_000,
+                d: String::from("hello"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            UnSerStruct {
+                a: 20,
+                b: -8000,
+                c: 200_000,
+                d: String::from("greets"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            UnSerStruct {
+                a: 100,
+                b: -1_000,
+                c: 300_000,
+                d: String::from("oh my"),
+            }
+        );
+    }
+
+    #[test]
+    fn normal_closed_rx() {
+        let (tx, rx) = channel::<UnSerStruct>(4);
+        drop(rx);
+        let res = tx.send(UnSerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+        assert_eq!(res, Err(UnSerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        }));
+    }
+
+    #[test]
+    fn normal_closed_tx() {
+        let (tx, rx) = channel::<UnSerStruct>(4);
+        drop(tx);
+        assert_eq!(rx.recv(), Err(RecvError::Oops));
+    }
+
+    #[test]
+    fn ser_smoke() {
+        let (tx, rx) = ser_channel::<SerStruct>(4);
+        tx.send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        })
+        .unwrap();
+
+        tx.send(SerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        })
+        .unwrap();
+
+        tx.send(SerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec![20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115]
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121]
+        );
+    }
+
+    #[test]
+    fn ser_closed_rx() {
+        let (tx, rx) = ser_channel::<SerStruct>(4);
+        drop(rx);
+        let res = tx.send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+        assert_eq!(res, Err(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        }));
+    }
+
+    #[test]
+    fn ser_closed_tx() {
+        let (tx, rx) = ser_channel::<SerStruct>(4);
+        drop(tx);
+        assert_eq!(rx.recv(), Err(RecvError::Oops));
+    }
+
+    #[test]
+    fn deser_smoke() {
+        let (tx, rx) = deser_channel::<DeStruct>(4);
+        tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+            .unwrap();
+
+        tx.send(vec![
+            20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115,
+        ])
+        .unwrap();
+
+        tx.send(vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 240,
+                b: -6_000,
+                c: 100_000,
+                d: String::from("hello"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 20,
+                b: -8000,
+                c: 200_000,
+                d: String::from("greets"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 100,
+                b: -1_000,
+                c: 300_000,
+                d: String::from("oh my"),
+            }
+        );
+    }
+
+    #[test]
+    fn deser_closed_rx() {
+        let (tx, rx) = deser_channel::<DeStruct>(4);
+        drop(rx);
+        let res = tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
+        assert_eq!(res, Err(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]));
+    }
+
+    #[test]
+    fn deser_closed_tx() {
+        let (tx, rx) = deser_channel::<DeStruct>(4);
+        drop(tx);
+        assert_eq!(rx.recv(), Err(RecvError::Oops));
+    }
 }
