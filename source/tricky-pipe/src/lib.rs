@@ -13,6 +13,11 @@ enum SendOutcome {
     Untaken,
 }
 
+enum SendRefOutcome {
+    Success,
+    Failure,
+}
+
 enum RecvOutcome {
     Given,
     Ungiven,
@@ -33,7 +38,9 @@ trait Frame {
 
 
 type SendFunc = fn(*const mpsc::SyncSender<Never>, *const Never) -> SendOutcome;
+type SendRefFunc = fn(*const mpsc::SyncSender<Never>, &[u8]) -> SendRefOutcome;
 type RecvFunc = fn(*const mpsc::Receiver<Never>, *mut Never) -> RecvOutcome;
+type RecvRefFunc = fn(*const mpsc::Receiver<Never>, &mut [u8]) -> Result<&mut [u8], ()>;
 type SenderDropFunc = unsafe fn(&mut ManuallyDrop<mpsc::SyncSender<Never>>);
 type ReceiverDropFunc = unsafe fn(&mut ManuallyDrop<mpsc::Receiver<Never>>);
 
@@ -56,6 +63,27 @@ impl<T> Sender<T> {
 }
 
 impl<T> Drop for Sender<T> {
+    fn drop(&mut self) {
+        unsafe { (self.d)(&mut self.tx) }
+    }
+}
+
+pub struct RefSender {
+    tx: ManuallyDrop<mpsc::SyncSender<Never>>,
+    f: SendRefFunc,
+    d: SenderDropFunc,
+}
+
+impl RefSender {
+    pub fn send_slice(&self, sli: &[u8]) -> Result<(), ()> {
+        match (self.f)(self.tx.deref(), sli) {
+            SendRefOutcome::Success => Ok(()),
+            SendRefOutcome::Failure => Err(()),
+        }
+    }
+}
+
+impl Drop for RefSender {
     fn drop(&mut self) {
         unsafe { (self.d)(&mut self.tx) }
     }
@@ -87,6 +115,24 @@ impl<T> Receiver<T> {
 }
 
 impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        unsafe { (self.d)(&mut self.rx) }
+    }
+}
+
+pub struct RefReceiver {
+    rx: ManuallyDrop<mpsc::Receiver<Never>>,
+    f: RecvRefFunc,
+    d: ReceiverDropFunc,
+}
+
+impl RefReceiver {
+    pub fn recv_slice<'a>(&self, sli: &'a mut [u8]) -> Result<&'a mut [u8], ()> {
+        (self.f)(self.rx.deref(), sli)
+    }
+}
+
+impl Drop for RefReceiver {
     fn drop(&mut self) {
         unsafe { (self.d)(&mut self.rx) }
     }
@@ -136,6 +182,27 @@ pub fn ser_channel<T: Serialize>(bound: usize) -> (Sender<T>, Receiver<Vec<u8>>)
     (tx, rx)
 }
 
+pub fn ser_ref_channel<T: Serialize>(bound: usize) -> (Sender<T>, RefReceiver) {
+    let (tx, rx) = mpsc::sync_channel::<T>(bound);
+    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
+    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
+
+    let tx: Sender<T> = Sender {
+        _pd: PhantomData,
+        tx,
+        f: bypass_sender::<T>,
+        d: type_drop_sender::<T>,
+    };
+
+    let rx: RefReceiver = RefReceiver {
+        rx,
+        f: ser_ref_receiver::<T>,
+        d: type_drop_receiver::<T>,
+    };
+
+    (tx, rx)
+}
+
 pub fn deser_channel<T: DeserializeOwned>(bound: usize) -> (Sender<Vec<u8>>, Receiver<T>) {
     let (tx, rx) = mpsc::sync_channel::<T>(bound);
     let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
@@ -158,8 +225,45 @@ pub fn deser_channel<T: DeserializeOwned>(bound: usize) -> (Sender<Vec<u8>>, Rec
     (tx, rx)
 }
 
+pub fn deser_ref_channel<T: DeserializeOwned>(bound: usize) -> (RefSender, Receiver<T>) {
+    let (tx, rx) = mpsc::sync_channel::<T>(bound);
+    let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
+    let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
+
+    let tx: RefSender = RefSender {
+        tx,
+        f: deser_ref_sender::<T>,
+        d: type_drop_sender::<T>,
+    };
+
+    let rx: Receiver<T> = Receiver {
+        _pd: PhantomData,
+        rx,
+        f: bypass_receiver::<T>,
+        d: type_drop_receiver::<T>,
+    };
+
+    (tx, rx)
+}
+
 pub fn frame_channel<T>(bound: usize) -> (Sender<Vec<u8>>, Receiver<Vec<u8>>) {
     channel::<Vec<u8>>(bound)
+}
+
+fn deser_ref_sender<T: DeserializeOwned>(tx: *const mpsc::SyncSender<Never>, sli: &[u8]) -> SendRefOutcome {
+    let tx: &mpsc::SyncSender<T> = unsafe { &*tx.cast() };
+
+    let deser = match postcard::from_bytes(sli) {
+        Ok(des) => des,
+        Err(_) => {
+            return SendRefOutcome::Failure;
+        },
+    };
+
+    match tx.send(deser) {
+        Ok(_) => SendRefOutcome::Success,
+        Err(_) => SendRefOutcome::Failure,
+    }
 }
 
 fn deser_sender<T: DeserializeOwned>(tx: *const mpsc::SyncSender<Never>, vec_in: *const Never) -> SendOutcome {
@@ -214,6 +318,22 @@ fn ser_receiver<T: Serialize>(
             RecvOutcome::Given
         },
         Err(_) => RecvOutcome::Ungiven,
+    }
+}
+
+fn ser_ref_receiver<T: Serialize>(
+    rx: *const mpsc::Receiver<Never>,
+    sli: &mut [u8],
+) -> Result<&mut [u8], ()> {
+    let rx: &mpsc::Receiver<T> = unsafe { &*rx.cast() };
+    let ty = match rx.recv() {
+        Ok(t) => t,
+        Err(_) => return Err(())
+    };
+
+    match postcard::to_slice(&ty, sli) {
+        Ok(sli_out) => Ok(sli_out),
+        Err(_) => Err(()),
     }
 }
 
@@ -426,6 +546,78 @@ mod test {
         assert_eq!(rx.recv(), Err(RecvError::Oops));
     }
 
+
+    #[test]
+    fn ser_ref_smoke() {
+        let (tx, rx) = ser_ref_channel::<SerStruct>(4);
+        tx.send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        })
+        .unwrap();
+
+        tx.send(SerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        })
+        .unwrap();
+
+        tx.send(SerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        })
+        .unwrap();
+
+        let mut buf = [0u8; 128];
+
+        assert_eq!(
+            rx.recv_slice(&mut buf).unwrap(),
+            &mut [240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]
+        );
+
+        assert_eq!(
+            rx.recv_slice(&mut buf).unwrap(),
+            &mut [20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115]
+        );
+
+        assert_eq!(
+            rx.recv_slice(&mut buf).unwrap(),
+            &mut [100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121]
+        );
+    }
+
+    #[test]
+    fn ser_ref_closed_rx() {
+        let (tx, rx) = ser_ref_channel::<SerStruct>(4);
+        drop(rx);
+        let res = tx.send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+        assert_eq!(res, Err(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        }));
+    }
+
+    #[test]
+    fn ser_ref_closed_tx() {
+        let (tx, rx) = ser_ref_channel::<SerStruct>(4);
+        drop(tx);
+        let mut buf = [0u8; 128];
+        assert_eq!(rx.recv_slice(&mut buf), Err(()));
+    }
+
     #[test]
     fn deser_smoke() {
         let (tx, rx) = deser_channel::<DeStruct>(4);
@@ -482,6 +674,67 @@ mod test {
     #[test]
     fn deser_closed_tx() {
         let (tx, rx) = deser_channel::<DeStruct>(4);
+        drop(tx);
+        assert_eq!(rx.recv(), Err(RecvError::Oops));
+    }
+
+
+    #[test]
+    fn deser_ref_smoke() {
+        let (tx, rx) = deser_ref_channel::<DeStruct>(4);
+        tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+            .unwrap();
+
+        tx.send_slice(&[
+            20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115,
+        ])
+        .unwrap();
+
+        tx.send_slice(&[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+            .unwrap();
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 240,
+                b: -6_000,
+                c: 100_000,
+                d: String::from("hello"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 20,
+                b: -8000,
+                c: 200_000,
+                d: String::from("greets"),
+            }
+        );
+
+        assert_eq!(
+            rx.recv().unwrap(),
+            DeStruct {
+                a: 100,
+                b: -1_000,
+                c: 300_000,
+                d: String::from("oh my"),
+            }
+        );
+    }
+
+    #[test]
+    fn deser_ref_closed_rx() {
+        let (tx, rx) = deser_ref_channel::<DeStruct>(4);
+        drop(rx);
+        let res = tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
+        assert_eq!(res, Err(()));
+    }
+
+    #[test]
+    fn deser_ref_closed_tx() {
+        let (tx, rx) = deser_ref_channel::<DeStruct>(4);
         drop(tx);
         assert_eq!(rx.recv(), Err(RecvError::Oops));
     }
