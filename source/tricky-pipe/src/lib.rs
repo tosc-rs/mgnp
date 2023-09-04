@@ -8,18 +8,32 @@ use serde::Serialize;
 
 enum Never {}
 
-enum SerOutcome {
+enum SendOutcome {
     Taken,
     Untaken,
 }
 
-enum DeserOutcome {
+enum RecvOutcome {
     Given,
     Ungiven,
 }
 
-type SendFunc = fn(*const mpsc::SyncSender<Never>, *const Never) -> SerOutcome;
-type RecvFunc = fn(*const mpsc::Receiver<Never>, *mut Never) -> DeserOutcome;
+trait FrameHolder {
+    type F: Frame;
+    // TODO: async fn alloc
+    fn try_alloc(&self) -> Option<Self::F>;
+}
+
+trait Frame {
+    fn as_slice(&self) -> &[u8];
+    fn as_mut_slice(&mut self) -> &mut [u8];
+    fn set_len(&mut self, len: usize);
+}
+
+
+
+type SendFunc = fn(*const mpsc::SyncSender<Never>, *const Never) -> SendOutcome;
+type RecvFunc = fn(*const mpsc::Receiver<Never>, *mut Never) -> RecvOutcome;
 type SenderDropFunc = unsafe fn(&mut ManuallyDrop<mpsc::SyncSender<Never>>);
 type ReceiverDropFunc = unsafe fn(&mut ManuallyDrop<mpsc::Receiver<Never>>);
 
@@ -35,8 +49,8 @@ impl<T> Sender<T> {
         let inbox = MaybeUninit::new(t);
 
         match (self.f)(self.tx.deref(), inbox.as_ptr().cast()) {
-            SerOutcome::Taken => Ok(()),
-            SerOutcome::Untaken => Err(unsafe { inbox.assume_init() }),
+            SendOutcome::Taken => Ok(()),
+            SendOutcome::Untaken => Err(unsafe { inbox.assume_init() }),
         }
     }
 }
@@ -66,8 +80,8 @@ impl<T> Receiver<T> {
         let outref: *mut Never = outref.cast();
 
         match (self.f)(self.rx.deref(), outref) {
-            DeserOutcome::Given => Ok(unsafe { outbox.assume_init() }),
-            DeserOutcome::Ungiven => Err(RecvError::Oops),
+            RecvOutcome::Given => Ok(unsafe { outbox.assume_init() }),
+            RecvOutcome::Ungiven => Err(RecvError::Oops),
         }
     }
 }
@@ -101,44 +115,44 @@ pub fn channel<T>(bound: usize) -> (Sender<T>, Receiver<T>) {
 }
 
 pub fn ser_channel<T: Serialize>(bound: usize) -> (Sender<T>, Receiver<Vec<u8>>) {
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(bound);
+    let (tx, rx) = mpsc::sync_channel::<T>(bound);
     let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
     let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
 
     let tx: Sender<T> = Sender {
         _pd: PhantomData,
         tx,
-        f: ser_sender::<T>,
-        d: type_drop_sender::<Vec<u8>>,
+        f: bypass_sender::<T>,
+        d: type_drop_sender::<T>,
     };
 
     let rx: Receiver<Vec<u8>> = Receiver {
         _pd: PhantomData,
         rx,
-        f: bypass_receiver::<Vec<u8>>,
-        d: type_drop_receiver::<Vec<u8>>,
+        f: ser_receiver::<T>,
+        d: type_drop_receiver::<T>,
     };
 
     (tx, rx)
 }
 
 pub fn deser_channel<T: DeserializeOwned>(bound: usize) -> (Sender<Vec<u8>>, Receiver<T>) {
-    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(bound);
+    let (tx, rx) = mpsc::sync_channel::<T>(bound);
     let tx: ManuallyDrop<mpsc::SyncSender<Never>> = unsafe { transmute(ManuallyDrop::new(tx)) };
     let rx: ManuallyDrop<mpsc::Receiver<Never>> = unsafe { transmute(ManuallyDrop::new(rx)) };
 
     let tx: Sender<Vec<u8>> = Sender {
         _pd: PhantomData,
         tx,
-        f: bypass_sender::<Vec<u8>>,
-        d: type_drop_sender::<Vec<u8>>,
+        f: deser_sender::<T>,
+        d: type_drop_sender::<T>,
     };
 
     let rx: Receiver<T> = Receiver {
         _pd: PhantomData,
         rx,
-        f: deser_receiver::<T>,
-        d: type_drop_receiver::<Vec<u8>>,
+        f: bypass_receiver::<T>,
+        d: type_drop_receiver::<T>,
     };
 
     (tx, rx)
@@ -148,71 +162,69 @@ pub fn frame_channel<T>(bound: usize) -> (Sender<Vec<u8>>, Receiver<Vec<u8>>) {
     channel::<Vec<u8>>(bound)
 }
 
-fn ser_sender<T: Serialize>(tx: *const mpsc::SyncSender<Never>, t: *const Never) -> SerOutcome {
-    let t: *const T = t.cast();
-    let t: T = unsafe { t.read() };
-    let tx: &mpsc::SyncSender<Vec<u8>> = unsafe { &*tx.cast() };
+fn deser_sender<T: DeserializeOwned>(tx: *const mpsc::SyncSender<Never>, vec_in: *const Never) -> SendOutcome {
+    let vec_in: *const Vec<u8> = vec_in.cast();
+    let vec_in: Vec<u8> = unsafe { vec_in.read() };
+    let tx: &mpsc::SyncSender<T> = unsafe { &*tx.cast() };
 
-    let ser = match postcard::to_stdvec(&t) {
-        Ok(s) => s,
+    let deser = match postcard::from_bytes(vec_in.as_slice()) {
+        Ok(des) => des,
         Err(_) => {
-            core::mem::forget(t);
-            return SerOutcome::Untaken;
-        }
+            core::mem::forget(vec_in);
+            return SendOutcome::Untaken;
+        },
     };
 
-    match tx.send(ser) {
-        Ok(()) => SerOutcome::Taken,
-        Err(mpsc::SendError(_unsent_vec)) => {
-            core::mem::forget(t);
-            SerOutcome::Untaken
-        }
+    match tx.send(deser) {
+        Ok(_) => SendOutcome::Taken,
+        Err(_unsent_ty) => {
+            core::mem::forget(vec_in);
+            SendOutcome::Untaken
+        },
     }
 }
 
-fn bypass_sender<T>(tx: *const mpsc::SyncSender<Never>, t: *const Never) -> SerOutcome {
+fn bypass_sender<T>(tx: *const mpsc::SyncSender<Never>, t: *const Never) -> SendOutcome {
     let t: *const T = t.cast();
     let t: T = unsafe { t.read() };
     let tx: &mpsc::SyncSender<T> = unsafe { &*tx.cast() };
 
     match tx.send(t) {
-        Ok(()) => SerOutcome::Taken,
+        Ok(()) => SendOutcome::Taken,
         Err(mpsc::SendError(t)) => {
             core::mem::forget(t);
-            SerOutcome::Untaken
+            SendOutcome::Untaken
         }
     }
 }
 
-fn deser_receiver<T: DeserializeOwned>(
+fn ser_receiver<T: Serialize>(
     rx: *const mpsc::Receiver<Never>,
-    t: *mut Never,
-) -> DeserOutcome {
-    let rx: &mpsc::Receiver<Vec<u8>> = unsafe { &*rx.cast() };
-    let buf = match rx.recv() {
-        Ok(v) => v,
-        Err(_) => {
-            return DeserOutcome::Ungiven;
-        }
+    vec_out: *mut Never,
+) -> RecvOutcome {
+    let rx: &mpsc::Receiver<T> = unsafe { &*rx.cast() };
+    let ty = match rx.recv() {
+        Ok(t) => t,
+        Err(_) => return RecvOutcome::Ungiven,
     };
 
-    match postcard::from_bytes::<T>(&buf) {
-        Ok(deser) => unsafe {
-            t.cast::<T>().write(deser);
-            DeserOutcome::Given
+    match postcard::to_stdvec(&ty) {
+        Ok(v_out) => unsafe {
+            vec_out.cast::<Vec<u8>>().write(v_out);
+            RecvOutcome::Given
         },
-        Err(_) => DeserOutcome::Ungiven,
+        Err(_) => RecvOutcome::Ungiven,
     }
 }
 
-fn bypass_receiver<T>(rx: *const mpsc::Receiver<Never>, t: *mut Never) -> DeserOutcome {
+fn bypass_receiver<T>(rx: *const mpsc::Receiver<Never>, t: *mut Never) -> RecvOutcome {
     let rx: &mpsc::Receiver<T> = unsafe { &*rx.cast() };
     match rx.recv() {
         Ok(rec) => unsafe {
             t.cast::<T>().write(rec);
-            DeserOutcome::Given
+            RecvOutcome::Given
         },
-        Err(_) => DeserOutcome::Ungiven,
+        Err(_) => RecvOutcome::Ungiven,
     }
 }
 

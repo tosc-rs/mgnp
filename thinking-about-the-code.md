@@ -74,10 +74,23 @@ time.
 
 Can we make the `Receiver` and `Sender`s have the same type, even if they aren't the same under the hood (e.g. one that ser/des from a Frame pipe, and one that doesn't)? So what would this selection look like?
 
-| Sender    | Receiver  | Pipe      | Use Case                                      |
+| Sender    | Pipe      | Receiver  | Use Case                                      |
 | :---      | :---      | :---      | :---                                          |
 | T         | T         | T         | Client/Service on same machine                |
 | T         | Frame     | Frame     | C/S sending to interface? (C/S Ser)           |
-| Frame     | T         | Frame     | Interface sending to C/S? (C/S Deser)         |
+| Frame     | Frame     | T         | Interface sending to C/S? (C/S Deser)         |
 | Frame     | Frame     | Frame     | Interface sending to Interface (no ser/de)    |
 
+| Sender    | Pipe      | Receiver  | Use Case                                      |
+| :---      | :---      | :---      | :---                                          |
+| T         | T         | T         | No Frames                                     |
+| T         | Frame     | Frame     | Summoned and given away                       |
+| Frame     | Frame     | T         | Given and thrown away                         |
+| Frame     | Frame     | Frame     | Given and given away                          |
+
+| Sender    | Pipe      | Receiver  | Use Case
+| :---      | :---      | :---      | :---
+| T         | T         | T         | Never needs to store frames                   |
+| T         | T         | Frame     | Frame must be created at withdrawl            |
+| Frame     | T         | T         | Never needs to store frames                   |
+| Frame     | Frame     | Frame     | Stores frames, but 1 in one out               |
