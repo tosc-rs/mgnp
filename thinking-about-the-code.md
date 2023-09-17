@@ -94,3 +94,61 @@ Can we make the `Receiver` and `Sender`s have the same type, even if they aren't
 | T         | T         | Frame     | Frame must be created at withdrawl            |
 | Frame     | T         | T         | Never needs to store frames                   |
 | Frame     | Frame     | Frame     | Stores frames, but 1 in one out               |
+
+
+* Sender kinds:
+    * `T` -> gets `send`
+        * Reciever: d/c, always T on the pipe
+    * `Vec<u8>`
+        * Receiver: T -> gets send and send_slice
+        * Receiver: `Vec<u8>` gets send, NOT send_slice? would require a weird clone?
+    * `&[u8]` -> gets `send_slice`
+        * Receiver: T -> gets send_slice
+        * Receiver: `Vec<u8>` not allowed?
+* Receiver kinds:
+    * `T` -> gets `recv`
+        * Sender: d/c, always T on the pipe
+    * `Vec<u8>`
+
+| Sender    | Pipe      | Receiver  | Notes                                 | send  | send_ref  | recv  | recv_into | Want?     |
+| :---      | :---      | :---      |                                       | :--   | :--       | :--   | :--       | :--       |
+| T         | T         | T         |                                       | Y     | N         | Y     | N         | Y         |
+| T         | T         | BoxFrame  |                                       | Y     | N         | Y     | N         | Y         |
+| T         | T         | RefFrame  |                                       | Y     | N         | N     | Y?        | Y?        |
+| BoxFrame  | T         | T         |                                       | Y     | N         | Y     | N         | Y         |
+| BoxFrame  | BoxFrame  | BoxFrame  | This is just T,T,T in another hat     | Y     | N         | Y     | N         | N*        |
+| BoxFrame  | T         | RefFrame  | Not allowed? or `recv_into`?          | -     | -         | -     | -         | N         |
+| RefFrame  | T         | T         |                                       | N     | Y         | Y     | N         | Y         |
+| RefFrame  | BoxFrame? | BoxFrame  | Not allowed?                          | -     | -         | -     | -         | N         |
+| RefFrame  | ?         | RefFrame  | Not allowed? basically bbqueue?       | -     | -         | -     | -         | N         |
+
+
+| Sender    | Pipe      | Receiver  | send  | send_ref  | recv  | recv_into | Want?     |
+| :---      | :---      | :---      | :--   | :--       | :--   | :--       | :--       |
+| T         | T         | T         | Y     | N         | Y     | N         | Y         |
+| T         | T         | BoxFrame  | Y     | N         | Y     | N         | Y         |
+| BoxFrame  | T         | T         | Y     | N         | Y     | N         | Y         |
+| RefFrame  | T         | T         | N     | Y         | Y     | N         | Y         |
+| T         | T         | RefFrame  | Y     | N         | N     | Y?        | Y?        |
+
+* Sender:
+    * T gets send
+    * BoxFrame gets send
+    * RefFrame gets send_ref
+* Receiver:
+    * T gets recv
+    * BoxFrame gets recv
+    * RefFrame gets recv_into
+
+So valid combos:
+
+* `(T, T)`      - channel               - `(Sender<T>, Receiver<T>)`
+    * `send(T)`, `recv() -> T`
+* `(T, Vec)`    - ser_channel           - `(Sender<T>, Receiver<F: Frame>)`
+    * `send(T)`, `recv() -> Frame`
+* `(T, &[u8])`  - ser_ref_channel       - `(Sender<T>, Receiver<BorrowFrame>)`
+    * `send(T)`, `recv_ref(&mut [u8]) -> Result<&mut [u8]>`
+* `(Vec, T)`    - deser_channel         - `(Sender<F: Frame>, Receiver<T>)`
+    * `send(Frame)`, `recv() -> T`
+* `(&[u8], T)`  - deser_ref_channel     - `(Sender<BorrowFrame>, Receiver<T>)`
+    * `send_ref(&[u8])`, `recv() -> T`
