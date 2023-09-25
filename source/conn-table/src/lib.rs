@@ -28,8 +28,15 @@ pub enum Frame {
     Nak { remote_id: Id },
 }
 
-/// Indicates that the `ConnTable` was full, returning the inserted item.
-pub struct Full<T>(T);
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ProcessAckError {
+    /// The connection tracking table doesn't have a connection for the provided ID.
+    NoSocket,
+    /// The connection was already acked by the remote, so they acked it again
+    /// for some reason?
+    AlreadyEstablished { remote_id: Id },
+}
 
 enum Entry {
     Unused,
@@ -54,13 +61,44 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     #[must_use]
-    pub fn connect(&mut self) -> Option<Frame> {
+    pub fn start_connecting(&mut self) -> Option<Frame> {
         let sock = Socket {
             state: State::Connecting,
         };
         let local_id = self.insert(sock)?;
 
         Some(Frame::Connect { local_id })
+    }
+
+    /// Process an ack for a connecting socket with `local_id`.
+    #[must_use]
+    pub fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), ProcessAckError> {
+        let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
+            tracing::trace!(?local_id, ?remote_id, "process_ack: no such socket");
+            return Err(ProcessAckError::NoSocket);
+        };
+
+        match sock.state {
+            State::Open {
+                remote_id: real_remote_id,
+            } => {
+                tracing::trace!(
+                    ?local_id,
+                    ?remote_id,
+                    ?real_remote_id,
+                    "process_ack: socket is not connecting"
+                );
+                Err(ProcessAckError::AlreadyEstablished {
+                    remote_id: real_remote_id,
+                })
+            }
+            ref mut state @ State::Connecting => {
+                *state = State::Open { remote_id };
+
+                tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
+                Ok(())
+            }
+        }
     }
 
     #[must_use]
