@@ -30,7 +30,7 @@ pub enum Frame {
 
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum ProcessAckError {
+pub enum ConfirmError {
     /// The connection tracking table doesn't have a connection for the provided ID.
     NoSocket,
     /// The connection was already acked by the remote, so they acked it again
@@ -60,6 +60,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
+    /// Start a locally-initiated connecting socket, returning the frame to send
+    /// in order to initiate that connection.
     #[must_use]
     pub fn start_connecting(&mut self) -> Option<Frame> {
         let sock = Socket {
@@ -70,12 +72,11 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         Some(Frame::Connect { local_id })
     }
 
-    /// Process an ack for a connecting socket with `local_id`.
-    #[must_use]
-    pub fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), ProcessAckError> {
+    /// Process an ack for a locally-initiated connecting socket with `local_id`.
+    pub fn confirm(&mut self, local_id: Id, remote_id: Id) -> Result<(), ConfirmError> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
             tracing::trace!(?local_id, ?remote_id, "process_ack: no such socket");
-            return Err(ProcessAckError::NoSocket);
+            return Err(ConfirmError::NoSocket);
         };
 
         match sock.state {
@@ -88,7 +89,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     ?real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Err(ProcessAckError::AlreadyEstablished {
+                Err(ConfirmError::AlreadyEstablished {
                     remote_id: real_remote_id,
                 })
             }
@@ -101,6 +102,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
+    /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
     pub fn accept(&mut self, remote_id: Id) -> Frame {
         let sock = Socket {
