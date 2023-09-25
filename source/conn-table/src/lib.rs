@@ -4,15 +4,10 @@ use core::{mem, num::NonZeroU16};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(NonZeroU16);
 
-pub struct ConnTable<const CAPACITY: usize> {
-    conns: Entries<CAPACITY>,
+pub struct ConnTable<T, const CAPACITY: usize> {
+    conns: Entries<T, CAPACITY>,
     next_id: Id,
     len: usize,
-}
-
-#[derive(Debug)]
-pub struct Socket {
-    pub state: State,
 }
 
 #[derive(Debug)]
@@ -38,17 +33,23 @@ pub enum ConfirmError {
     AlreadyEstablished { remote_id: Id },
 }
 
-enum Entry {
+#[derive(Debug)]
+struct Socket<T> {
+    state: State,
+    bidi: T,
+}
+
+enum Entry<T> {
     Unused,
     Closed(Id),
-    Occupied(Socket),
+    Occupied(Socket<T>),
 }
 
 /// Wrapper struct so we can have a `get_mut` that's indexed by `Id`, basically.
-struct Entries<const CAPACITY: usize>([Entry; CAPACITY]);
+struct Entries<T, const CAPACITY: usize>([Entry<T>; CAPACITY]);
 
-impl<const CAPACITY: usize> ConnTable<CAPACITY> {
-    const ENTRY_UNUSED: Entry = Entry::Unused;
+impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY> {
+    const ENTRY_UNUSED: Entry<T> = Entry::Unused;
 
     #[must_use]
     pub const fn new() -> Self {
@@ -63,9 +64,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub fn start_connecting(&mut self) -> Option<Frame> {
+    pub fn start_connecting(&mut self, bidi: T) -> Option<Frame> {
         let sock = Socket {
             state: State::Connecting,
+            bidi,
         };
         let local_id = self.insert(sock)?;
 
@@ -104,9 +106,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    pub fn accept(&mut self, remote_id: Id) -> Frame {
+    pub fn accept(&mut self, remote_id: Id, bidi: T) -> Frame {
         let sock = Socket {
             state: State::Open { remote_id },
+            bidi,
         };
 
         match self.insert(sock) {
@@ -142,6 +145,14 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
+    pub fn get(&self, local_id: Id) -> Option<&T> {
+        self.conns.get(local_id).and_then(Entry::bidi)
+    }
+
+    pub fn get_mut(&mut self, local_id: Id) -> Option<&mut T> {
+        self.conns.get_mut(local_id).and_then(Entry::bidi_mut)
+    }
+
     #[must_use]
     #[inline]
     pub fn len(&self) -> usize {
@@ -155,7 +166,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     #[must_use]
-    fn insert(&mut self, socket: Socket) -> Option<Id> {
+    fn insert(&mut self, socket: Socket<T>) -> Option<Id> {
         // conn table full
         if self.len == CAPACITY {
             tracing::trace!(capacity = CAPACITY, "insert: conn table full");
@@ -184,6 +195,13 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
 impl Id {
     #[inline]
+    #[must_use]
+    fn to_index(self) -> usize {
+        // subtract 1 because the link-control channel is at index 0
+        self.0.get() as usize - 1
+    }
+
+    #[inline]
     fn checked_add(self, n: u16) -> Option<Self> {
         self.0.checked_add(n).map(Self)
     }
@@ -191,10 +209,34 @@ impl Id {
 
 // === impl Entries ===
 
-impl<const CAPACITY: usize> Entries<CAPACITY> {
-    fn get_mut(&mut self, Id(local_id): Id) -> Option<&mut Entry> {
-        // subtract 1 because the link-control channel is at index 0
-        let idx = local_id.get() as usize - 1;
-        self.0.get_mut(idx)
+impl<T, const CAPACITY: usize> Entries<T, CAPACITY> {
+    #[inline]
+    #[must_use]
+    fn get(&self, local_id: Id) -> Option<&Entry<T>> {
+        self.0.get(local_id.to_index())
+    }
+
+    #[inline]
+    #[must_use]
+    fn get_mut(&mut self, local_id: Id) -> Option<&mut Entry<T>> {
+        self.0.get_mut(local_id.to_index())
+    }
+}
+
+// === impl Entries ===
+
+impl<T> Entry<T> {
+    fn bidi(&self) -> Option<&T> {
+        match self {
+            Entry::Occupied(ref sock) => Some(&sock.bidi),
+            _ => None,
+        }
+    }
+
+    fn bidi_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Entry::Occupied(ref mut sock) => Some(&mut sock.bidi),
+            _ => None,
+        }
     }
 }
