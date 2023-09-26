@@ -1,6 +1,8 @@
 #![feature(async_fn_in_trait)]
 
+use conn_table::ConnTable;
 use uuid::Uuid;
+mod conn_table;
 
 pub trait Frame {
     fn as_bytes(&self) -> &[u8];
@@ -18,7 +20,10 @@ where
     Wi: Wire<F = Fr>,
 {
     wire: Wi,
+    conn_table: ConnTable<(), CONN_TABLE_CAPACITY>,
 }
+
+pub const CONN_TABLE_CAPACITY: usize = 512;
 
 struct Identity {
     id: Uuid,
