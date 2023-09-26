@@ -33,6 +33,14 @@ pub enum ConfirmError {
     /// for some reason?
     AlreadyEstablished { remote_id: Id },
 }
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum InboundError {
+    /// The connection tracking table doesn't have a connection for the provided ID.
+    NoSocket,
+}
+
 #[derive(Debug)]
 struct Socket<T> {
     state: State,
@@ -71,6 +79,11 @@ where
         todo!()
     }
 
+    /// Process an inbound frame.
+    pub async fn process_inbound(&mut self, frame: T::Frame) -> Result<(), InboundError> {
+        todo!("eliza")
+    }
+
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
@@ -81,7 +94,7 @@ where
         };
         let local_id = self.insert(sock)?;
 
-        Some(Frame::Connect { local_id })
+        Some(OutboundFrame::Connect { local_id })
     }
 
     /// Process an ack for a locally-initiated connecting socket with `local_id`.
