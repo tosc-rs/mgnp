@@ -9,6 +9,11 @@ edition = "2021"
 heapless = "0.7.16"
 tracing = { version = "0.1.21", default-features = false }
 
+[dependencies.futures]
+version = "0.3.17"
+default-features = false
+features = ["async-await"]
+
 [dependencies.serde]
 version = "1.0.188"
 default-features = false

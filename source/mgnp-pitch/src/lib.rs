@@ -1,7 +1,10 @@
 #![feature(async_fn_in_trait)]
+#![cfg_attr(not(test), no_std)]
 
 use conn_table::ConnTable;
+use futures::FutureExt;
 use uuid::Uuid;
+
 mod conn_table;
 
 pub trait Frame {
@@ -9,18 +12,21 @@ pub trait Frame {
 }
 
 pub trait Wire {
-    type F: Frame;
-    async fn send(&self, f: Self::F) -> Result<(), ()>;
-    async fn recv(&self) -> Result<Self::F, ()>;
+    type Frame: Frame;
+    async fn send(&self, f: Self::Frame) -> Result<(), ()>;
+    async fn recv(&self) -> Result<Self::Frame, ()>;
 }
 
-pub struct Interface<Fr, Wi>
+pub struct Interface<Fr, Wi, Lcl>
 where
     Fr: Frame,
-    Wi: Wire<F = Fr>,
+    // Remote wire type
+    Wi: Wire<Frame = Fr>,
+    // Local connection type
+    Lcl: Wire<Frame = Fr>,
 {
     wire: Wi,
-    conn_table: ConnTable<(), CONN_TABLE_CAPACITY>,
+    conn_table: ConnTable<Lcl, CONN_TABLE_CAPACITY>,
 }
 
 pub const CONN_TABLE_CAPACITY: usize = 512;
@@ -35,3 +41,27 @@ enum IdentityKind {
 }
 
 struct Registry {}
+
+impl<Fr, Wi, Lcl> Interface<Fr, Wi, Lcl>
+where
+    Fr: Frame,
+    Wi: Wire<Frame = Fr>,
+    Lcl: Wire<Frame = Fr>,
+{
+    pub async fn handle_connection(&mut self) -> Result<(), ()> {
+        let Self { wire, conn_table } = self;
+        loop {
+            let msg = futures::select_biased! {
+                // inbound frame from the wire.
+                frame = wire.recv().fuse() => frame,
+                // either a connection needs to send data, or a connection has
+                // closed locally.
+                frame = conn_table.next_outbound().fuse() => {
+                    let frame: Fr = todo!("eliza: serialize outbound msg to frame; may need interface changes...");
+                    self.wire.send(frame).await?;
+                },
+                // OR handle local conn request (need to figure out API for this...)
+            };
+        }
+    }
+}

@@ -1,4 +1,4 @@
-#![cfg_attr(not(test), no_std)]
+use crate::{Frame, Wire};
 use core::{mem, num::NonZeroU16};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,10 +17,11 @@ pub enum State {
 }
 
 #[derive(Debug)]
-pub enum Frame {
+pub enum OutboundFrame<F> {
     Connect { local_id: Id },
     Ack { local_id: Id, remote_id: Id },
     Nak { remote_id: Id },
+    Data { local_id: Id, data: F },
 }
 
 #[derive(Debug)]
@@ -32,7 +33,6 @@ pub enum ConfirmError {
     /// for some reason?
     AlreadyEstablished { remote_id: Id },
 }
-
 #[derive(Debug)]
 struct Socket<T> {
     state: State,
@@ -48,7 +48,12 @@ enum Entry<T> {
 /// Wrapper struct so we can have a `get_mut` that's indexed by `Id`, basically.
 struct Entries<T, const CAPACITY: usize>([Entry<T>; CAPACITY]);
 
-impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY> {
+impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY>
+where
+    // XXX(eliza): we are using "wire" for in-mem bidis here. maybe the trait
+    // should be called something else?
+    T: Wire,
+{
     const ENTRY_UNUSED: Entry<T> = Entry::Unused;
 
     #[must_use]
@@ -61,10 +66,15 @@ impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY> {
         }
     }
 
+    /// Returns the next outbound frame.
+    pub async fn next_outbound(&mut self) -> OutboundFrame<T::Frame> {
+        todo!()
+    }
+
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub fn start_connecting(&mut self, bidi: T) -> Option<Frame> {
+    pub fn start_connecting(&mut self, bidi: T) -> Option<OutboundFrame<T::Frame>> {
         let sock = Socket {
             state: State::Connecting,
             bidi,
@@ -106,7 +116,7 @@ impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    pub fn accept(&mut self, remote_id: Id, bidi: T) -> Frame {
+    pub fn accept(&mut self, remote_id: Id, bidi: T) -> OutboundFrame<T::Frame> {
         let sock = Socket {
             state: State::Open { remote_id },
             bidi,
@@ -114,12 +124,12 @@ impl<T, const CAPACITY: usize> ConnTable<T, CAPACITY> {
 
         match self.insert(sock) {
             // Accepted, we got a local ID!
-            Some(local_id) => Frame::Ack {
+            Some(local_id) => OutboundFrame::Ack {
                 local_id,
                 remote_id,
             },
             // Conn table is full, can't accept this stream.
-            None => Frame::Nak { remote_id },
+            None => OutboundFrame::Nak { remote_id },
         }
     }
 
