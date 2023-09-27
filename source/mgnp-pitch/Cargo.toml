@@ -20,11 +20,7 @@ features = ["v4"]
 
 [dependencies.spitebuf]
 git = "https://github.com/tosc-rs/mnemos"
-rev = "699928d4c677689b49bdc4e8b6abe8a04b24da6f"
+rev = "416b7d59fbc7fa889a774f54133786a584eb8732"
 
 [dependencies.maitake]
 version = "0.1"
-
-[patch.crates-io.maitake]
-git = "https://github.com/hawkw/mycelium.git"
-rev = "101a4abaa19afdd131b334a16d92c9fb4909c064"

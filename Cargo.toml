@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "source/*"
+]
+resolver = "2"
+
+
+[patch.crates-io.maitake]
+git = "https://github.com/hawkw/mycelium.git"
+rev = "101a4abaa19afdd131b334a16d92c9fb4909c064"
