@@ -196,6 +196,32 @@ impl<H, T, const N: usize> StaticPlugTail<H, T, N> {
     }
 }
 
+// Note that Pluggable is implemented for a REFERENCE to a static, NOT on a static
+// itself! This is intentional: this allows us to keep the "arc-like" cloneability
+// without making a copy to the underlying storage.
+//
+// However, this means in practice most people will need to have separate "storage"
+// and "do stuff" structures. This could mean something like:
+//
+// ```rust,skip
+// // This is where the `StaticPlugTail` goes
+// static WSTO: WhateverStorage = WhateverStorage::new();
+//
+// // This is the actual data structure
+// static WHATEVER: Whatever = Whatever::new(&WSTO);
+// ```
+//
+// OR
+//
+// ```rust,skip
+// // This is where the `StaticPlugTail` goes
+// static WSTO: WhateverStorage = WhateverStorage::new();
+//
+// fn main() {
+//     let whatever: Whatever = WSTO.take().unwrap();
+// }
+// ```
+
 impl<H, T, const N: usize> Pluggable for &'static StaticPlugTail<H, T, N>
 where
     H: BodyDrop<Item = T>,
