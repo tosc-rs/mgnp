@@ -16,3 +16,6 @@ features = ["use-std"]
 [dependencies.serde]
 version = "1.0.188"
 features = ["derive"]
+
+[dependencies.plugtail]
+path = "../plugtail"

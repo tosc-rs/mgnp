@@ -25,6 +25,8 @@ pub trait Pluggable: Clone {
     type Header: BodyDrop<Item = Self::Item>;
     type Item;
     fn storage(&self) -> PlugDat<'_, Self::Header, Self::Item>;
+    fn leak(self) -> *const ();
+    unsafe fn unleak(p: *const ()) -> Self;
 }
 
 /// This trait describes how a given Header type can tear down the body/tail when the total
@@ -166,6 +168,17 @@ pub mod alloc {
                 }
             }
         }
+
+        fn leak(self) -> *const () {
+            let base_ptr = self.pt.as_ptr();
+            core::mem::forget(self);
+            base_ptr.cast()
+        }
+
+        unsafe fn unleak(ptr: *const ()) -> Self {
+            // welp
+            Self { pt: NonNull::new_unchecked(ptr.cast_mut().cast()) }
+        }
     }
 }
 
@@ -242,5 +255,17 @@ where
             hdr: &self.pt.hdr,
             t: &self.tfr,
         }
+    }
+
+    fn leak(self) -> *const () {
+        let ptr: &'static StaticPlugTail<H, T, N> = self;
+        let ptr: *const StaticPlugTail<H, T, N> = ptr;
+        let ptr: *const () = ptr.cast();
+        ptr
+    }
+
+    unsafe fn unleak(p: *const ()) -> Self {
+        let ptr: *const StaticPlugTail<H, T, N> = p.cast();
+        &*ptr
     }
 }

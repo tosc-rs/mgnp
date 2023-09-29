@@ -595,6 +595,7 @@ name = "tricky-pipe"
 version = "0.1.0"
 dependencies = [
  "maitake-sync",
+ "plugtail",
  "portable-atomic",
  "postcard",
  "serde",
