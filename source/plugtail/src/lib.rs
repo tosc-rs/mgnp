@@ -178,10 +178,20 @@ pub struct StaticPlugTail<H, T, const N: usize> {
 impl<H, T, const N: usize> StaticPlugTail<H, T, N> {
     const ONE: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
 
-    pub const fn new(hdr: H) -> Self {
+    pub const fn uninit(hdr: H) -> Self {
         Self {
             pt: PlugTail { hdr, tail: [] },
             tfr: [Self::ONE; N],
+        }
+    }
+
+    // TODO: Is there any way we could make this not UC<MU<T>> and instead pass
+    // a [T; N]? That would be a much nicer API...
+    pub const fn new(hdr: H, val: [UnsafeCell<MaybeUninit<T>>; N]) -> Self
+    {
+        Self {
+            pt: PlugTail { hdr, tail: [] },
+            tfr: val,
         }
     }
 }
