@@ -96,7 +96,7 @@ pub mod alloc {
         fn drop(&mut self) {
             {
                 let ptref = unsafe { self.pt.as_ref() };
-                if ptref.hdr.strong.fetch_sub(1, Ordering::AcqRel) != 0 {
+                if ptref.hdr.strong.fetch_sub(1, Ordering::AcqRel) > 1 {
                     return;
                 }
             }
