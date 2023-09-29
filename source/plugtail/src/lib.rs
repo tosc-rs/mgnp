@@ -70,6 +70,9 @@ pub mod alloc {
         pt: NonNull<PlugTail<ArcHdr<H>, T>>,
     }
 
+    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Send for ArcPlugTail<H, T> { }
+    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Sync for ArcPlugTail<H, T> { }
+
     #[repr(C)]
     pub struct ArcHdr<H> {
         strong: AtomicUsize,
@@ -174,6 +177,11 @@ pub struct StaticPlugTail<H, T, const N: usize> {
     pt: PlugTail<H, T>,
     tfr: [UnsafeCell<MaybeUninit<T>>; N],
 }
+
+// TODO: should StaticPlugTail have any kind of blanket impl for
+// Send or Sync?
+unsafe impl<H: Send, T: Send, const N: usize> Send for StaticPlugTail<H, T, N> { }
+unsafe impl<H: Send, T: Send, const N: usize> Sync for StaticPlugTail<H, T, N> { }
 
 impl<H, T, const N: usize> StaticPlugTail<H, T, N> {
     const ONE: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());

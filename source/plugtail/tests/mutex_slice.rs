@@ -131,11 +131,6 @@ pub struct StaticAmsStorage<T, const N: usize> {
     sp: StaticPlugTail<AmsHdr<T>, T, N>,
 }
 
-// TODO: should StaticPlugTail have any kind of blanket impl for
-// Send or Sync?
-unsafe impl<T: Send, const N: usize> Send for StaticAmsStorage<T, N> { }
-unsafe impl<T: Send, const N: usize> Sync for StaticAmsStorage<T, N> { }
-
 impl<T, const N: usize> StaticAmsStorage<T, N> {
     const UNINIT: u8 = 0;
     const INITING: u8 = 1;
@@ -239,6 +234,18 @@ fn lock_works() {
 }
 
 #[test]
+fn send_arc_works() {
+    let x1: ArcAms<i32> = Ams::new_arc_with(10, || 123);
+    std::thread::spawn(move || {
+        let g = x1.try_lock().unwrap();
+
+        for v in g.deref() {
+            assert_eq!(*v, 123);
+        }
+    }).join().unwrap();
+}
+
+#[test]
 fn arc_works() {
     let x1: ArcAms<i32> = Ams::new_arc_with(10, || 123);
     let x2 = x1.clone();
@@ -282,6 +289,14 @@ fn static_works() {
 
     // Clone works - equivalent to second init-take
     let x3 = x1.clone();
+
+    // Yes these are pointing to the same place
+    let x1_addr = x1.try_lock().as_ref().unwrap().deref().as_ptr() as usize;
+    let x2_addr = x2.try_lock().as_ref().unwrap().deref().as_ptr() as usize;
+    let x3_addr = x3.try_lock().as_ref().unwrap().deref().as_ptr() as usize;
+    assert_eq!(x1_addr, x2_addr);
+    assert_eq!(x2_addr, x3_addr);
+    assert_eq!(x3_addr, x1_addr);
 
     // modify first one
     {
