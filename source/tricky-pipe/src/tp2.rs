@@ -30,8 +30,21 @@ mod sealed {
         pub(crate) pd: PhantomData<T>,
     }
 
+    impl<T> TPHdr<T> {
+        pub(crate) fn new_init() -> Self {
+            Self {
+                dequeue_pos: AtomicUsize::new(0),
+                enqueue_pos: AtomicUsize::new(0),
+                cons_wait: WaitCell::new(),
+                prod_wait: WaitQueue::new(),
+                state: AtomicU8::new(STATE_SPLIT),
+                pd: PhantomData,
+            }
+        }
+    }
+
     impl<T> BodyDrop for TPHdr<T> {
-        type Item = Cell<T>;
+        type Item = QCell<T>;
 
         fn body_drop(&self, i: &[core::cell::UnsafeCell<core::mem::MaybeUninit<Self::Item>>]) {
             todo!()
@@ -43,7 +56,7 @@ mod sealed {
 struct TrickyPipe<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     p: P,
 }
@@ -51,7 +64,7 @@ where
 impl<T, P> TrickyPipe<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     /// Returns the item in the front of the queue, or `None` if the queue is empty
     fn dequeue_sync(&self) -> Option<T> {
@@ -60,8 +73,8 @@ where
         // to drain any potential messages after closing.
         let (ptr, len) = {
             let len = sto.t.len();
-            let ptr: *const UnsafeCell<MaybeUninit<Cell<T>>> = sto.t.as_ptr();
-            let ptr: *const Cell<T> = ptr.cast();
+            let ptr: *const UnsafeCell<MaybeUninit<QCell<T>>> = sto.t.as_ptr();
+            let ptr: *const QCell<T> = ptr.cast();
             (ptr.cast_mut(), len)
         };
         let res = unsafe { dequeue(ptr, &sto.hdr.dequeue_pos, len - 1) };
@@ -101,8 +114,8 @@ where
         }
         let (ptr, len) = {
             let len = sto.t.len();
-            let ptr: *const UnsafeCell<MaybeUninit<Cell<T>>> = sto.t.as_ptr();
-            let ptr: *const Cell<T> = ptr.cast();
+            let ptr: *const UnsafeCell<MaybeUninit<QCell<T>>> = sto.t.as_ptr();
+            let ptr: *const QCell<T> = ptr.cast();
             (ptr.cast_mut(), len)
         };
         let res = unsafe { enqueue(ptr, &sto.hdr.enqueue_pos, len - 1, item) };
@@ -139,7 +152,7 @@ where
 pub struct Sender<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     pt: TrickyPipe<T, P>,
 }
@@ -148,7 +161,7 @@ where
 pub struct Receiver<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     pt: TrickyPipe<T, P>,
 }
@@ -156,7 +169,7 @@ where
 unsafe fn type_drop_sender<T, P>(container: *const ())
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     P::unleak(container);
 }
@@ -170,7 +183,7 @@ impl RefSender {
     fn erase<T, P>(s: Sender<T, P>) -> RefSender
     where
         T: 'static,
-        P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+        P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
     {
         let leaked_pluggable = s.pt.p.leak();
         Self {
@@ -191,7 +204,7 @@ impl Drop for RefSender {
 impl<T, P> Sender<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     /// Adds an `item` to the end of the queue
     ///
@@ -210,7 +223,7 @@ where
 impl<T, P> Receiver<T, P>
 where
     T: 'static,
-    P: Pluggable<Header = sealed::TPHdr<T>, Item = Cell<T>>,
+    P: Pluggable<Header = sealed::TPHdr<T>, Item = QCell<T>>,
 {
     /// Returns the item in the front of the queue, or `None` if the queue is empty
     pub fn dequeue_sync(&self) -> Option<T> {
@@ -225,26 +238,26 @@ where
 pub fn arc_channel<T>(
     n: usize,
 ) -> (
-    Sender<T, ArcPlugTail<sealed::TPHdr<T>, Cell<T>>>,
-    Receiver<T, ArcPlugTail<sealed::TPHdr<T>, Cell<T>>>,
+    Sender<T, ArcPlugTail<sealed::TPHdr<T>, QCell<T>>>,
+    Receiver<T, ArcPlugTail<sealed::TPHdr<T>, QCell<T>>>,
 )
 where
     T: 'static,
 {
-    // TODO this is WRONG and missing initialization stuff!
     let tp = TrickyPipe {
         p: ArcPlugTail::new(
-            sealed::TPHdr {
-                dequeue_pos: AtomicUsize::new(0),
-                enqueue_pos: AtomicUsize::new(0),
-                cons_wait: WaitCell::new(),
-                prod_wait: WaitQueue::new(),
-                state: AtomicU8::new(STATE_UNINIT),
-                pd: PhantomData,
-            },
+            sealed::TPHdr::new_init(),
             n,
         ),
     };
+
+    let sto = tp.p.storage();
+    sto.t.iter().enumerate().for_each(|(i, slot)| unsafe {
+        slot.get().write(MaybeUninit::new(QCell {
+            data: MaybeUninit::uninit(),
+            sequence: AtomicUsize::new(i),
+        }));
+    });
 
     (Sender { pt: TrickyPipe { p: tp.p.clone() } }, Receiver { pt: tp })
 }
@@ -253,25 +266,25 @@ pub fn arc_reftx_channel<T>(
     n: usize,
 ) -> (
     RefSender,
-    Receiver<T, ArcPlugTail<sealed::TPHdr<T>, Cell<T>>>,
+    Receiver<T, ArcPlugTail<sealed::TPHdr<T>, QCell<T>>>,
 )
 where
     T: 'static,
 {
-    // TODO this is WRONG and missing initialization stuff!
     let tp = TrickyPipe {
         p: ArcPlugTail::new(
-            sealed::TPHdr {
-                dequeue_pos: AtomicUsize::new(0),
-                enqueue_pos: AtomicUsize::new(0),
-                cons_wait: WaitCell::new(),
-                prod_wait: WaitQueue::new(),
-                state: AtomicU8::new(STATE_UNINIT),
-                pd: PhantomData,
-            },
+            sealed::TPHdr::new_init(),
             n,
         ),
     };
+
+    let sto = tp.p.storage();
+    sto.t.iter().enumerate().for_each(|(i, slot)| unsafe {
+        slot.get().write(MaybeUninit::new(QCell {
+            data: MaybeUninit::uninit(),
+            sequence: AtomicUsize::new(i),
+        }));
+    });
 
     let tx = Sender { pt: TrickyPipe { p: tp.p.clone() } };
     let tx = RefSender::erase(tx);
@@ -279,7 +292,7 @@ where
     (tx, Receiver { pt: tp })
 }
 
-unsafe fn dequeue<T>(buffer: *mut Cell<T>, dequeue_pos: &AtomicUsize, mask: usize) -> Option<T> {
+unsafe fn dequeue<T>(buffer: *mut QCell<T>, dequeue_pos: &AtomicUsize, mask: usize) -> Option<T> {
     let mut pos = dequeue_pos.load(Ordering::Relaxed);
 
     let mut cell;
@@ -315,7 +328,7 @@ unsafe fn dequeue<T>(buffer: *mut Cell<T>, dequeue_pos: &AtomicUsize, mask: usiz
 }
 
 unsafe fn enqueue<T>(
-    buffer: *mut Cell<T>,
+    buffer: *mut QCell<T>,
     enqueue_pos: &AtomicUsize,
     mask: usize,
     item: T,
@@ -354,23 +367,23 @@ unsafe fn enqueue<T>(
     Ok(())
 }
 
-pub struct Cell<T> {
+pub struct QCell<T> {
     data: MaybeUninit<T>,
     sequence: AtomicUsize,
 }
 
-pub const fn single_cell<T>() -> Cell<T> {
-    Cell {
+pub const fn single_cell<T>() -> QCell<T> {
+    QCell {
         data: MaybeUninit::uninit(),
         sequence: AtomicUsize::new(0),
     }
 }
 
-pub fn cell_array<const N: usize, T: Sized>() -> [Cell<T>; N] {
-    [Cell::<T>::SINGLE_CELL; N]
+pub fn cell_array<const N: usize, T: Sized>() -> [QCell<T>; N] {
+    [QCell::<T>::SINGLE_CELL; N]
 }
 
-impl<T> Cell<T> {
+impl<T> QCell<T> {
     const SINGLE_CELL: Self = Self::new(0);
 
     const fn new(seq: usize) -> Self {
