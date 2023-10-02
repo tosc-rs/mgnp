@@ -2,6 +2,7 @@ use crate::{Frame, Wire};
 use core::{mem, num::NonZeroU16};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Id(NonZeroU16);
 
 pub struct ConnTable<T, const CAPACITY: usize> {

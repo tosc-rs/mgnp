@@ -13,6 +13,7 @@ pub trait Frame {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct LinkId {
     pub local: Option<conn_table::Id>,
     pub remote: Option<conn_table::Id>,
