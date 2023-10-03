@@ -11,9 +11,16 @@ use mnemos_bitslab::index::IndexAllocWord;
 use serde::{de::DeserializeOwned, Serialize};
 
 const CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
-const MASK: usize = CAPACITY - 1;
-const SHIFT: usize = MASK.count_ones() as usize;
+const SHIFT: usize = CAPACITY.trailing_zeros() as usize;
 const SEQ_ONE: usize = 1 << SHIFT;
+const MASK: usize = SEQ_ONE - 1;
+
+#[cfg(not(test))]
+macro_rules! dbg {
+    ($x:expr) => {
+        $x
+    };
+}
 
 pub struct TrickyPipe<T> {
     elements: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
@@ -36,6 +43,13 @@ impl<T> TrickyPipe<T> {
     const QUEUE_INIT: AtomicUsize = AtomicUsize::new(0);
 
     pub const fn new() -> Self {
+        let mut queue = [Self::QUEUE_INIT; CAPACITY];
+        let mut i = 0;
+
+        while i != CAPACITY {
+            queue[i] = AtomicUsize::new(i << SHIFT);
+            i += 1;
+        }
         Self {
             core: Core {
                 dequeue_pos: AtomicUsize::new(0),
@@ -43,7 +57,7 @@ impl<T> TrickyPipe<T> {
                 cons_wait: WaitCell::new(),
                 prod_wait: WaitQueue::new(),
                 indices: IndexAllocWord::new(),
-                queue: [Self::QUEUE_INIT; CAPACITY],
+                queue,
                 rx_claimed: AtomicBool::new(false),
             },
             elements: [Self::EMPTY_CELL; CAPACITY],
@@ -51,10 +65,7 @@ impl<T> TrickyPipe<T> {
     }
 
     pub fn receiver(&self) -> Option<Receiver<'_, T>> {
-        self.core
-            .rx_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()?;
+        self.try_claim_rx()?;
 
         Some(Receiver { pipe: self })
     }
@@ -62,14 +73,19 @@ impl<T> TrickyPipe<T> {
     pub fn sender(&self) -> Sender<'_, T> {
         Sender { pipe: self }
     }
+
+    fn try_claim_rx(&self) -> Option<()> {
+        self.core
+            .rx_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ())
+    }
 }
 
 impl<T: Serialize> TrickyPipe<T> {
     pub fn ser_receiver(&self) -> Option<SerReceiver<'_>> {
-        self.core
-            .rx_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()?;
+        self.try_claim_rx()?;
 
         Some(SerReceiver {
             core: &self.core,
@@ -404,16 +420,16 @@ impl Core {
     }
 
     fn try_dequeue(&self) -> Option<Reservation<'_>> {
-        let mut pos = self.dequeue_pos.load(Ordering::Relaxed);
+        let mut pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed));
         loop {
             let slot = &self.queue[pos & MASK];
-            let val = slot.load(Ordering::Acquire);
-            let seq = val >> SHIFT;
-            let dif = (seq as i8).wrapping_sub(pos as i8);
+            let val = dbg!(slot.load(Ordering::Acquire));
+            let seq = dbg!(val >> SHIFT);
+            let dif = dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
-            match dif {
+            match dbg!(dif) {
                 0 => {
-                    if self
+                    if dbg!(self
                         .dequeue_pos
                         .compare_exchange_weak(
                             pos,
@@ -421,7 +437,7 @@ impl Core {
                             Ordering::Relaxed,
                             Ordering::Relaxed,
                         )
-                        .is_ok()
+                        .is_ok())
                     {
                         slot.store(val.wrapping_add(SEQ_ONE), Ordering::Release);
                         return Some(Reservation {
@@ -431,22 +447,22 @@ impl Core {
                     }
                 }
                 dif if dif < 0 => return None,
-                _ => pos = self.dequeue_pos.load(Ordering::Relaxed),
+                _ => pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed)),
             }
         }
     }
 
     fn commit_send(&self, idx: u8) {
-        debug_assert!(idx as usize <= MASK);
-        let mut pos = self.enqueue_pos.load(Ordering::Relaxed);
+        debug_assert!(dbg!(idx) as usize <= MASK);
+        let mut pos = dbg!(self.enqueue_pos.load(Ordering::Relaxed));
         loop {
-            let slot = &self.queue[pos & MASK];
-            let seq = slot.load(Ordering::Acquire) >> SHIFT;
-            let dif = (seq as i8).wrapping_sub(pos as i8);
+            let slot = &self.queue[dbg!(pos & MASK)];
+            let seq = dbg!(slot.load(Ordering::Acquire)) >> SHIFT;
+            let dif = dbg!(dbg!(seq as i8).wrapping_sub(pos as i8));
 
             match dif {
                 0 => {
-                    if self
+                    if dbg!(self
                         .enqueue_pos
                         .compare_exchange_weak(
                             pos,
@@ -454,10 +470,10 @@ impl Core {
                             Ordering::Relaxed,
                             Ordering::Relaxed,
                         )
-                        .is_ok()
+                        .is_ok())
                     {
-                        let new = (pos << SHIFT).wrapping_add(SEQ_ONE);
-                        slot.store(idx as usize | new, Ordering::Release);
+                        let new = dbg!(dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
+                        slot.store(dbg!(idx as usize | new), Ordering::Release);
                         self.cons_wait.wake();
                         return;
                     }
