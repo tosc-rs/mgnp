@@ -1,6 +1,6 @@
 use crate::loom::{
     cell::{self, UnsafeCell},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use core::{
     mem::{ManuallyDrop, MaybeUninit},
@@ -8,6 +8,7 @@ use core::{
 };
 use maitake_sync::{WaitCell, WaitQueue};
 use mnemos_bitslab::index::IndexAllocWord;
+use serde::Serialize;
 
 const CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
 const MASK: usize = CAPACITY - 1;
@@ -26,13 +27,18 @@ struct Core {
     prod_wait: WaitQueue,
     indices: IndexAllocWord,
     queue: [AtomicUsize; CAPACITY],
+    rx_claimed: AtomicBool,
 }
+
+#[cfg(feature = "alloc")]
+type RecvVecFn = for<'pipe> fn(*const (), u8) -> Vec<u8>;
+type RecvIntoFn = fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
 
 impl<T> TrickyPipe<T> {
     const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
     const QUEUE_INIT: AtomicUsize = AtomicUsize::new(0);
 
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             core: Core {
                 dequeue_pos: AtomicUsize::new(0),
@@ -41,25 +47,178 @@ impl<T> TrickyPipe<T> {
                 prod_wait: WaitQueue::new(),
                 indices: IndexAllocWord::new(),
                 queue: [Self::QUEUE_INIT; CAPACITY],
+                rx_claimed: AtomicBool::new(false),
             },
             elements: [Self::EMPTY_CELL; CAPACITY],
         }
     }
 
-    async fn reserve(&self) -> Result<SendRef<'_, T>, EnqueueError> {
-        let pipe = self.core.reserve().await?;
-        Ok(SendRef {
-            cell: self.elements[pipe.idx as usize].get_mut(),
-            pipe,
+    pub fn receiver(&self) -> Option<Receiver<'_, T>> {
+        self.core
+            .rx_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+
+        Some(Receiver { pipe: self })
+    }
+
+    pub fn sender(&self) -> Sender<'_, T> {
+        Sender { pipe: self }
+    }
+}
+
+impl<T: Serialize> TrickyPipe<T> {
+    pub fn ser_receiver(&self) -> Option<SerReceiver<'_>> {
+        self.core
+            .rx_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+
+        Some(SerReceiver {
+            core: &self.core,
+            elems: self.elements.as_ptr() as *const (),
+            recv_into: Self::recv_into,
+
+            #[cfg(feature = "alloc")]
+            recv_vec: Self::recv_vec,
         })
     }
 
-    fn try_dequeue(&self) -> Option<T> {
-        let res = self.core.try_dequeue()?;
-        let idx = res.idx as usize;
-        let val = self.elements[idx].with_mut(|ptr| unsafe { (*ptr).assume_init_read() });
-        self.core.queue[idx].fetch_add(SEQ_ONE, Ordering::Release);
-        Some(val)
+    fn recv_into(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_slice(elem, buf)
+            })
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn recv_vec(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_allocvec(elem, buf)
+            })
+        }
+    }
+}
+
+pub struct Receiver<'pipe, T> {
+    pipe: &'pipe TrickyPipe<T>,
+}
+
+pub struct Sender<'pipe, T> {
+    pipe: &'pipe TrickyPipe<T>,
+}
+
+pub struct SerReceiver<'pipe> {
+    core: &'pipe Core,
+    elems: *const (),
+    #[cfg(feature = "alloc")]
+    recv_vec: RecvVecFn,
+    recv_into: RecvIntoFn,
+}
+
+// === impl Receiver ===
+
+impl<T> Receiver<'_, T> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+        let res = self.pipe.core.try_dequeue().ok_or(TryRecvError::Empty)?;
+        let elem =
+            self.pipe.elements[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() });
+        Ok(elem)
+    }
+
+    pub async fn recv(&self) -> Result<T, RecvError> {
+        loop {
+            match self.try_recv() {
+                Ok(e) => return Ok(e),
+                Err(TryRecvError::Empty) => self
+                    .pipe
+                    .core
+                    .cons_wait
+                    .wait()
+                    .await
+                    .map_err(|_| RecvError::Closed)?,
+                Err(TryRecvError::Recv(e)) => return Err(e),
+            }
+        }
+    }
+}
+
+impl SerReceiver<'_> {
+    pub fn try_recv_into<'buf>(
+        &self,
+        buf: &'buf mut [u8],
+    ) -> Result<&'buf mut [u8], SerTryRecvError> {
+        let res = self.core.try_dequeue().ok_or(SerTryRecvError::Empty)?;
+        (self.recv_into)(self.elems, res.idx, buf)
+            .map_err(|e| SerTryRecvError::Recv(SerRecvError::Ser(e)))
+    }
+
+    pub async fn recv_into<'buf>(
+        &self,
+        buf: &'buf mut [u8],
+    ) -> Result<&'buf mut [u8], SerRecvError> {
+        let res = loop {
+            match self.core.try_dequeue() {
+                Some(res) => break res,
+                None => self
+                    .core
+                    .cons_wait
+                    .wait()
+                    .await
+                    .map_err(|_| SerRecvError::Closed)?,
+            }
+        };
+
+        (self.recv_into)(self.elems, res.idx, buf).map_err(SerRecvError::Ser)
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn try_recv(&self) -> Result<Vec<u8>, SerTryRecvError> {
+        let res = self.core.try_dequeue().ok_or(SerTryRecvError::Empty)?;
+        (self.recv_vec)(self.elems, res.idx)
+            .map_err(|e| SerTryRecvError::Recv(SerRecvError::Ser(e)))
+    }
+
+    #[cfg(feature = "alloc")]
+    pub async fn recv<'buf>(&self, buf: &'buf mut [u8]) -> Result<&'buf mut [u8], SerRecvError> {
+        loop {
+            match self.try_recv() {
+                Ok(res) => return Ok(res),
+                Err(SerTryRecvError::Empty) => self
+                    .core
+                    .cons_wait
+                    .wait()
+                    .await
+                    .map_err(|_| SerRecvError::Closed)?,
+                Err(SerTryRecvError::Recv(e)) => return Err(e),
+            }
+        }
+    }
+}
+
+impl<T> Sender<'_, T> {
+    pub fn try_reserve(&self) -> Result<SendRef<'_, T>, TryEnqueueError> {
+        let pipe = self.pipe.core.try_reserve().ok_or(TryEnqueueError::Full)?;
+        let cell = self.pipe.elements[pipe.idx as usize].get_mut();
+        Ok(SendRef { cell, pipe })
+    }
+
+    pub async fn reserve(&self) -> Result<SendRef<'_, T>, EnqueueError> {
+        let pipe = self.pipe.core.reserve().await?;
+        let cell = self.pipe.elements[pipe.idx as usize].get_mut();
+        Ok(SendRef { cell, pipe })
     }
 }
 
@@ -215,6 +374,21 @@ pub enum TryEnqueueError {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum DequeueError {
+pub enum TryRecvError {
+    Empty,
+    Recv(RecvError),
+}
+
+pub enum RecvError {
     Closed,
+}
+
+pub enum SerTryRecvError {
+    Empty,
+    Recv(SerRecvError),
+}
+
+pub enum SerRecvError {
+    Closed,
+    Ser(postcard::Error),
 }
