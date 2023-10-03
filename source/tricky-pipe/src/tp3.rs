@@ -8,7 +8,7 @@ use core::{
 };
 use maitake_sync::{WaitCell, WaitQueue};
 use mnemos_bitslab::index::IndexAllocWord;
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 
 const CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
 const MASK: usize = CAPACITY - 1;
@@ -29,6 +29,7 @@ struct Core {
     queue: [AtomicUsize; CAPACITY],
     rx_claimed: AtomicBool,
 }
+
 impl<T> TrickyPipe<T> {
     const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
     #[allow(clippy::declare_interior_mutable_const)]
@@ -81,9 +82,9 @@ impl<T: Serialize> TrickyPipe<T> {
         #[cfg(feature = "alloc")]
         to_vec: Self::to_vec,
         #[cfg(feature = "alloc")]
-        to_vec_cobs: Self::to_vec_cobs,
+        to_vec_framed: Self::to_vec_framed,
         to_slice: Self::to_slice,
-        to_slice_cobs: Self::to_slice_cobs,
+        to_slice_framed: Self::to_slice_framed,
     };
 
     fn to_slice(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
@@ -99,7 +100,7 @@ impl<T: Serialize> TrickyPipe<T> {
         }
     }
 
-    fn to_slice_cobs(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
+    fn to_slice_framed(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -107,7 +108,7 @@ impl<T: Serialize> TrickyPipe<T> {
             let elems = core::slice::from_raw_parts(elems, CAPACITY);
             elems[idx as usize].with(|ptr| {
                 let elem = (*ptr).assume_init_ref();
-                postcard::to_slice(elem, buf)
+                postcard::to_slice_cobs(elem, buf)
             })
         }
     }
@@ -127,7 +128,7 @@ impl<T: Serialize> TrickyPipe<T> {
     }
 
     #[cfg(feature = "alloc")]
-    fn to_vec_cobs(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+    fn to_vec_framed(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -138,6 +139,45 @@ impl<T: Serialize> TrickyPipe<T> {
                 postcard::to_allocvec_cobs(elem, buf)
             })
         }
+    }
+}
+
+impl<T: DeserializeOwned> TrickyPipe<T> {
+    pub fn ser_sender(&self) -> SerSender<'_> {
+        SerSender {
+            core: &self.core,
+            elems: self.elements.as_ptr() as *const (),
+            vtable: Self::DESER_VTABLE,
+        }
+    }
+
+    const DESER_VTABLE: &'static DeserVtable = &DeserVtable {
+        from_bytes: Self::from_bytes,
+        from_bytes_framed: Self::from_bytes_framed,
+    };
+
+    fn from_bytes(elems: *const (), idx: u8, buf: &[u8]) -> postcard::Result<()> {
+        let val = postcard::from_bytes(buf)?;
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
+        }
+        Ok(())
+    }
+
+    fn from_bytes_framed(elems: *const (), idx: u8, buf: &[u8]) -> postcard::Result<()> {
+        let val = postcard::from_bytes(buf)?;
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
+        }
+        Ok(())
     }
 }
 
@@ -155,6 +195,12 @@ pub struct SerReceiver<'pipe> {
     vtable: &'static SerVtable,
 }
 
+pub struct SerSender<'pipe> {
+    core: &'pipe Core,
+    elems: *const (),
+    vtable: &'static DeserVtable,
+}
+
 pub struct SerRecvRef<'pipe> {
     pipe: Reservation<'pipe>,
     elems: *const (),
@@ -163,12 +209,24 @@ pub struct SerRecvRef<'pipe> {
 
 struct SerVtable {
     #[cfg(feature = "alloc")]
-    to_vec: fn(*const (), u8) -> postcard::Result<Vec<u8>>,
+    to_vec: SerVecFn,
     #[cfg(feature = "alloc")]
-    to_vec_cobs: fn(*const (), u8) -> postcard::Result<Vec<u8>>,
-    to_slice: fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>,
-    to_slice_cobs: fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>,
+    to_vec_framed: SerVecFn,
+    to_slice: SerFn,
+    to_slice_framed: SerFn,
 }
+
+struct DeserVtable {
+    from_bytes: DeserFn,
+    from_bytes_framed: DeserFn,
+}
+
+type SerFn = fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
+
+#[cfg(feature = "alloc")]
+type SerVecFn = fn(*const (), u8) -> postcard::Result<Vec<u8>>;
+
+type DeserFn = fn(*const (), u8, &[u8]) -> postcard::Result<()>;
 
 // === impl Receiver ===
 
@@ -244,7 +302,7 @@ impl SerRecvRef<'_> {
     }
 
     pub fn to_slice_framed<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
-        (self.vtable.to_slice_cobs)(self.elems, self.pipe.idx, buf)
+        (self.vtable.to_slice_framed)(self.elems, self.pipe.idx, buf)
     }
 
     /// Serializes the message to an owned `Vec`.
@@ -257,7 +315,57 @@ impl SerRecvRef<'_> {
     /// an owned `Vec`.
     #[cfg(feature = "alloc")]
     pub fn to_vec_framed(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
-        (self.vtable.to_vec_cobs)(self.elems, self.pipe.idx)
+        (self.vtable.to_vec_framed)(self.elems, self.pipe.idx)
+    }
+}
+
+impl SerSender<'_> {
+    pub fn try_send(&self, bytes: &[u8]) -> Result<(), SerTrySendError> {
+        self.try_send_inner(bytes, self.vtable.from_bytes_framed)
+    }
+
+    pub fn try_send_framed(&self, bytes: &[u8]) -> Result<(), SerTrySendError> {
+        self.try_send_inner(bytes, self.vtable.from_bytes_framed)
+    }
+
+    pub async fn send(&self, bytes: &[u8]) -> Result<(), SerSendError> {
+        self.send_inner(bytes, self.vtable.from_bytes).await
+    }
+
+    pub async fn send_framed(&self, bytes: &[u8]) -> Result<(), SerSendError> {
+        self.send_inner(bytes, self.vtable.from_bytes_framed).await
+    }
+
+    async fn send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerSendError> {
+        loop {
+            match self.core.try_reserve() {
+                Some(res) => {
+                    // try writing the bytes to the reservation.
+                    deserialize(self.elems, res.idx, bytes).map_err(SerSendError::Deserialize)?;
+                    // if we successfully deserialized the bytes, commit the send.
+                    // otherwise, we'll release the send index when we drop the reservation.
+                    res.commit_send();
+                    return Ok(());
+                }
+                None => self
+                    .core
+                    .prod_wait
+                    .wait()
+                    .await
+                    .map_err(|_| SerSendError::Closed)?,
+            }
+        }
+    }
+
+    fn try_send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerTrySendError> {
+        let res = self.core.try_reserve().ok_or(SerTrySendError::Full)?;
+        // try writing the bytes to the reservation.
+        deserialize(self.elems, res.idx, bytes)
+            .map_err(|err| SerTrySendError::Send(SerSendError::Deserialize(err)))?;
+        // if we successfully deserialized the bytes, commit the send.
+        // otherwise, we'll release the send index when we drop the reservation.
+        res.commit_send();
+        Ok(())
     }
 }
 
@@ -328,7 +436,7 @@ impl Core {
         }
     }
 
-    fn commit(&self, idx: u8) {
+    fn commit_send(&self, idx: u8) {
         debug_assert!(idx as usize <= MASK);
         let mut pos = self.enqueue_pos.load(Ordering::Relaxed);
         loop {
@@ -386,15 +494,11 @@ impl<T> SendRef<'_, T> {
             self.cell.deref().write(val);
         }
         // ...and commit.
-        self.commit();
+        self.pipe.commit_send();
     }
 
     pub fn commit(self) {
-        // don't run the destructor that frees the index, since we are dropping
-        // the cell...
-        let pipe = ManuallyDrop::new(self.pipe);
-        // ...and commit to the queue.
-        pipe.core.commit(pipe.idx);
+        self.pipe.commit_send();
     }
 }
 
@@ -408,6 +512,16 @@ impl<T> Deref for SendRef<'_, T> {
 impl<T> DerefMut for SendRef<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.cell.deref() }
+    }
+}
+
+impl Reservation<'_> {
+    fn commit_send(self) {
+        // don't run the destructor that frees the index, since we are dropping
+        // the cell...
+        let this = ManuallyDrop::new(self);
+        // ...and commit to the queue.
+        this.core.commit_send(this.idx);
     }
 }
 
@@ -438,4 +552,16 @@ pub enum TryRecvError {
 #[derive(Debug, Eq, PartialEq)]
 pub enum RecvError {
     Closed,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum SerSendError {
+    Closed,
+    Deserialize(postcard::Error),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum SerTrySendError {
+    Full,
+    Send(SerSendError),
 }
