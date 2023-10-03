@@ -29,13 +29,9 @@ struct Core {
     queue: [AtomicUsize; CAPACITY],
     rx_claimed: AtomicBool,
 }
-
-#[cfg(feature = "alloc")]
-type RecvVecFn = for<'pipe> fn(*const (), u8) -> Vec<u8>;
-type RecvIntoFn = fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
-
 impl<T> TrickyPipe<T> {
     const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
+    #[allow(clippy::declare_interior_mutable_const)]
     const QUEUE_INIT: AtomicUsize = AtomicUsize::new(0);
 
     pub const fn new() -> Self {
@@ -77,14 +73,33 @@ impl<T: Serialize> TrickyPipe<T> {
         Some(SerReceiver {
             core: &self.core,
             elems: self.elements.as_ptr() as *const (),
-            recv_into: Self::recv_into,
-
-            #[cfg(feature = "alloc")]
-            recv_vec: Self::recv_vec,
+            vtable: Self::SER_VTABLE,
         })
     }
 
-    fn recv_into(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
+    const SER_VTABLE: &'static SerVtable = &SerVtable {
+        #[cfg(feature = "alloc")]
+        to_vec: Self::to_vec,
+        #[cfg(feature = "alloc")]
+        to_vec_cobs: Self::to_vec_cobs,
+        to_slice: Self::to_slice,
+        to_slice_cobs: Self::to_slice_cobs,
+    };
+
+    fn to_slice(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_slice(elem, buf)
+            })
+        }
+    }
+
+    fn to_slice_cobs(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -98,7 +113,7 @@ impl<T: Serialize> TrickyPipe<T> {
     }
 
     #[cfg(feature = "alloc")]
-    fn recv_vec(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+    fn to_vec(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -107,6 +122,20 @@ impl<T: Serialize> TrickyPipe<T> {
             elems[idx as usize].with(|ptr| {
                 let elem = (*ptr).assume_init_ref();
                 postcard::to_allocvec(elem, buf)
+            })
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    fn to_vec_cobs(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+        unsafe {
+            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = core::slice::from_raw_parts(elems, CAPACITY);
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_allocvec_cobs(elem, buf)
             })
         }
     }
@@ -123,9 +152,22 @@ pub struct Sender<'pipe, T> {
 pub struct SerReceiver<'pipe> {
     core: &'pipe Core,
     elems: *const (),
+    vtable: &'static SerVtable,
+}
+
+pub struct SerRecvRef<'pipe> {
+    pipe: Reservation<'pipe>,
+    elems: *const (),
+    vtable: &'static SerVtable,
+}
+
+struct SerVtable {
     #[cfg(feature = "alloc")]
-    recv_vec: RecvVecFn,
-    recv_into: RecvIntoFn,
+    to_vec: fn(*const (), u8) -> postcard::Result<Vec<u8>>,
+    #[cfg(feature = "alloc")]
+    to_vec_cobs: fn(*const (), u8) -> postcard::Result<Vec<u8>>,
+    to_slice: fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>,
+    to_slice_cobs: fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>,
 }
 
 // === impl Receiver ===
@@ -156,19 +198,26 @@ impl<T> Receiver<'_, T> {
 }
 
 impl SerReceiver<'_> {
-    pub fn try_recv_into<'buf>(
-        &self,
-        buf: &'buf mut [u8],
-    ) -> Result<&'buf mut [u8], SerTryRecvError> {
-        let res = self.core.try_dequeue().ok_or(SerTryRecvError::Empty)?;
-        (self.recv_into)(self.elems, res.idx, buf)
-            .map_err(|e| SerTryRecvError::Recv(SerRecvError::Ser(e)))
+    /// Attempt to receive a message from the channel, if there are currently
+    /// any messages in the channel.
+    ///
+    /// This method returns a [`SerRecvRef`] which may be used to serialize the
+    /// message.
+    pub fn try_recv(&self) -> Result<SerRecvRef<'_>, TryRecvError> {
+        let res = self.core.try_dequeue().ok_or(TryRecvError::Empty)?;
+        Ok(SerRecvRef {
+            pipe: res,
+            elems: self.elems,
+            vtable: self.vtable,
+        })
     }
 
-    pub async fn recv_into<'buf>(
-        &self,
-        buf: &'buf mut [u8],
-    ) -> Result<&'buf mut [u8], SerRecvError> {
+    /// Receive the next message from the channel, waiting for one to be sent if
+    /// the channel is empty.
+    ///
+    /// This method returns a [`SerRecvRef`] which may be used to serialize the
+    /// received message.
+    pub async fn recv(&self) -> Result<SerRecvRef<'_>, RecvError> {
         let res = loop {
             match self.core.try_dequeue() {
                 Some(res) => break res,
@@ -177,34 +226,38 @@ impl SerReceiver<'_> {
                     .cons_wait
                     .wait()
                     .await
-                    .map_err(|_| SerRecvError::Closed)?,
+                    .map_err(|_| RecvError::Closed)?,
             }
         };
 
-        (self.recv_into)(self.elems, res.idx, buf).map_err(SerRecvError::Ser)
+        Ok(SerRecvRef {
+            pipe: res,
+            elems: self.elems,
+            vtable: self.vtable,
+        })
+    }
+}
+
+impl SerRecvRef<'_> {
+    pub fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
+        (self.vtable.to_slice)(self.elems, self.pipe.idx, buf)
     }
 
-    #[cfg(feature = "alloc")]
-    pub fn try_recv(&self) -> Result<Vec<u8>, SerTryRecvError> {
-        let res = self.core.try_dequeue().ok_or(SerTryRecvError::Empty)?;
-        (self.recv_vec)(self.elems, res.idx)
-            .map_err(|e| SerTryRecvError::Recv(SerRecvError::Ser(e)))
+    pub fn to_slice_framed<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
+        (self.vtable.to_slice_cobs)(self.elems, self.pipe.idx, buf)
     }
 
+    /// Serializes the message to an owned `Vec`.
     #[cfg(feature = "alloc")]
-    pub async fn recv<'buf>(&self, buf: &'buf mut [u8]) -> Result<&'buf mut [u8], SerRecvError> {
-        loop {
-            match self.try_recv() {
-                Ok(res) => return Ok(res),
-                Err(SerTryRecvError::Empty) => self
-                    .core
-                    .cons_wait
-                    .wait()
-                    .await
-                    .map_err(|_| SerRecvError::Closed)?,
-                Err(SerTryRecvError::Recv(e)) => return Err(e),
-            }
-        }
+    pub fn to_vec(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
+        (self.vtable.to_vec)(self.elems, self.pipe.idx)
+    }
+
+    /// Returns the serialized representation of the message as a COBS frame, in
+    /// an owned `Vec`.
+    #[cfg(feature = "alloc")]
+    pub fn to_vec_framed(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
+        (self.vtable.to_vec_cobs)(self.elems, self.pipe.idx)
     }
 }
 
@@ -246,7 +299,8 @@ impl Core {
         let mut pos = self.dequeue_pos.load(Ordering::Relaxed);
         loop {
             let slot = &self.queue[pos & MASK];
-            let seq = slot.load(Ordering::Acquire) >> SHIFT;
+            let val = slot.load(Ordering::Acquire);
+            let seq = val >> SHIFT;
             let dif = (seq as i8).wrapping_sub(pos as i8);
 
             match dif {
@@ -261,9 +315,10 @@ impl Core {
                         )
                         .is_ok()
                     {
+                        slot.store(val.wrapping_add(SEQ_ONE), Ordering::Release);
                         return Some(Reservation {
                             core: self,
-                            idx: pos as u8,
+                            idx: (val & MASK) as u8,
                         });
                     }
                 }
@@ -368,6 +423,7 @@ pub enum EnqueueError {
     Closed,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum TryEnqueueError {
     Full,
     Closed,
@@ -379,16 +435,7 @@ pub enum TryRecvError {
     Recv(RecvError),
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub enum RecvError {
     Closed,
-}
-
-pub enum SerTryRecvError {
-    Empty,
-    Recv(SerRecvError),
-}
-
-pub enum SerRecvError {
-    Closed,
-    Ser(postcard::Error),
 }
