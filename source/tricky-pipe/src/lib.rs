@@ -1,4 +1,6 @@
 #![cfg_attr(not(test), no_std)]
+#![cfg(any(feature = "alloc", test))]
+extern crate alloc;
 
 // TODO: only pub to silence unused warnings
 pub mod spitebuf;

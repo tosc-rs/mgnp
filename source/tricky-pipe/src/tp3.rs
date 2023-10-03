@@ -79,9 +79,9 @@ impl<T: Serialize> TrickyPipe<T> {
     }
 
     const SER_VTABLE: &'static SerVtable = &SerVtable {
-        #[cfg(feature = "alloc")]
+        #[cfg(any(test, feature = "alloc"))]
         to_vec: Self::to_vec,
-        #[cfg(feature = "alloc")]
+        #[cfg(any(test, feature = "alloc"))]
         to_vec_framed: Self::to_vec_framed,
         to_slice: Self::to_slice,
         to_slice_framed: Self::to_slice_framed,
@@ -113,8 +113,8 @@ impl<T: Serialize> TrickyPipe<T> {
         }
     }
 
-    #[cfg(feature = "alloc")]
-    fn to_vec(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+    #[cfg(any(test, feature = "alloc"))]
+    fn to_vec(elems: *const (), idx: u8) -> postcard::Result<alloc::vec::Vec<u8>> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -122,13 +122,13 @@ impl<T: Serialize> TrickyPipe<T> {
             let elems = core::slice::from_raw_parts(elems, CAPACITY);
             elems[idx as usize].with(|ptr| {
                 let elem = (*ptr).assume_init_ref();
-                postcard::to_allocvec(elem, buf)
+                postcard::to_allocvec(elem)
             })
         }
     }
 
-    #[cfg(feature = "alloc")]
-    fn to_vec_framed(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<Vec<[u8]>> {
+    #[cfg(any(test, feature = "alloc"))]
+    fn to_vec_framed(elems: *const (), idx: u8) -> postcard::Result<alloc::vec::Vec<u8>> {
         unsafe {
             let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
             // TODO(eliza): since this is unsafe anyway, we *could* just do
@@ -136,7 +136,7 @@ impl<T: Serialize> TrickyPipe<T> {
             let elems = core::slice::from_raw_parts(elems, CAPACITY);
             elems[idx as usize].with(|ptr| {
                 let elem = (*ptr).assume_init_ref();
-                postcard::to_allocvec_cobs(elem, buf)
+                postcard::to_allocvec_cobs(elem)
             })
         }
     }
@@ -208,9 +208,9 @@ pub struct SerRecvRef<'pipe> {
 }
 
 struct SerVtable {
-    #[cfg(feature = "alloc")]
+    #[cfg(any(test, feature = "alloc"))]
     to_vec: SerVecFn,
-    #[cfg(feature = "alloc")]
+    #[cfg(any(test, feature = "alloc"))]
     to_vec_framed: SerVecFn,
     to_slice: SerFn,
     to_slice_framed: SerFn,
@@ -223,7 +223,7 @@ struct DeserVtable {
 
 type SerFn = fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
 
-#[cfg(feature = "alloc")]
+#[cfg(any(test, feature = "alloc"))]
 type SerVecFn = fn(*const (), u8) -> postcard::Result<Vec<u8>>;
 
 type DeserFn = fn(*const (), u8, &[u8]) -> postcard::Result<()>;
@@ -306,14 +306,14 @@ impl SerRecvRef<'_> {
     }
 
     /// Serializes the message to an owned `Vec`.
-    #[cfg(feature = "alloc")]
+    #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
         (self.vtable.to_vec)(self.elems, self.pipe.idx)
     }
 
     /// Returns the serialized representation of the message as a COBS frame, in
     /// an owned `Vec`.
-    #[cfg(feature = "alloc")]
+    #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec_framed(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
         (self.vtable.to_vec_framed)(self.elems, self.pipe.idx)
     }
@@ -564,4 +564,395 @@ pub enum SerSendError {
 pub enum SerTrySendError {
     Full,
     Send(SerSendError),
+}
+
+#[cfg(test)]
+mod test {
+    use crate::spitebuf::Storage;
+
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Serialize, PartialEq)]
+    struct SerStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct DeStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct SerDeStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct UnSerStruct {
+        a: u8,
+        b: i16,
+        c: u32,
+        d: String,
+    }
+
+    #[test]
+    fn normal_smoke() {
+        let chan = TrickyPipe::<UnSerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.receiver().unwrap();
+        tx.try_reserve().unwrap().send(UnSerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+
+        tx.try_reserve().unwrap().send(UnSerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        });
+
+        tx.try_reserve().unwrap().send(UnSerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        });
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            UnSerStruct {
+                a: 240,
+                b: -6_000,
+                c: 100_000,
+                d: String::from("hello"),
+            }
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            UnSerStruct {
+                a: 20,
+                b: -8000,
+                c: 200_000,
+                d: String::from("greets"),
+            }
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            UnSerStruct {
+                a: 100,
+                b: -1_000,
+                c: 300_000,
+                d: String::from("oh my"),
+            }
+        );
+    }
+
+    // #[test]
+    // fn normal_closed_rx() {
+    //     let (tx, rx) = channel::<UnSerStruct>(4);
+    //     drop(rx);
+    //     let res = tx.send(UnSerStruct {
+    //         a: 240,
+    //         b: -6_000,
+    //         c: 100_000,
+    //         d: String::from("hello"),
+    //     });
+    //     assert_eq!(
+    //         res,
+    //         Err(UnSerStruct {
+    //             a: 240,
+    //             b: -6_000,
+    //             c: 100_000,
+    //             d: String::from("hello"),
+    //         })
+    //     );
+    // }
+
+    // #[test]
+    // fn normal_closed_tx() {
+    //     let (tx, rx) = channel::<UnSerStruct>(4);
+    //     drop(tx);
+    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
+    // }
+
+    #[test]
+    fn ser_smoke() {
+        let chan = TrickyPipe::<SerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.ser_receiver().unwrap();
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        });
+
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        });
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_vec(),
+            Ok(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_vec(),
+            Ok(vec![
+                20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115
+            ])
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_vec(),
+            Ok(vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+        );
+    }
+
+    // #[test]
+    // fn ser_closed_rx() {
+    //     let (tx, rx) = ser_channel::<SerStruct>(4);
+    //     drop(rx);
+    //     let res = tx.send(SerStruct {
+    //         a: 240,
+    //         b: -6_000,
+    //         c: 100_000,
+    //         d: String::from("hello"),
+    //     });
+    //     assert_eq!(
+    //         res,
+    //         Err(SerStruct {
+    //             a: 240,
+    //             b: -6_000,
+    //             c: 100_000,
+    //             d: String::from("hello"),
+    //         })
+    //     );
+    // }
+
+    // #[test]
+    // fn ser_closed_tx() {
+    //     let (tx, rx) = ser_channel::<SerStruct>(4);
+    //     drop(tx);
+    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
+    // }
+
+    #[test]
+    fn ser_ref_smoke() {
+        let chan = TrickyPipe::<SerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.ser_receiver().unwrap();
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 240,
+            b: -6_000,
+            c: 100_000,
+            d: String::from("hello"),
+        });
+
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 20,
+            b: -8000,
+            c: 200_000,
+            d: String::from("greets"),
+        });
+
+        tx.try_reserve().unwrap().send(SerStruct {
+            a: 100,
+            b: -1_000,
+            c: 300_000,
+            d: String::from("oh my"),
+        });
+
+        let mut buf = [0u8; 128];
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
+            &mut [240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
+            &mut [20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115]
+        );
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
+            &mut [100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121]
+        );
+    }
+
+    // #[test]
+    // fn ser_ref_closed_rx() {
+    //     let (tx, rx) = ser_ref_channel::<SerStruct>(4);
+    //     drop(rx);
+    //     let res = tx.send(SerStruct {
+    //         a: 240,
+    //         b: -6_000,
+    //         c: 100_000,
+    //         d: String::from("hello"),
+    //     });
+    //     assert_eq!(
+    //         res,
+    //         Err(SerStruct {
+    //             a: 240,
+    //             b: -6_000,
+    //             c: 100_000,
+    //             d: String::from("hello"),
+    //         })
+    //     );
+    // }
+
+    // #[test]
+    // fn ser_ref_closed_tx() {
+    //     let (tx, rx) = ser_ref_channel::<SerStruct>(4);
+    //     drop(tx);
+    //     let mut buf = [0u8; 128];
+    //     assert_eq!(rx.recv_slice(&mut buf), Err(()));
+    // }
+
+    // #[test]
+    // fn deser_smoke() {
+    //     let (tx, rx) = deser_channel::<DeStruct>(4);
+    //     tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+    //         .unwrap();
+
+    //     tx.send(vec![
+    //         20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115,
+    //     ])
+    //     .unwrap();
+
+    //     tx.send(vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+    //         .unwrap();
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 240,
+    //             b: -6_000,
+    //             c: 100_000,
+    //             d: String::from("hello"),
+    //         }
+    //     );
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 20,
+    //             b: -8000,
+    //             c: 200_000,
+    //             d: String::from("greets"),
+    //         }
+    //     );
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 100,
+    //             b: -1_000,
+    //             c: 300_000,
+    //             d: String::from("oh my"),
+    //         }
+    //     );
+    // }
+
+    // #[test]
+    // fn deser_closed_rx() {
+    //     let (tx, rx) = deser_channel::<DeStruct>(4);
+    //     drop(rx);
+    //     let res = tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
+    //     assert_eq!(
+    //         res,
+    //         Err(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+    //     );
+    // }
+
+    // #[test]
+    // fn deser_closed_tx() {
+    //     let (tx, rx) = deser_channel::<DeStruct>(4);
+    //     drop(tx);
+    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
+    // }
+
+    // #[test]
+    // fn deser_ref_smoke() {
+    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
+    //     tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+    //         .unwrap();
+
+    //     tx.send_slice(&[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115])
+    //         .unwrap();
+
+    //     tx.send_slice(&[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+    //         .unwrap();
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 240,
+    //             b: -6_000,
+    //             c: 100_000,
+    //             d: String::from("hello"),
+    //         }
+    //     );
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 20,
+    //             b: -8000,
+    //             c: 200_000,
+    //             d: String::from("greets"),
+    //         }
+    //     );
+
+    //     assert_eq!(
+    //         rx.recv().unwrap(),
+    //         DeStruct {
+    //             a: 100,
+    //             b: -1_000,
+    //             c: 300_000,
+    //             d: String::from("oh my"),
+    //         }
+    //     );
+    // }
+
+    // #[test]
+    // fn deser_ref_closed_rx() {
+    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
+    //     drop(rx);
+    //     let res = tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
+    //     assert_eq!(res, Err(()));
+    // }
+
+    // #[test]
+    // fn deser_ref_closed_tx() {
+    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
+    //     drop(tx);
+    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
+    // }
 }
