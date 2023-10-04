@@ -430,24 +430,21 @@ impl Core {
 
             match dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => return None,
-                cmp::Ordering::Equal => {
-                    if dbg!(self
-                        .dequeue_pos
-                        .compare_exchange_weak(
-                            pos,
-                            pos.wrapping_add(1),
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        )
-                        .is_ok())
-                    {
+                cmp::Ordering::Equal => match dbg!(self.dequeue_pos.compare_exchange_weak(
+                    pos,
+                    pos.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )) {
+                    Ok(_) => {
                         slot.store(val.wrapping_add(SEQ_ONE), Ordering::Release);
                         return Some(Reservation {
                             core: self,
                             idx: (val & MASK) as u8,
                         });
                     }
-                }
+                    Err(actual) => pos = actual,
+                },
                 cmp::Ordering::Greater => pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed)),
             }
         }
@@ -463,23 +460,20 @@ impl Core {
 
             match dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => unreachable!(),
-                cmp::Ordering::Equal => {
-                    if dbg!(self
-                        .enqueue_pos
-                        .compare_exchange_weak(
-                            pos,
-                            pos.wrapping_add(1),
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                        )
-                        .is_ok())
-                    {
+                cmp::Ordering::Equal => match dbg!(self.enqueue_pos.compare_exchange_weak(
+                    pos,
+                    pos.wrapping_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )) {
+                    Ok(_) => {
                         let new = dbg!(dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
                         slot.store(dbg!(idx as usize | new), Ordering::Release);
                         self.cons_wait.wake();
                         return;
                     }
-                }
+                    Err(actual) => pos = actual,
+                },
                 cmp::Ordering::Greater => pos = dbg!(self.enqueue_pos.load(Ordering::Relaxed)),
             }
         }
