@@ -1,9 +1,9 @@
 use crate::loom::{
     cell::{self, UnsafeCell},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicUsize, Ordering},
 };
 use core::{
-    cmp,
+    cmp, fmt,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
 };
@@ -35,7 +35,27 @@ struct Core {
     prod_wait: WaitQueue,
     indices: IndexAllocWord,
     queue: [AtomicUsize; CAPACITY],
-    rx_claimed: AtomicBool,
+    /// Tracks the state of the the channel's senders/receivers, including
+    /// whether a receiver has been claimed, whether the receiver has closed the
+    /// channel (e.g. is dropped), and the number of active senders.
+    state: AtomicUsize,
+}
+
+/// Values for the `core.state` bitfield.
+mod state {
+    /// If set, the channel's receiver has been claimed, indicating that no
+    /// additional receivers can be claimed.
+    pub(super) const RX_CLAIMED: usize = 1 << 1;
+
+    /// If set, the channel's receiver has been dropped. This implies that the
+    /// channel is closed by the receive side.
+    pub(super) const RX_CLOSED: usize = 1 << 2;
+
+    /// Sender reference count; value of one sender.
+    pub(super) const TX_ONE: usize = 1 << 3;
+
+    /// Mask for extracting sender reference count.
+    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
 }
 
 impl<T> TrickyPipe<T> {
@@ -59,34 +79,27 @@ impl<T> TrickyPipe<T> {
                 prod_wait: WaitQueue::new(),
                 indices: IndexAllocWord::new(),
                 queue,
-                rx_claimed: AtomicBool::new(false),
+                state: AtomicUsize::new(0),
             },
             elements: [Self::EMPTY_CELL; CAPACITY],
         }
     }
 
     pub fn receiver(&self) -> Option<Receiver<'_, T>> {
-        self.try_claim_rx()?;
+        self.core.try_claim_rx()?;
 
         Some(Receiver { pipe: self })
     }
 
     pub fn sender(&self) -> Sender<'_, T> {
+        self.core.add_tx();
         Sender { pipe: self }
-    }
-
-    fn try_claim_rx(&self) -> Option<()> {
-        self.core
-            .rx_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| ())
     }
 }
 
 impl<T: Serialize> TrickyPipe<T> {
     pub fn ser_receiver(&self) -> Option<SerReceiver<'_>> {
-        self.try_claim_rx()?;
+        self.core.try_claim_rx()?;
 
         Some(SerReceiver {
             core: &self.core,
@@ -161,6 +174,7 @@ impl<T: Serialize> TrickyPipe<T> {
 
 impl<T: DeserializeOwned> TrickyPipe<T> {
     pub fn ser_sender(&self) -> SerSender<'_> {
+        self.core.add_tx();
         SerSender {
             core: &self.core,
             elems: self.elements.as_ptr() as *const (),
@@ -249,7 +263,7 @@ type DeserFn = fn(*const (), u8, &[u8]) -> postcard::Result<()>;
 
 impl<T> Receiver<'_, T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        let res = self.pipe.core.try_dequeue().ok_or(TryRecvError::Empty)?;
+        let res = self.pipe.core.try_dequeue()?;
         let elem =
             self.pipe.elements[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() });
         Ok(elem)
@@ -259,6 +273,7 @@ impl<T> Receiver<'_, T> {
         loop {
             match self.try_recv() {
                 Ok(e) => return Ok(e),
+                Err(TryRecvError::Closed) => return Err(RecvError::Closed),
                 Err(TryRecvError::Empty) => self
                     .pipe
                     .core
@@ -266,11 +281,18 @@ impl<T> Receiver<'_, T> {
                     .wait()
                     .await
                     .map_err(|_| RecvError::Closed)?,
-                Err(TryRecvError::Recv(e)) => return Err(e),
             }
         }
     }
 }
+
+impl<T> Drop for Receiver<'_, T> {
+    fn drop(&mut self) {
+        self.pipe.core.close_rx();
+    }
+}
+
+// === impl SerReceiver ===
 
 impl SerReceiver<'_> {
     /// Attempt to receive a message from the channel, if there are currently
@@ -279,7 +301,7 @@ impl SerReceiver<'_> {
     /// This method returns a [`SerRecvRef`] which may be used to serialize the
     /// message.
     pub fn try_recv(&self) -> Result<SerRecvRef<'_>, TryRecvError> {
-        let res = self.core.try_dequeue().ok_or(TryRecvError::Empty)?;
+        let res = self.core.try_dequeue()?;
         Ok(SerRecvRef {
             pipe: res,
             elems: self.elems,
@@ -295,8 +317,9 @@ impl SerReceiver<'_> {
     pub async fn recv(&self) -> Result<SerRecvRef<'_>, RecvError> {
         let res = loop {
             match self.core.try_dequeue() {
-                Some(res) => break res,
-                None => self
+                Ok(res) => break res,
+                Err(TryRecvError::Closed) => return Err(RecvError::Closed),
+                Err(TryRecvError::Empty) => self
                     .core
                     .cons_wait
                     .wait()
@@ -312,6 +335,14 @@ impl SerReceiver<'_> {
         })
     }
 }
+
+impl Drop for SerReceiver<'_> {
+    fn drop(&mut self) {
+        self.core.close_rx();
+    }
+}
+
+// === impl SerRecvRef ===
 
 impl SerRecvRef<'_> {
     pub fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
@@ -336,27 +367,45 @@ impl SerRecvRef<'_> {
     }
 }
 
+impl fmt::Debug for SerRecvRef<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            pipe,
+            elems: _,
+            vtable,
+        } = self;
+        f.debug_struct("SerRecvRef")
+            .field("pipe", &pipe)
+            .field("vtable", &format_args!("{vtable:p}"))
+            .finish()
+    }
+}
+
+// === impl SerSender ===
+
 impl SerSender<'_> {
-    pub fn try_send(&self, bytes: &[u8]) -> Result<(), SerTrySendError> {
-        self.try_send_inner(bytes, self.vtable.from_bytes_framed)
+    pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
+        self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
     }
 
-    pub fn try_send_framed(&self, bytes: &[u8]) -> Result<(), SerTrySendError> {
-        self.try_send_inner(bytes, self.vtable.from_bytes_framed)
+    pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
+        self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
     }
 
     pub async fn send(&self, bytes: &[u8]) -> Result<(), SerSendError> {
-        self.send_inner(bytes, self.vtable.from_bytes).await
+        self.send_inner(bytes.as_ref(), self.vtable.from_bytes)
+            .await
     }
 
-    pub async fn send_framed(&self, bytes: &[u8]) -> Result<(), SerSendError> {
-        self.send_inner(bytes, self.vtable.from_bytes_framed).await
+    pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
+        self.send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
+            .await
     }
 
     async fn send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerSendError> {
         loop {
             match self.core.try_reserve() {
-                Some(res) => {
+                Ok(res) => {
                     // try writing the bytes to the reservation.
                     deserialize(self.elems, res.idx, bytes).map_err(SerSendError::Deserialize)?;
                     // if we successfully deserialized the bytes, commit the send.
@@ -364,7 +413,8 @@ impl SerSender<'_> {
                     res.commit_send();
                     return Ok(());
                 }
-                None => self
+                Err(TrySendError::Closed) => return Err(SerSendError::Closed),
+                Err(TrySendError::Full) => self
                     .core
                     .prod_wait
                     .wait()
@@ -375,10 +425,9 @@ impl SerSender<'_> {
     }
 
     fn try_send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerTrySendError> {
-        let res = self.core.try_reserve().ok_or(SerTrySendError::Full)?;
+        let res = self.core.try_reserve().map_err(SerTrySendError::Send)?;
         // try writing the bytes to the reservation.
-        deserialize(self.elems, res.idx, bytes)
-            .map_err(|err| SerTrySendError::Send(SerSendError::Deserialize(err)))?;
+        deserialize(self.elems, res.idx, bytes).map_err(SerTrySendError::Deserialize)?;
         // if we successfully deserialized the bytes, commit the send.
         // otherwise, we'll release the send index when we drop the reservation.
         res.commit_send();
@@ -386,41 +435,76 @@ impl SerSender<'_> {
     }
 }
 
+impl Clone for SerSender<'_> {
+    fn clone(&self) -> Self {
+        self.core.add_tx();
+        Self {
+            core: self.core,
+            elems: self.elems,
+            vtable: self.vtable,
+        }
+    }
+}
+
+impl Drop for SerSender<'_> {
+    fn drop(&mut self) {
+        self.core.drop_tx();
+    }
+}
+
+// === impl Sender ===
+
 impl<T> Sender<'_, T> {
-    pub fn try_reserve(&self) -> Result<SendRef<'_, T>, TryEnqueueError> {
-        let pipe = self.pipe.core.try_reserve().ok_or(TryEnqueueError::Full)?;
+    pub fn try_reserve(&self) -> Result<SendRef<'_, T>, TrySendError> {
+        let pipe = self.pipe.core.try_reserve()?;
         let cell = self.pipe.elements[pipe.idx as usize].get_mut();
         Ok(SendRef { cell, pipe })
     }
 
-    pub async fn reserve(&self) -> Result<SendRef<'_, T>, EnqueueError> {
+    pub async fn reserve(&self) -> Result<SendRef<'_, T>, SendError> {
         let pipe = self.pipe.core.reserve().await?;
         let cell = self.pipe.elements[pipe.idx as usize].get_mut();
         Ok(SendRef { cell, pipe })
     }
 }
 
+impl<T> Clone for Sender<'_, T> {
+    fn clone(&self) -> Self {
+        self.pipe.core.add_tx();
+        Self { pipe: self.pipe }
+    }
+}
+
+impl<T> Drop for Sender<'_, T> {
+    fn drop(&mut self) {
+        self.pipe.core.drop_tx();
+    }
+}
+
 impl Core {
-    fn try_reserve(&self) -> Option<Reservation<'_>> {
+    fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
+        if dbg!(self.state.load(Ordering::Acquire)) & state::RX_CLOSED == state::RX_CLOSED {
+            return Err(TrySendError::Closed);
+        }
         self.indices
             .allocate()
+            .ok_or(TrySendError::Full)
             .map(|idx| Reservation { core: self, idx })
     }
 
-    async fn reserve(&self) -> Result<Reservation, EnqueueError> {
+    async fn reserve(&self) -> Result<Reservation, SendError> {
         loop {
             match self.try_reserve() {
-                Some(res) => return Ok(res),
-                None => self
-                    .prod_wait
-                    .wait()
-                    .await
-                    .map_err(|_| EnqueueError::Closed)?,
+                Ok(res) => return Ok(res),
+                Err(TrySendError::Closed) => return Err(SendError::Closed),
+                Err(TrySendError::Full) => {
+                    self.prod_wait.wait().await.map_err(|_| SendError::Closed)?
+                }
             }
         }
     }
 
-    fn try_dequeue(&self) -> Option<Reservation<'_>> {
+    fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
         let mut pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed));
         loop {
             let slot = &self.queue[pos & MASK];
@@ -429,7 +513,13 @@ impl Core {
             let dif = dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
             match dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less => return None,
+                cmp::Ordering::Less => {
+                    if dbg!(self.state.load(Ordering::Acquire)) & state::TX_MASK == 0 {
+                        return Err(TryRecvError::Closed);
+                    } else {
+                        return Err(TryRecvError::Empty);
+                    }
+                }
                 cmp::Ordering::Equal => match dbg!(self.dequeue_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
@@ -438,7 +528,7 @@ impl Core {
                 )) {
                     Ok(_) => {
                         slot.store(val.wrapping_add(SEQ_ONE), Ordering::Release);
-                        return Some(Reservation {
+                        return Ok(Reservation {
                             core: self,
                             idx: (val & MASK) as u8,
                         });
@@ -483,6 +573,43 @@ impl Core {
         self.indices.free(idx);
         self.prod_wait.wake();
     }
+
+    fn try_claim_rx(&self) -> Option<()> {
+        // set `RX_CLAIMED`.
+        let state = dbg!(self.state.fetch_or(state::RX_CLAIMED, Ordering::AcqRel));
+        // if the `RX_CLAIMED` bit was not set, we successfully claimed the
+        // receiver.
+        let claimed = dbg!(state & state::RX_CLAIMED) == 0;
+        claimed.then_some(())
+    }
+
+    /// Close the channel from the receiver.
+    fn close_rx(&self) {
+        // set the state to indicate that the receiver was dropped.
+        dbg!(self.state.fetch_or(state::RX_CLOSED, Ordering::Release));
+        // notify any waiting senders that the channel is closed.
+        self.prod_wait.close();
+    }
+
+    #[inline]
+    fn add_tx(&self) {
+        dbg!(self.state.fetch_add(state::TX_ONE, Ordering::Relaxed));
+    }
+
+    /// Drop a sender
+    #[inline]
+    fn drop_tx(&self) {
+        let val = dbg!(self.state.fetch_sub(state::TX_ONE, Ordering::Relaxed));
+        if val & state::TX_MASK == state::TX_ONE {
+            self.close_tx();
+        }
+    }
+
+    #[inline(never)]
+    fn close_tx(&self) {
+        atomic::fence(Ordering::Release);
+        self.cons_wait.close();
+    }
 }
 
 pub struct SendRef<'core, T> {
@@ -513,6 +640,12 @@ impl<T> SendRef<'_, T> {
     }
 }
 
+impl<T> fmt::Debug for SendRef<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("SendRef").field(&self.pipe).finish()
+    }
+}
+
 impl<T> Deref for SendRef<'_, T> {
     type Target = MaybeUninit<T>;
     fn deref(&self) -> &Self::Target {
@@ -526,6 +659,7 @@ impl<T> DerefMut for SendRef<'_, T> {
     }
 }
 
+// === impl Reservation ===
 impl Reservation<'_> {
     fn commit_send(self) {
         // don't run the destructor that frees the index, since we are dropping
@@ -542,14 +676,24 @@ impl Drop for Reservation<'_> {
     }
 }
 
+impl fmt::Debug for Reservation<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { core, idx } = self;
+        f.debug_struct("Reservation")
+            .field("core", &format_args!("{core:#p}"))
+            .field("idx", idx)
+            .finish()
+    }
+}
+
 /// Represents a closed error
 #[derive(Debug, Eq, PartialEq)]
-pub enum EnqueueError {
+pub enum SendError {
     Closed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum TryEnqueueError {
+pub enum TrySendError {
     Full,
     Closed,
 }
@@ -557,7 +701,7 @@ pub enum TryEnqueueError {
 #[derive(Debug, Eq, PartialEq)]
 pub enum TryRecvError {
     Empty,
-    Recv(RecvError),
+    Closed,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -573,8 +717,8 @@ pub enum SerSendError {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum SerTrySendError {
-    Full,
-    Send(SerSendError),
+    Send(TrySendError),
+    Deserialize(postcard::Error),
 }
 
 #[cfg(test)]
@@ -673,33 +817,34 @@ mod test {
         );
     }
 
-    // #[test]
-    // fn normal_closed_rx() {
-    //     let (tx, rx) = channel::<UnSerStruct>(4);
-    //     drop(rx);
-    //     let res = tx.send(UnSerStruct {
-    //         a: 240,
-    //         b: -6_000,
-    //         c: 100_000,
-    //         d: String::from("hello"),
-    //     });
-    //     assert_eq!(
-    //         res,
-    //         Err(UnSerStruct {
-    //             a: 240,
-    //             b: -6_000,
-    //             c: 100_000,
-    //             d: String::from("hello"),
-    //         })
-    //     );
-    // }
+    #[test]
+    fn normal_closed_rx() {
+        let chan = TrickyPipe::<UnSerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.receiver().unwrap();
+        drop(rx);
+        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed,);
+    }
 
-    // #[test]
-    // fn normal_closed_tx() {
-    //     let (tx, rx) = channel::<UnSerStruct>(4);
-    //     drop(tx);
-    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
-    // }
+    #[test]
+    fn normal_closed_tx() {
+        let chan = TrickyPipe::<UnSerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.receiver().unwrap();
+        drop(tx);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+    }
+
+    #[test]
+    fn normal_closed_cloned_tx() {
+        let chan = TrickyPipe::<UnSerStruct>::new();
+        let tx1 = chan.sender();
+        let tx2 = tx1.clone();
+        let rx = chan.receiver().unwrap();
+        drop(tx1);
+        drop(tx2);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+    }
 
     #[test]
     fn ser_smoke() {
@@ -745,33 +890,34 @@ mod test {
         );
     }
 
-    // #[test]
-    // fn ser_closed_rx() {
-    //     let (tx, rx) = ser_channel::<SerStruct>(4);
-    //     drop(rx);
-    //     let res = tx.send(SerStruct {
-    //         a: 240,
-    //         b: -6_000,
-    //         c: 100_000,
-    //         d: String::from("hello"),
-    //     });
-    //     assert_eq!(
-    //         res,
-    //         Err(SerStruct {
-    //             a: 240,
-    //             b: -6_000,
-    //             c: 100_000,
-    //             d: String::from("hello"),
-    //         })
-    //     );
-    // }
+    #[test]
+    fn ser_closed_rx() {
+        let chan = TrickyPipe::<SerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.ser_receiver().unwrap();
+        drop(rx);
+        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed);
+    }
 
-    // #[test]
-    // fn ser_closed_tx() {
-    //     let (tx, rx) = ser_channel::<SerStruct>(4);
-    //     drop(tx);
-    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
-    // }
+    #[test]
+    fn ser_closed_tx() {
+        let chan = TrickyPipe::<SerStruct>::new();
+        let tx = chan.sender();
+        let rx = chan.ser_receiver().unwrap();
+        drop(tx);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+    }
+
+    #[test]
+    fn ser_closed_cloned_tx() {
+        let chan = TrickyPipe::<SerStruct>::new();
+        let tx1 = chan.sender();
+        let tx2 = tx1.clone();
+        let rx = chan.ser_receiver().unwrap();
+        drop(tx1);
+        drop(tx2);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+    }
 
     #[test]
     fn ser_ref_smoke() {
@@ -818,35 +964,6 @@ mod test {
     }
 
     // #[test]
-    // fn ser_ref_closed_rx() {
-    //     let (tx, rx) = ser_ref_channel::<SerStruct>(4);
-    //     drop(rx);
-    //     let res = tx.send(SerStruct {
-    //         a: 240,
-    //         b: -6_000,
-    //         c: 100_000,
-    //         d: String::from("hello"),
-    //     });
-    //     assert_eq!(
-    //         res,
-    //         Err(SerStruct {
-    //             a: 240,
-    //             b: -6_000,
-    //             c: 100_000,
-    //             d: String::from("hello"),
-    //         })
-    //     );
-    // }
-
-    // #[test]
-    // fn ser_ref_closed_tx() {
-    //     let (tx, rx) = ser_ref_channel::<SerStruct>(4);
-    //     drop(tx);
-    //     let mut buf = [0u8; 128];
-    //     assert_eq!(rx.recv_slice(&mut buf), Err(()));
-    // }
-
-    // #[test]
     // fn deser_smoke() {
     //     let (tx, rx) = deser_channel::<DeStruct>(4);
     //     tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
@@ -891,23 +1008,38 @@ mod test {
     //     );
     // }
 
-    // #[test]
-    // fn deser_closed_rx() {
-    //     let (tx, rx) = deser_channel::<DeStruct>(4);
-    //     drop(rx);
-    //     let res = tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-    //     assert_eq!(
-    //         res,
-    //         Err(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
-    //     );
-    // }
+    #[test]
+    fn deser_closed_rx() {
+        let chan = TrickyPipe::<DeStruct>::new();
+        let tx = chan.ser_sender();
+        let rx = chan.receiver().unwrap();
+        drop(rx);
+        let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
+        assert_eq!(
+            res.unwrap_err(),
+            SerTrySendError::Send(TrySendError::Closed),
+        );
+    }
 
-    // #[test]
-    // fn deser_closed_tx() {
-    //     let (tx, rx) = deser_channel::<DeStruct>(4);
-    //     drop(tx);
-    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
-    // }
+    #[test]
+    fn deser_closed_tx() {
+        let chan = TrickyPipe::<DeStruct>::new();
+        let tx = chan.ser_sender();
+        let rx = chan.receiver().unwrap();
+        drop(tx);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+    }
+
+    #[test]
+    fn deser_closed_cloned_tx() {
+        let chan = TrickyPipe::<DeStruct>::new();
+        let tx1 = chan.ser_sender();
+        let tx2 = tx1.clone();
+        let rx = chan.receiver().unwrap();
+        drop(tx1);
+        drop(tx2);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+    }
 
     // #[test]
     // fn deser_ref_smoke() {
@@ -950,20 +1082,5 @@ mod test {
     //             d: String::from("oh my"),
     //         }
     //     );
-    // }
-
-    // #[test]
-    // fn deser_ref_closed_rx() {
-    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
-    //     drop(rx);
-    //     let res = tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-    //     assert_eq!(res, Err(()));
-    // }
-
-    // #[test]
-    // fn deser_ref_closed_tx() {
-    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
-    //     drop(tx);
-    //     assert_eq!(rx.recv(), Err(RecvError::Oops));
     // }
 }
