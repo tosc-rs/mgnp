@@ -3,6 +3,7 @@ use crate::loom::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use core::{
+    cmp,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
 };
@@ -427,8 +428,9 @@ impl Core {
             let seq = dbg!(val >> SHIFT);
             let dif = dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
-            match dbg!(dif) {
-                0 => {
+            match dbg!(dif).cmp(&0) {
+                cmp::Ordering::Less => return None,
+                cmp::Ordering::Equal => {
                     if dbg!(self
                         .dequeue_pos
                         .compare_exchange_weak(
@@ -446,8 +448,7 @@ impl Core {
                         });
                     }
                 }
-                dif if dif < 0 => return None,
-                _ => pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed)),
+                cmp::Ordering::Greater => pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed)),
             }
         }
     }
@@ -458,10 +459,11 @@ impl Core {
         loop {
             let slot = &self.queue[dbg!(pos & MASK)];
             let seq = dbg!(slot.load(Ordering::Acquire)) >> SHIFT;
-            let dif = dbg!(dbg!(seq as i8).wrapping_sub(pos as i8));
+            let dif = dbg!(seq as i8).wrapping_sub(pos as i8);
 
-            match dif {
-                0 => {
+            match dbg!(dif).cmp(&0) {
+                cmp::Ordering::Less => unreachable!(),
+                cmp::Ordering::Equal => {
                     if dbg!(self
                         .enqueue_pos
                         .compare_exchange_weak(
@@ -478,8 +480,7 @@ impl Core {
                         return;
                     }
                 }
-                dif if dif < 0 => unreachable!(),
-                _ => pos = self.enqueue_pos.load(Ordering::Relaxed),
+                cmp::Ordering::Greater => pos = dbg!(self.enqueue_pos.load(Ordering::Relaxed)),
             }
         }
     }
