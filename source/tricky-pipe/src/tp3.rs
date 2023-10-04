@@ -1,6 +1,6 @@
 use crate::loom::{
     cell::{self, UnsafeCell},
-    sync::atomic::{self, AtomicUsize, Ordering},
+    sync::atomic::{self, AtomicUsize, Ordering::*},
 };
 use core::{
     cmp, fmt,
@@ -483,7 +483,7 @@ impl<T> Drop for Sender<'_, T> {
 
 impl Core {
     fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
-        if dbg!(self.state.load(Ordering::Acquire)) & state::RX_CLOSED == state::RX_CLOSED {
+        if dbg!(self.state.load(Acquire)) & state::RX_CLOSED == state::RX_CLOSED {
             return Err(TrySendError::Closed);
         }
         self.indices
@@ -505,16 +505,16 @@ impl Core {
     }
 
     fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
-        let mut pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed));
+        let mut pos = dbg!(self.dequeue_pos.load(Relaxed));
         loop {
             let slot = &self.queue[pos & MASK];
-            let val = dbg!(slot.load(Ordering::Acquire));
+            let val = dbg!(slot.load(Acquire));
             let seq = dbg!(val >> SHIFT);
             let dif = dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
             match dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => {
-                    if dbg!(self.state.load(Ordering::Acquire)) & state::TX_MASK == 0 {
+                    if dbg!(self.state.load(Acquire)) & state::TX_MASK == 0 {
                         return Err(TryRecvError::Closed);
                     } else {
                         return Err(TryRecvError::Empty);
@@ -523,11 +523,11 @@ impl Core {
                 cmp::Ordering::Equal => match dbg!(self.dequeue_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Relaxed,
+                    Relaxed,
                 )) {
                     Ok(_) => {
-                        slot.store(val.wrapping_add(SEQ_ONE), Ordering::Release);
+                        slot.store(val.wrapping_add(SEQ_ONE), Release);
                         return Ok(Reservation {
                             core: self,
                             idx: (val & MASK) as u8,
@@ -535,17 +535,17 @@ impl Core {
                     }
                     Err(actual) => pos = actual,
                 },
-                cmp::Ordering::Greater => pos = dbg!(self.dequeue_pos.load(Ordering::Relaxed)),
+                cmp::Ordering::Greater => pos = dbg!(self.dequeue_pos.load(Relaxed)),
             }
         }
     }
 
     fn commit_send(&self, idx: u8) {
         debug_assert!(dbg!(idx) as usize <= MASK);
-        let mut pos = dbg!(self.enqueue_pos.load(Ordering::Relaxed));
+        let mut pos = dbg!(self.enqueue_pos.load(Relaxed));
         loop {
             let slot = &self.queue[dbg!(pos & MASK)];
-            let seq = dbg!(slot.load(Ordering::Acquire)) >> SHIFT;
+            let seq = dbg!(slot.load(Acquire)) >> SHIFT;
             let dif = dbg!(seq as i8).wrapping_sub(pos as i8);
 
             match dbg!(dif).cmp(&0) {
@@ -553,18 +553,18 @@ impl Core {
                 cmp::Ordering::Equal => match dbg!(self.enqueue_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
+                    Relaxed,
+                    Relaxed,
                 )) {
                     Ok(_) => {
                         let new = dbg!(dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
-                        slot.store(dbg!(idx as usize | new), Ordering::Release);
+                        slot.store(dbg!(idx as usize | new), Release);
                         self.cons_wait.wake();
                         return;
                     }
                     Err(actual) => pos = actual,
                 },
-                cmp::Ordering::Greater => pos = dbg!(self.enqueue_pos.load(Ordering::Relaxed)),
+                cmp::Ordering::Greater => pos = dbg!(self.enqueue_pos.load(Relaxed)),
             }
         }
     }
@@ -576,7 +576,7 @@ impl Core {
 
     fn try_claim_rx(&self) -> Option<()> {
         // set `RX_CLAIMED`.
-        let state = dbg!(self.state.fetch_or(state::RX_CLAIMED, Ordering::AcqRel));
+        let state = dbg!(self.state.fetch_or(state::RX_CLAIMED, AcqRel));
         // if the `RX_CLAIMED` bit was not set, we successfully claimed the
         // receiver.
         let claimed = dbg!(state & state::RX_CLAIMED) == 0;
@@ -586,20 +586,20 @@ impl Core {
     /// Close the channel from the receiver.
     fn close_rx(&self) {
         // set the state to indicate that the receiver was dropped.
-        dbg!(self.state.fetch_or(state::RX_CLOSED, Ordering::Release));
+        dbg!(self.state.fetch_or(state::RX_CLOSED, Release));
         // notify any waiting senders that the channel is closed.
         self.prod_wait.close();
     }
 
     #[inline]
     fn add_tx(&self) {
-        dbg!(self.state.fetch_add(state::TX_ONE, Ordering::Relaxed));
+        dbg!(self.state.fetch_add(state::TX_ONE, Relaxed));
     }
 
     /// Drop a sender
     #[inline]
     fn drop_tx(&self) {
-        let val = dbg!(self.state.fetch_sub(state::TX_ONE, Ordering::Relaxed));
+        let val = dbg!(self.state.fetch_sub(state::TX_ONE, Relaxed));
         if val & state::TX_MASK == state::TX_ONE {
             self.close_tx();
         }
@@ -607,7 +607,7 @@ impl Core {
 
     #[inline(never)]
     fn close_tx(&self) {
-        atomic::fence(Ordering::Release);
+        atomic::fence(Release);
         self.cons_wait.close();
     }
 }
