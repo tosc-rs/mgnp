@@ -392,7 +392,7 @@ impl SerSender<'_> {
         self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
     }
 
-    pub async fn send(&self, bytes: &[u8]) -> Result<(), SerSendError> {
+    pub async fn send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
         self.send_inner(bytes.as_ref(), self.vtable.from_bytes)
             .await
     }
@@ -723,7 +723,6 @@ pub enum SerTrySendError {
 
 #[cfg(test)]
 mod test {
-    use crate::spitebuf::Storage;
 
     use super::*;
     use serde::Deserialize;
@@ -963,50 +962,50 @@ mod test {
         );
     }
 
-    // #[test]
-    // fn deser_smoke() {
-    //     let (tx, rx) = deser_channel::<DeStruct>(4);
-    //     tx.send(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
-    //         .unwrap();
+    #[test]
+    fn deser_smoke() {
+        let chan = TrickyPipe::<DeStruct>::new();
+        let tx = chan.ser_sender();
+        let rx = chan.receiver().unwrap();
+        tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
+            .unwrap();
 
-    //     tx.send(vec![
-    //         20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115,
-    //     ])
-    //     .unwrap();
+        tx.try_send([20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115])
+            .unwrap();
 
-    //     tx.send(vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
-    //         .unwrap();
+        tx.try_send([100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
+            .unwrap();
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 240,
-    //             b: -6_000,
-    //             c: 100_000,
-    //             d: String::from("hello"),
-    //         }
-    //     );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DeStruct {
+                a: 240,
+                b: -6_000,
+                c: 100_000,
+                d: String::from("hello"),
+            })
+        );
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 20,
-    //             b: -8000,
-    //             c: 200_000,
-    //             d: String::from("greets"),
-    //         }
-    //     );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DeStruct {
+                a: 20,
+                b: -8000,
+                c: 200_000,
+                d: String::from("greets"),
+            })
+        );
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 100,
-    //             b: -1_000,
-    //             c: 300_000,
-    //             d: String::from("oh my"),
-    //         }
-    //     );
-    // }
+        assert_eq!(
+            rx.try_recv(),
+            Ok(DeStruct {
+                a: 100,
+                b: -1_000,
+                c: 300_000,
+                d: String::from("oh my"),
+            })
+        );
+    }
 
     #[test]
     fn deser_closed_rx() {
@@ -1041,46 +1040,32 @@ mod test {
         assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
     }
 
-    // #[test]
-    // fn deser_ref_smoke() {
-    //     let (tx, rx) = deser_ref_channel::<DeStruct>(4);
-    //     tx.send_slice(&[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
-    //         .unwrap();
+    #[test]
+    fn deser_ser_smoke() {
+        // Ideally the "serialize on both sides" case would just be a BBQueue or
+        // some other kind of framed byte pipe thingy, but we should make sure
+        // it works anyway i guess...
+        let chan = TrickyPipe::<SerDeStruct>::new();
+        let tx = chan.ser_sender();
+        let rx = chan.ser_receiver().unwrap();
+        const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
+        const MSG_TWO: &[u8] = &[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115];
+        const MSG_THREE: &[u8] = &[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121];
+        tx.try_send(MSG_ONE).unwrap();
 
-    //     tx.send_slice(&[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115])
-    //         .unwrap();
+        tx.try_send(MSG_TWO).unwrap();
 
-    //     tx.send_slice(&[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
-    //         .unwrap();
+        tx.try_send(MSG_THREE).unwrap();
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 240,
-    //             b: -6_000,
-    //             c: 100_000,
-    //             d: String::from("hello"),
-    //         }
-    //     );
+        let mut buf = [0u8; 128];
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 20,
-    //             b: -8000,
-    //             c: 200_000,
-    //             d: String::from("greets"),
-    //         }
-    //     );
+        assert_eq!(rx.try_recv().unwrap().to_slice(&mut buf).unwrap(), MSG_ONE);
 
-    //     assert_eq!(
-    //         rx.recv().unwrap(),
-    //         DeStruct {
-    //             a: 100,
-    //             b: -1_000,
-    //             c: 300_000,
-    //             d: String::from("oh my"),
-    //         }
-    //     );
-    // }
+        assert_eq!(rx.try_recv().unwrap().to_slice(&mut buf).unwrap(), MSG_TWO);
+
+        assert_eq!(
+            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
+            MSG_THREE
+        );
+    }
 }
