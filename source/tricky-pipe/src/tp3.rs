@@ -25,9 +25,14 @@ macro_rules! dbg {
     };
 }
 
+#[cfg(any(test, feature = "alloc"))]
+mod arc_impl;
 mod static_impl;
 
 pub use self::static_impl::*;
+
+#[cfg(any(test, feature = "alloc"))]
+pub use self::arc_impl::*;
 
 /// Values for the `core.state` bitfield.
 mod state {
