@@ -1,6 +1,6 @@
 use crate::loom::{
     cell::{self, UnsafeCell},
-    sync::atomic::{self, AtomicUsize, Ordering::*},
+    sync::atomic::{self, AtomicU16, AtomicUsize, Ordering::*},
 };
 use core::{
     cmp, fmt,
@@ -13,8 +13,8 @@ use serde::{de::DeserializeOwned, Serialize};
 
 const CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
 const SHIFT: usize = CAPACITY.trailing_zeros() as usize;
-const SEQ_ONE: usize = 1 << SHIFT;
-const MASK: usize = SEQ_ONE - 1;
+const SEQ_ONE: u16 = 1 << SHIFT;
+const MASK: u16 = SEQ_ONE - 1;
 
 #[cfg(not(test))]
 macro_rules! dbg {
@@ -29,12 +29,16 @@ pub struct TrickyPipe<T> {
 }
 
 struct Core {
-    dequeue_pos: AtomicUsize,
-    enqueue_pos: AtomicUsize,
+    // TODO(eliza): should maybe cache-pad `dequeue_pos`` and `enqueue_pos` on
+    // architectures with big cache lines...?
+    //
+    // or, we could lay the struct out so that other fields provide "free" padding...
+    dequeue_pos: AtomicU16,
+    enqueue_pos: AtomicU16,
     cons_wait: WaitCell,
     prod_wait: WaitQueue,
     indices: IndexAllocWord,
-    queue: [AtomicUsize; CAPACITY],
+    queue: [AtomicU16; CAPACITY],
     /// Tracks the state of the the channel's senders/receivers, including
     /// whether a receiver has been claimed, whether the receiver has closed the
     /// channel (e.g. is dropped), and the number of active senders.
@@ -61,20 +65,20 @@ mod state {
 impl<T> TrickyPipe<T> {
     const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
     #[allow(clippy::declare_interior_mutable_const)]
-    const QUEUE_INIT: AtomicUsize = AtomicUsize::new(0);
+    const QUEUE_INIT: AtomicU16 = AtomicU16::new(0);
 
     pub const fn new() -> Self {
         let mut queue = [Self::QUEUE_INIT; CAPACITY];
         let mut i = 0;
 
         while i != CAPACITY {
-            queue[i] = AtomicUsize::new(i << SHIFT);
+            queue[i] = AtomicU16::new((i as u16) << SHIFT);
             i += 1;
         }
         Self {
             core: Core {
-                dequeue_pos: AtomicUsize::new(0),
-                enqueue_pos: AtomicUsize::new(0),
+                dequeue_pos: AtomicU16::new(0),
+                enqueue_pos: AtomicU16::new(0),
                 cons_wait: WaitCell::new(),
                 prod_wait: WaitQueue::new(),
                 indices: IndexAllocWord::new(),
@@ -507,7 +511,7 @@ impl Core {
     fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
         let mut pos = dbg!(self.dequeue_pos.load(Relaxed));
         loop {
-            let slot = &self.queue[pos & MASK];
+            let slot = &self.queue[(pos & MASK) as usize];
             let val = dbg!(slot.load(Acquire));
             let seq = dbg!(val >> SHIFT);
             let dif = dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
@@ -541,10 +545,10 @@ impl Core {
     }
 
     fn commit_send(&self, idx: u8) {
-        debug_assert!(dbg!(idx) as usize <= MASK);
+        debug_assert!(dbg!(idx) as u16 <= MASK);
         let mut pos = dbg!(self.enqueue_pos.load(Relaxed));
         loop {
-            let slot = &self.queue[dbg!(pos & MASK)];
+            let slot = &self.queue[dbg!(pos & MASK) as usize];
             let seq = dbg!(slot.load(Acquire)) >> SHIFT;
             let dif = dbg!(seq as i8).wrapping_sub(pos as i8);
 
@@ -558,7 +562,7 @@ impl Core {
                 )) {
                     Ok(_) => {
                         let new = dbg!(dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
-                        slot.store(dbg!(idx as usize | new), Release);
+                        slot.store(dbg!(idx as u16 | new), Release);
                         self.cons_wait.wake();
                         return;
                     }
