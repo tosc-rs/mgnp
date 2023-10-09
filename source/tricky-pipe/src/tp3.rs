@@ -4,8 +4,10 @@ use crate::loom::{
 };
 use core::{
     cmp, fmt,
+    marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
+    ptr,
 };
 use maitake_sync::{WaitCell, WaitQueue};
 use mnemos_bitslab::index::IndexAllocWord;
@@ -23,9 +25,25 @@ macro_rules! dbg {
     };
 }
 
-pub struct TrickyPipe<T> {
-    elements: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
-    core: Core,
+mod static_impl;
+
+pub use self::static_impl::*;
+
+/// Values for the `core.state` bitfield.
+mod state {
+    /// If set, the channel's receiver has been claimed, indicating that no
+    /// additional receivers can be claimed.
+    pub(super) const RX_CLAIMED: usize = 1 << 1;
+
+    /// If set, the channel's receiver has been dropped. This implies that the
+    /// channel is closed by the receive side.
+    pub(super) const RX_CLOSED: usize = 1 << 2;
+
+    /// Sender reference count; value of one sender.
+    pub(super) const TX_ONE: usize = 1 << 3;
+
+    /// Mask for extracting sender reference count.
+    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
 }
 
 struct Core {
@@ -45,201 +63,20 @@ struct Core {
     state: AtomicUsize,
 }
 
-/// Values for the `core.state` bitfield.
-mod state {
-    /// If set, the channel's receiver has been claimed, indicating that no
-    /// additional receivers can be claimed.
-    pub(super) const RX_CLAIMED: usize = 1 << 1;
-
-    /// If set, the channel's receiver has been dropped. This implies that the
-    /// channel is closed by the receive side.
-    pub(super) const RX_CLOSED: usize = 1 << 2;
-
-    /// Sender reference count; value of one sender.
-    pub(super) const TX_ONE: usize = 1 << 3;
-
-    /// Mask for extracting sender reference count.
-    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
+/// A type-erased slice.
+#[derive(Copy, Clone)]
+struct ErasedSlice {
+    ptr: *const (),
+    len: usize,
+    #[cfg(debug_assertions)]
+    typ: core::any::TypeId,
 }
 
-impl<T> TrickyPipe<T> {
-    const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
-    #[allow(clippy::declare_interior_mutable_const)]
-    const QUEUE_INIT: AtomicU16 = AtomicU16::new(0);
-
-    pub const fn new() -> Self {
-        let mut queue = [Self::QUEUE_INIT; CAPACITY];
-        let mut i = 0;
-
-        while i != CAPACITY {
-            queue[i] = AtomicU16::new((i as u16) << SHIFT);
-            i += 1;
-        }
-        Self {
-            core: Core {
-                dequeue_pos: AtomicU16::new(0),
-                enqueue_pos: AtomicU16::new(0),
-                cons_wait: WaitCell::new(),
-                prod_wait: WaitQueue::new(),
-                indices: IndexAllocWord::new(),
-                queue,
-                state: AtomicUsize::new(0),
-            },
-            elements: [Self::EMPTY_CELL; CAPACITY],
-        }
-    }
-
-    pub fn receiver(&self) -> Option<Receiver<'_, T>> {
-        self.core.try_claim_rx()?;
-
-        Some(Receiver { pipe: self })
-    }
-
-    pub fn sender(&self) -> Sender<'_, T> {
-        self.core.add_tx();
-        Sender { pipe: self }
-    }
-}
-
-impl<T: Serialize> TrickyPipe<T> {
-    pub fn ser_receiver(&self) -> Option<SerReceiver<'_>> {
-        self.core.try_claim_rx()?;
-
-        Some(SerReceiver {
-            core: &self.core,
-            elems: self.elements.as_ptr() as *const (),
-            vtable: Self::SER_VTABLE,
-        })
-    }
-
-    const SER_VTABLE: &'static SerVtable = &SerVtable {
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec: Self::to_vec,
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec_framed: Self::to_vec_framed,
-        to_slice: Self::to_slice,
-        to_slice_framed: Self::to_slice_framed,
-    };
-
-    fn to_slice(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with(|ptr| {
-                let elem = (*ptr).assume_init_ref();
-                postcard::to_slice(elem, buf)
-            })
-        }
-    }
-
-    fn to_slice_framed(elems: *const (), idx: u8, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with(|ptr| {
-                let elem = (*ptr).assume_init_ref();
-                postcard::to_slice_cobs(elem, buf)
-            })
-        }
-    }
-
-    #[cfg(any(test, feature = "alloc"))]
-    fn to_vec(elems: *const (), idx: u8) -> postcard::Result<alloc::vec::Vec<u8>> {
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with(|ptr| {
-                let elem = (*ptr).assume_init_ref();
-                postcard::to_allocvec(elem)
-            })
-        }
-    }
-
-    #[cfg(any(test, feature = "alloc"))]
-    fn to_vec_framed(elems: *const (), idx: u8) -> postcard::Result<alloc::vec::Vec<u8>> {
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with(|ptr| {
-                let elem = (*ptr).assume_init_ref();
-                postcard::to_allocvec_cobs(elem)
-            })
-        }
-    }
-}
-
-impl<T: DeserializeOwned> TrickyPipe<T> {
-    pub fn ser_sender(&self) -> SerSender<'_> {
-        self.core.add_tx();
-        SerSender {
-            core: &self.core,
-            elems: self.elements.as_ptr() as *const (),
-            vtable: Self::DESER_VTABLE,
-        }
-    }
-
-    const DESER_VTABLE: &'static DeserVtable = &DeserVtable {
-        from_bytes: Self::from_bytes,
-        from_bytes_framed: Self::from_bytes_framed,
-    };
-
-    fn from_bytes(elems: *const (), idx: u8, buf: &[u8]) -> postcard::Result<()> {
-        let val = postcard::from_bytes(buf)?;
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
-        }
-        Ok(())
-    }
-
-    fn from_bytes_framed(elems: *const (), idx: u8, buf: &[u8]) -> postcard::Result<()> {
-        let val = postcard::from_bytes(buf)?;
-        unsafe {
-            let elems = elems as *const UnsafeCell<MaybeUninit<T>>;
-            // TODO(eliza): since this is unsafe anyway, we *could* just do
-            // pointer math and elide the bounds check... &shrug;
-            let elems = core::slice::from_raw_parts(elems, CAPACITY);
-            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
-        }
-        Ok(())
-    }
-}
-
-pub struct Receiver<'pipe, T> {
-    pipe: &'pipe TrickyPipe<T>,
-}
-
-pub struct Sender<'pipe, T> {
-    pipe: &'pipe TrickyPipe<T>,
-}
-
-pub struct SerReceiver<'pipe> {
-    core: &'pipe Core,
-    elems: *const (),
-    vtable: &'static SerVtable,
-}
-
-pub struct SerSender<'pipe> {
-    core: &'pipe Core,
-    elems: *const (),
-    vtable: &'static DeserVtable,
-}
-
-pub struct SerRecvRef<'pipe> {
-    pipe: Reservation<'pipe>,
-    elems: *const (),
-    vtable: &'static SerVtable,
+struct CoreVtable {
+    get_core: unsafe fn(*const ()) -> *const Core,
+    get_elems: unsafe fn(*const ()) -> ErasedSlice,
+    clone: unsafe fn(*const ()),
+    drop: unsafe fn(*const ()),
 }
 
 struct SerVtable {
@@ -256,20 +93,220 @@ struct DeserVtable {
     from_bytes_framed: DeserFn,
 }
 
-type SerFn = fn(*const (), u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
+type SerFn = fn(ErasedSlice, u8, &mut [u8]) -> postcard::Result<&mut [u8]>;
 
 #[cfg(any(test, feature = "alloc"))]
-type SerVecFn = fn(*const (), u8) -> postcard::Result<Vec<u8>>;
+type SerVecFn = fn(ErasedSlice, u8) -> postcard::Result<Vec<u8>>;
 
-type DeserFn = fn(*const (), u8, &[u8]) -> postcard::Result<()>;
+type DeserFn = fn(ErasedSlice, u8, &[u8]) -> postcard::Result<()>;
+
+impl ErasedSlice {
+    fn erase<T: 'static>(slice: impl AsRef<[T]>) -> Self {
+        let slice = slice.as_ref();
+        let len = slice.len();
+        #[cfg(debug_assertions)]
+        let typ = core::any::TypeId::of::<T>();
+        Self {
+            ptr: slice.as_ptr().cast(),
+            len,
+            typ,
+        }
+    }
+
+    unsafe fn unerase<'a, T: 'static>(self) -> &'a [T] {
+        debug_assert_eq!(
+            self.typ,
+            core::any::TypeId::of::<T>(),
+            "/!\\ EXTREMELY SERIOUS WARNING: you would have just done a type confusion, this is Real Bad"
+        );
+        core::slice::from_raw_parts(self.ptr.cast(), self.len)
+    }
+}
+
+pub struct Receiver<T: 'static> {
+    pipe: TypedPipe<T>,
+}
+
+pub struct Sender<T: 'static> {
+    pipe: TypedPipe<T>,
+}
+
+pub struct SerReceiver {
+    pipe: ErasedPipe,
+    vtable: &'static SerVtable,
+}
+
+pub struct SerSender {
+    pipe: ErasedPipe,
+    vtable: &'static DeserVtable,
+}
+
+pub struct SerRecvRef<'pipe> {
+    res: Reservation<'pipe>,
+    elems: ErasedSlice,
+    vtable: &'static SerVtable,
+}
+
+/// Erases both a pipe and its element type.
+struct ErasedPipe {
+    ptr: *const (),
+    vtable: &'static CoreVtable,
+}
+
+struct TypedPipe<T: 'static> {
+    pipe: ErasedPipe,
+    _t: PhantomData<fn(T)>,
+}
+
+impl ErasedPipe {
+    fn core(&self) -> &Core {
+        unsafe { &*(self.vtable.get_core)(self.ptr) }
+    }
+
+    fn elems(&self) -> ErasedSlice {
+        unsafe { (self.vtable.get_elems)(self.ptr) }
+    }
+}
+
+impl Clone for ErasedPipe {
+    fn clone(&self) -> Self {
+        unsafe { (self.vtable.clone)(self.ptr) }
+        Self {
+            ptr: self.ptr,
+            vtable: self.vtable,
+        }
+    }
+}
+
+impl Drop for ErasedPipe {
+    fn drop(&mut self) {
+        unsafe { (self.vtable.drop)(self.ptr) }
+    }
+}
+
+// === impl TypedPipe ===
+
+impl<T: 'static> TypedPipe<T> {
+    fn core(&self) -> &Core {
+        self.pipe.core()
+    }
+
+    fn elems(&self) -> &[UnsafeCell<MaybeUninit<T>>] {
+        unsafe { self.pipe.elems().unerase::<UnsafeCell<MaybeUninit<T>>>() }
+    }
+}
+
+impl<T: 'static> Clone for TypedPipe<T> {
+    fn clone(&self) -> Self {
+        Self {
+            pipe: self.pipe.clone(),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl SerVtable {
+    fn to_slice<T: Serialize + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+        buf: &mut [u8],
+    ) -> postcard::Result<&mut [u8]> {
+        unsafe {
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_slice(elem, buf)
+            })
+        }
+    }
+
+    fn to_slice_framed<T: Serialize + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+        buf: &mut [u8],
+    ) -> postcard::Result<&mut [u8]> {
+        unsafe {
+            // TODO(eliza): since this is unsafe anyway, we *could* just do
+            // pointer math and elide the bounds check... &shrug;
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_slice_cobs(elem, buf)
+            })
+        }
+    }
+
+    #[cfg(any(test, feature = "alloc"))]
+    fn to_vec<T: Serialize + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+    ) -> postcard::Result<alloc::vec::Vec<u8>> {
+        unsafe {
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_allocvec(elem)
+            })
+        }
+    }
+
+    #[cfg(any(test, feature = "alloc"))]
+    fn to_vec_framed<T: Serialize + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+    ) -> postcard::Result<alloc::vec::Vec<u8>> {
+        unsafe {
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with(|ptr| {
+                let elem = (*ptr).assume_init_ref();
+                postcard::to_allocvec_cobs(elem)
+            })
+        }
+    }
+}
+
+impl DeserVtable {
+    const fn new<T: DeserializeOwned + 'static>() -> Self {
+        Self {
+            from_bytes: Self::from_bytes::<T>,
+            from_bytes_framed: Self::from_bytes_framed::<T>,
+        }
+    }
+
+    fn from_bytes<T: DeserializeOwned + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+        buf: &[u8],
+    ) -> postcard::Result<()> {
+        let val = postcard::from_bytes(buf)?;
+        unsafe {
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
+        }
+        Ok(())
+    }
+
+    fn from_bytes_framed<T: DeserializeOwned + 'static>(
+        elems: ErasedSlice,
+        idx: u8,
+        buf: &[u8],
+    ) -> postcard::Result<()> {
+        let val = postcard::from_bytes(buf)?;
+        unsafe {
+            let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+            elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
+        }
+        Ok(())
+    }
+}
 
 // === impl Receiver ===
 
-impl<T> Receiver<'_, T> {
+impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        let res = self.pipe.core.try_dequeue()?;
+        let res = self.pipe.core().try_dequeue()?;
         let elem =
-            self.pipe.elements[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() });
+            self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() });
         Ok(elem)
     }
 
@@ -280,7 +317,7 @@ impl<T> Receiver<'_, T> {
                 Err(TryRecvError::Closed) => return Err(RecvError::Closed),
                 Err(TryRecvError::Empty) => self
                     .pipe
-                    .core
+                    .core()
                     .cons_wait
                     .wait()
                     .await
@@ -290,25 +327,25 @@ impl<T> Receiver<'_, T> {
     }
 }
 
-impl<T> Drop for Receiver<'_, T> {
+impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        self.pipe.core.close_rx();
+        self.pipe.core().close_rx();
     }
 }
 
 // === impl SerReceiver ===
 
-impl SerReceiver<'_> {
+impl SerReceiver {
     /// Attempt to receive a message from the channel, if there are currently
     /// any messages in the channel.
     ///
     /// This method returns a [`SerRecvRef`] which may be used to serialize the
     /// message.
     pub fn try_recv(&self) -> Result<SerRecvRef<'_>, TryRecvError> {
-        let res = self.core.try_dequeue()?;
+        let res = self.pipe.core().try_dequeue()?;
         Ok(SerRecvRef {
-            pipe: res,
-            elems: self.elems,
+            res,
+            elems: self.pipe.elems(),
             vtable: self.vtable,
         })
     }
@@ -320,11 +357,12 @@ impl SerReceiver<'_> {
     /// received message.
     pub async fn recv(&self) -> Result<SerRecvRef<'_>, RecvError> {
         let res = loop {
-            match self.core.try_dequeue() {
+            match self.pipe.core().try_dequeue() {
                 Ok(res) => break res,
                 Err(TryRecvError::Closed) => return Err(RecvError::Closed),
                 Err(TryRecvError::Empty) => self
-                    .core
+                    .pipe
+                    .core()
                     .cons_wait
                     .wait()
                     .await
@@ -333,16 +371,16 @@ impl SerReceiver<'_> {
         };
 
         Ok(SerRecvRef {
-            pipe: res,
-            elems: self.elems,
+            res,
+            elems: self.pipe.elems(),
             vtable: self.vtable,
         })
     }
 }
 
-impl Drop for SerReceiver<'_> {
+impl Drop for SerReceiver {
     fn drop(&mut self) {
-        self.core.close_rx();
+        self.pipe.core().close_rx();
     }
 }
 
@@ -350,36 +388,36 @@ impl Drop for SerReceiver<'_> {
 
 impl SerRecvRef<'_> {
     pub fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
-        (self.vtable.to_slice)(self.elems, self.pipe.idx, buf)
+        (self.vtable.to_slice)(self.elems, self.res.idx, buf)
     }
 
     pub fn to_slice_framed<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
-        (self.vtable.to_slice_framed)(self.elems, self.pipe.idx, buf)
+        (self.vtable.to_slice_framed)(self.elems, self.res.idx, buf)
     }
 
     /// Serializes the message to an owned `Vec`.
     #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
-        (self.vtable.to_vec)(self.elems, self.pipe.idx)
+        (self.vtable.to_vec)(self.elems, self.res.idx)
     }
 
     /// Returns the serialized representation of the message as a COBS frame, in
     /// an owned `Vec`.
     #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec_framed(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
-        (self.vtable.to_vec_framed)(self.elems, self.pipe.idx)
+        (self.vtable.to_vec_framed)(self.elems, self.res.idx)
     }
 }
 
 impl fmt::Debug for SerRecvRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
-            pipe,
+            res,
             elems: _,
             vtable,
         } = self;
         f.debug_struct("SerRecvRef")
-            .field("pipe", &pipe)
+            .field("res", &res)
             .field("vtable", &format_args!("{vtable:p}"))
             .finish()
     }
@@ -387,7 +425,7 @@ impl fmt::Debug for SerRecvRef<'_> {
 
 // === impl SerSender ===
 
-impl SerSender<'_> {
+impl SerSender {
     pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
         self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
     }
@@ -408,10 +446,11 @@ impl SerSender<'_> {
 
     async fn send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerSendError> {
         loop {
-            match self.core.try_reserve() {
+            match self.pipe.core().try_reserve() {
                 Ok(res) => {
                     // try writing the bytes to the reservation.
-                    deserialize(self.elems, res.idx, bytes).map_err(SerSendError::Deserialize)?;
+                    deserialize(self.pipe.elems(), res.idx, bytes)
+                        .map_err(SerSendError::Deserialize)?;
                     // if we successfully deserialized the bytes, commit the send.
                     // otherwise, we'll release the send index when we drop the reservation.
                     res.commit_send();
@@ -419,7 +458,8 @@ impl SerSender<'_> {
                 }
                 Err(TrySendError::Closed) => return Err(SerSendError::Closed),
                 Err(TrySendError::Full) => self
-                    .core
+                    .pipe
+                    .core()
                     .prod_wait
                     .wait()
                     .await
@@ -429,9 +469,13 @@ impl SerSender<'_> {
     }
 
     fn try_send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerTrySendError> {
-        let res = self.core.try_reserve().map_err(SerTrySendError::Send)?;
+        let res = self
+            .pipe
+            .core()
+            .try_reserve()
+            .map_err(SerTrySendError::Send)?;
         // try writing the bytes to the reservation.
-        deserialize(self.elems, res.idx, bytes).map_err(SerTrySendError::Deserialize)?;
+        deserialize(self.pipe.elems(), res.idx, bytes).map_err(SerTrySendError::Deserialize)?;
         // if we successfully deserialized the bytes, commit the send.
         // otherwise, we'll release the send index when we drop the reservation.
         res.commit_send();
@@ -439,53 +483,78 @@ impl SerSender<'_> {
     }
 }
 
-impl Clone for SerSender<'_> {
+impl Clone for SerSender {
     fn clone(&self) -> Self {
-        self.core.add_tx();
+        self.pipe.core().add_tx();
         Self {
-            core: self.core,
-            elems: self.elems,
+            pipe: self.pipe.clone(),
             vtable: self.vtable,
         }
     }
 }
 
-impl Drop for SerSender<'_> {
+impl Drop for SerSender {
     fn drop(&mut self) {
-        self.core.drop_tx();
+        self.pipe.core().drop_tx();
     }
 }
 
 // === impl Sender ===
 
-impl<T> Sender<'_, T> {
+impl<T> Sender<T> {
     pub fn try_reserve(&self) -> Result<SendRef<'_, T>, TrySendError> {
-        let pipe = self.pipe.core.try_reserve()?;
-        let cell = self.pipe.elements[pipe.idx as usize].get_mut();
+        let pipe = self.pipe.core().try_reserve()?;
+        let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(SendRef { cell, pipe })
     }
 
     pub async fn reserve(&self) -> Result<SendRef<'_, T>, SendError> {
-        let pipe = self.pipe.core.reserve().await?;
-        let cell = self.pipe.elements[pipe.idx as usize].get_mut();
+        let pipe = self.pipe.core().reserve().await?;
+        let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(SendRef { cell, pipe })
     }
 }
 
-impl<T> Clone for Sender<'_, T> {
+impl<T: 'static> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        self.pipe.core.add_tx();
-        Self { pipe: self.pipe }
+        self.pipe.core().add_tx();
+        Self {
+            pipe: self.pipe.clone(),
+        }
     }
 }
 
-impl<T> Drop for Sender<'_, T> {
+impl<T: 'static> Drop for Sender<T> {
     fn drop(&mut self) {
-        self.pipe.core.drop_tx();
+        self.pipe.core().drop_tx();
     }
 }
 
 impl Core {
+    const fn new(max_capacity: u8) -> Self {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const QUEUE_INIT: AtomicU16 = AtomicU16::new(0);
+
+        debug_assert!(max_capacity <= CAPACITY as u8);
+        let mut queue = [QUEUE_INIT; CAPACITY];
+        let mut i = 0;
+
+        while i != CAPACITY {
+            queue[i] = AtomicU16::new((i as u16) << SHIFT);
+            i += 1;
+        }
+
+        Core {
+            dequeue_pos: AtomicU16::new(0),
+            enqueue_pos: AtomicU16::new(0),
+            cons_wait: WaitCell::new(),
+            prod_wait: WaitQueue::new(),
+            indices: IndexAllocWord::new(),
+            queue,
+            state: AtomicUsize::new(0),
+        }
+    }
+
     fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
         if dbg!(self.state.load(Acquire)) & state::RX_CLOSED == state::RX_CLOSED {
             return Err(TrySendError::Closed);
@@ -723,353 +792,4 @@ pub enum SerSendError {
 pub enum SerTrySendError {
     Send(TrySendError),
     Deserialize(postcard::Error),
-}
-
-#[cfg(test)]
-mod test {
-
-    use super::*;
-    use serde::Deserialize;
-
-    #[derive(Debug, Serialize, PartialEq)]
-    struct SerStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct DeStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct SerDeStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct UnSerStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[test]
-    fn normal_smoke() {
-        let chan = TrickyPipe::<UnSerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.receiver().unwrap();
-        tx.try_reserve().unwrap().send(UnSerStruct {
-            a: 240,
-            b: -6_000,
-            c: 100_000,
-            d: String::from("hello"),
-        });
-
-        tx.try_reserve().unwrap().send(UnSerStruct {
-            a: 20,
-            b: -8000,
-            c: 200_000,
-            d: String::from("greets"),
-        });
-
-        tx.try_reserve().unwrap().send(UnSerStruct {
-            a: 100,
-            b: -1_000,
-            c: 300_000,
-            d: String::from("oh my"),
-        });
-
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            UnSerStruct {
-                a: 240,
-                b: -6_000,
-                c: 100_000,
-                d: String::from("hello"),
-            }
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            UnSerStruct {
-                a: 20,
-                b: -8000,
-                c: 200_000,
-                d: String::from("greets"),
-            }
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            UnSerStruct {
-                a: 100,
-                b: -1_000,
-                c: 300_000,
-                d: String::from("oh my"),
-            }
-        );
-    }
-
-    #[test]
-    fn normal_closed_rx() {
-        let chan = TrickyPipe::<UnSerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.receiver().unwrap();
-        drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed,);
-    }
-
-    #[test]
-    fn normal_closed_tx() {
-        let chan = TrickyPipe::<UnSerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.receiver().unwrap();
-        drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
-    }
-
-    #[test]
-    fn normal_closed_cloned_tx() {
-        let chan = TrickyPipe::<UnSerStruct>::new();
-        let tx1 = chan.sender();
-        let tx2 = tx1.clone();
-        let rx = chan.receiver().unwrap();
-        drop(tx1);
-        drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
-    }
-
-    #[test]
-    fn ser_smoke() {
-        let chan = TrickyPipe::<SerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.ser_receiver().unwrap();
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 240,
-            b: -6_000,
-            c: 100_000,
-            d: String::from("hello"),
-        });
-
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 20,
-            b: -8000,
-            c: 200_000,
-            d: String::from("greets"),
-        });
-
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 100,
-            b: -1_000,
-            c: 300_000,
-            d: String::from("oh my"),
-        });
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_vec(),
-            Ok(vec![240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_vec(),
-            Ok(vec![
-                20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115
-            ])
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_vec(),
-            Ok(vec![100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
-        );
-    }
-
-    #[test]
-    fn ser_closed_rx() {
-        let chan = TrickyPipe::<SerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.ser_receiver().unwrap();
-        drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed);
-    }
-
-    #[test]
-    fn ser_closed_tx() {
-        let chan = TrickyPipe::<SerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.ser_receiver().unwrap();
-        drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
-    }
-
-    #[test]
-    fn ser_closed_cloned_tx() {
-        let chan = TrickyPipe::<SerStruct>::new();
-        let tx1 = chan.sender();
-        let tx2 = tx1.clone();
-        let rx = chan.ser_receiver().unwrap();
-        drop(tx1);
-        drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
-    }
-
-    #[test]
-    fn ser_ref_smoke() {
-        let chan = TrickyPipe::<SerStruct>::new();
-        let tx = chan.sender();
-        let rx = chan.ser_receiver().unwrap();
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 240,
-            b: -6_000,
-            c: 100_000,
-            d: String::from("hello"),
-        });
-
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 20,
-            b: -8000,
-            c: 200_000,
-            d: String::from("greets"),
-        });
-
-        tx.try_reserve().unwrap().send(SerStruct {
-            a: 100,
-            b: -1_000,
-            c: 300_000,
-            d: String::from("oh my"),
-        });
-
-        let mut buf = [0u8; 128];
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
-            &mut [240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
-            &mut [20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115]
-        );
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
-            &mut [100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121]
-        );
-    }
-
-    #[test]
-    fn deser_smoke() {
-        let chan = TrickyPipe::<DeStruct>::new();
-        let tx = chan.ser_sender();
-        let rx = chan.receiver().unwrap();
-        tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
-            .unwrap();
-
-        tx.try_send([20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115])
-            .unwrap();
-
-        tx.try_send([100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121])
-            .unwrap();
-
-        assert_eq!(
-            rx.try_recv(),
-            Ok(DeStruct {
-                a: 240,
-                b: -6_000,
-                c: 100_000,
-                d: String::from("hello"),
-            })
-        );
-
-        assert_eq!(
-            rx.try_recv(),
-            Ok(DeStruct {
-                a: 20,
-                b: -8000,
-                c: 200_000,
-                d: String::from("greets"),
-            })
-        );
-
-        assert_eq!(
-            rx.try_recv(),
-            Ok(DeStruct {
-                a: 100,
-                b: -1_000,
-                c: 300_000,
-                d: String::from("oh my"),
-            })
-        );
-    }
-
-    #[test]
-    fn deser_closed_rx() {
-        let chan = TrickyPipe::<DeStruct>::new();
-        let tx = chan.ser_sender();
-        let rx = chan.receiver().unwrap();
-        drop(rx);
-        let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-        assert_eq!(
-            res.unwrap_err(),
-            SerTrySendError::Send(TrySendError::Closed),
-        );
-    }
-
-    #[test]
-    fn deser_closed_tx() {
-        let chan = TrickyPipe::<DeStruct>::new();
-        let tx = chan.ser_sender();
-        let rx = chan.receiver().unwrap();
-        drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
-    }
-
-    #[test]
-    fn deser_closed_cloned_tx() {
-        let chan = TrickyPipe::<DeStruct>::new();
-        let tx1 = chan.ser_sender();
-        let tx2 = tx1.clone();
-        let rx = chan.receiver().unwrap();
-        drop(tx1);
-        drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
-    }
-
-    #[test]
-    fn deser_ser_smoke() {
-        // Ideally the "serialize on both sides" case would just be a BBQueue or
-        // some other kind of framed byte pipe thingy, but we should make sure
-        // it works anyway i guess...
-        let chan = TrickyPipe::<SerDeStruct>::new();
-        let tx = chan.ser_sender();
-        let rx = chan.ser_receiver().unwrap();
-        const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
-        const MSG_TWO: &[u8] = &[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115];
-        const MSG_THREE: &[u8] = &[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121];
-        tx.try_send(MSG_ONE).unwrap();
-
-        tx.try_send(MSG_TWO).unwrap();
-
-        tx.try_send(MSG_THREE).unwrap();
-
-        let mut buf = [0u8; 128];
-
-        assert_eq!(rx.try_recv().unwrap().to_slice(&mut buf).unwrap(), MSG_ONE);
-
-        assert_eq!(rx.try_recv().unwrap().to_slice(&mut buf).unwrap(), MSG_TWO);
-
-        assert_eq!(
-            rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
-            MSG_THREE
-        );
-    }
 }
