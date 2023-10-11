@@ -2,6 +2,8 @@ use super::*;
 use crate::loom::sync::Arc;
 use alloc::boxed::Box;
 
+use super::channel_core::{Core, CoreVtable};
+
 pub struct TrickyPipe<T: 'static>(Arc<Inner<T>>);
 
 struct Inner<T: 'static> {
@@ -10,7 +12,7 @@ struct Inner<T: 'static> {
 }
 
 impl<T: 'static> TrickyPipe<T> {
-    // TODO(eliza): we would need to add a mnemos-alloc version of this...`s`
+    // TODO(eliza): we would need to add a mnemos-alloc version of this...
     pub fn new(capacity: u8) -> Self {
         Self(Arc::new(Inner {
             core: Core::new(capacity),
@@ -29,17 +31,11 @@ impl<T: 'static> TrickyPipe<T> {
 
     fn erased(&self) -> ErasedPipe {
         let ptr = Arc::into_raw(self.0.clone()) as *const _;
-        ErasedPipe {
-            ptr,
-            vtable: Self::CORE_VTABLE,
-        }
+        unsafe { ErasedPipe::new(ptr, Self::CORE_VTABLE) }
     }
 
     fn typed(&self) -> TypedPipe<T> {
-        TypedPipe {
-            pipe: self.erased(),
-            _t: PhantomData,
-        }
+        unsafe { self.erased().typed() }
     }
 
     pub fn receiver(&self) -> Option<Receiver<T>> {

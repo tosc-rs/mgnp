@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    channel_core::{Core, CoreVtable, ErasedPipe, ErasedSlice, CAPACITY},
+    *,
+};
 
 pub struct StaticTrickyPipe<T: 'static> {
     elements: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
@@ -23,17 +26,11 @@ impl<T: 'static> StaticTrickyPipe<T> {
     };
 
     fn erased(&'static self) -> ErasedPipe {
-        ErasedPipe {
-            ptr: self as *const _ as *const (),
-            vtable: Self::CORE_VTABLE,
-        }
+        unsafe { ErasedPipe::new(self as *const _ as *const (), Self::CORE_VTABLE) }
     }
 
     fn typed(&'static self) -> TypedPipe<T> {
-        TypedPipe {
-            pipe: self.erased(),
-            _t: PhantomData,
-        }
+        unsafe { self.erased().typed() }
     }
 
     pub fn receiver(&'static self) -> Option<Receiver<T>> {
