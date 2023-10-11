@@ -23,7 +23,7 @@ pub(super) struct Core {
     pub(super) cons_wait: WaitCell,
     pub(super) prod_wait: WaitQueue,
     indices: IndexAllocWord,
-    queue: [AtomicU16; CAPACITY],
+    queue: [AtomicU16; MAX_CAPACITY],
     /// Tracks the state of the the channel's senders/receivers, including
     /// whether a receiver has been claimed, whether the receiver has closed the
     /// channel (e.g. is dropped), and the number of active senders.
@@ -106,23 +106,23 @@ mod state {
     pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
 }
 
-pub(super) const CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
-const SHIFT: usize = CAPACITY.trailing_zeros() as usize;
+pub(super) const MAX_CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
+const SHIFT: usize = MAX_CAPACITY.trailing_zeros() as usize;
 const SEQ_ONE: u16 = 1 << SHIFT;
 const MASK: u16 = SEQ_ONE - 1;
 
 // === impl Core ===
 
 impl Core {
-    pub(super) const fn new(max_capacity: u8) -> Self {
+    pub(super) const fn new(capacity: u8) -> Self {
         #[allow(clippy::declare_interior_mutable_const)]
         const QUEUE_INIT: AtomicU16 = AtomicU16::new(0);
 
-        debug_assert!(max_capacity <= CAPACITY as u8);
-        let mut queue = [QUEUE_INIT; CAPACITY];
+        debug_assert!(capacity <= MAX_CAPACITY as u8);
+        let mut queue = [QUEUE_INIT; MAX_CAPACITY];
         let mut i = 0;
 
-        while i != CAPACITY {
+        while i != MAX_CAPACITY {
             queue[i] = AtomicU16::new((i as u16) << SHIFT);
             i += 1;
         }
@@ -135,7 +135,7 @@ impl Core {
             indices: IndexAllocWord::new(),
             queue,
             state: AtomicUsize::new(0),
-            capacity: max_capacity,
+            capacity,
         }
     }
 

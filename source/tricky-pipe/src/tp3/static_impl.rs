@@ -1,22 +1,26 @@
 use super::{
-    channel_core::{Core, CoreVtable, ErasedPipe, ErasedSlice, CAPACITY},
+    channel_core::{Core, CoreVtable, ErasedPipe, ErasedSlice},
     *,
 };
 
-pub struct StaticTrickyPipe<T: 'static> {
+pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize> {
     elements: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
     core: Core,
 }
 
-impl<T: 'static> StaticTrickyPipe<T> {
+impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
 
     pub const fn new() -> Self {
+        assert!(CAPACITY.is_power_of_two());
+        assert!(CAPACITY <= Self::MAX_CAPACITY);
         Self {
             core: Core::new(CAPACITY as u8),
             elements: [Self::EMPTY_CELL; CAPACITY],
         }
     }
+
+    pub const MAX_CAPACITY: usize = channel_core::MAX_CAPACITY;
 
     const CORE_VTABLE: &'static CoreVtable = &CoreVtable {
         get_core: Self::get_core,
@@ -65,7 +69,10 @@ impl<T: 'static> StaticTrickyPipe<T> {
     fn erased_drop(_: *const ()) {}
 }
 
-impl<T: Serialize + 'static> StaticTrickyPipe<T> {
+impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
+where
+    T: Serialize + 'static,
+{
     pub fn ser_receiver(&'static self) -> Option<SerReceiver> {
         self.core.try_claim_rx()?;
 
@@ -85,7 +92,10 @@ impl<T: Serialize + 'static> StaticTrickyPipe<T> {
     };
 }
 
-impl<T: DeserializeOwned + 'static> StaticTrickyPipe<T> {
+impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
+where
+    T: DeserializeOwned + 'static,
+{
     pub fn ser_sender(&'static self) -> SerSender {
         self.core.add_tx();
         SerSender {
@@ -97,8 +107,8 @@ impl<T: DeserializeOwned + 'static> StaticTrickyPipe<T> {
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
-unsafe impl<T> Send for StaticTrickyPipe<T> {}
-unsafe impl<T: Send> Sync for StaticTrickyPipe<T> {}
+unsafe impl<T, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY> {}
+unsafe impl<T: Send, const CAPACITY: usize> Sync for StaticTrickyPipe<T, CAPACITY> {}
 
 #[cfg(test)]
 mod test {
@@ -139,7 +149,7 @@ mod test {
 
     #[test]
     fn normal_smoke() {
-        static CHAN: StaticTrickyPipe<UnSerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<UnSerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         tx.try_reserve().unwrap().send(UnSerStruct {
@@ -195,8 +205,20 @@ mod test {
     }
 
     #[test]
+    fn smaller_capacities_are_smaller() {
+        use core::mem::size_of_val;
+        static BIG: StaticTrickyPipe<SerStruct, { channel_core::MAX_CAPACITY }> =
+            StaticTrickyPipe::new();
+
+        static LITTLE: StaticTrickyPipe<SerStruct, 2> = StaticTrickyPipe::new();
+        let big_size = dbg!(size_of_val(&BIG));
+        let little_size = dbg!(size_of_val(&LITTLE));
+        assert!(little_size < big_size);
+    }
+
+    #[test]
     fn normal_closed_rx() {
-        static CHAN: StaticTrickyPipe<UnSerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<UnSerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
@@ -205,7 +227,7 @@ mod test {
 
     #[test]
     fn normal_closed_tx() {
-        static CHAN: StaticTrickyPipe<UnSerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<UnSerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
@@ -214,7 +236,7 @@ mod test {
 
     #[test]
     fn normal_closed_cloned_tx() {
-        static CHAN: StaticTrickyPipe<UnSerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<UnSerStruct, 4> = StaticTrickyPipe::new();
         let tx1 = CHAN.sender();
         let tx2 = tx1.clone();
         let rx = CHAN.receiver().unwrap();
@@ -225,7 +247,7 @@ mod test {
 
     #[test]
     fn ser_smoke() {
-        static CHAN: StaticTrickyPipe<SerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         tx.try_reserve().unwrap().send(SerStruct {
@@ -269,7 +291,7 @@ mod test {
 
     #[test]
     fn ser_closed_rx() {
-        static CHAN: StaticTrickyPipe<SerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(rx);
@@ -278,7 +300,7 @@ mod test {
 
     #[test]
     fn ser_closed_tx() {
-        static CHAN: StaticTrickyPipe<SerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(tx);
@@ -287,7 +309,7 @@ mod test {
 
     #[test]
     fn ser_closed_cloned_tx() {
-        static CHAN: StaticTrickyPipe<SerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerStruct, 4> = StaticTrickyPipe::new();
         let tx1 = CHAN.sender();
         let tx2 = tx1.clone();
         let rx = CHAN.ser_receiver().unwrap();
@@ -298,7 +320,7 @@ mod test {
 
     #[test]
     fn ser_ref_smoke() {
-        static CHAN: StaticTrickyPipe<SerStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         tx.try_reserve().unwrap().send(SerStruct {
@@ -342,7 +364,7 @@ mod test {
 
     #[test]
     fn deser_smoke() {
-        static CHAN: StaticTrickyPipe<DeStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.ser_sender();
         let rx = CHAN.receiver().unwrap();
         tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
@@ -387,7 +409,7 @@ mod test {
 
     #[test]
     fn deser_closed_rx() {
-        static CHAN: StaticTrickyPipe<DeStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.ser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
@@ -400,7 +422,7 @@ mod test {
 
     #[test]
     fn deser_closed_tx() {
-        static CHAN: StaticTrickyPipe<DeStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.ser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
@@ -409,7 +431,7 @@ mod test {
 
     #[test]
     fn deser_closed_cloned_tx() {
-        static CHAN: StaticTrickyPipe<DeStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
         let tx1 = CHAN.ser_sender();
         let tx2 = tx1.clone();
         let rx = CHAN.receiver().unwrap();
@@ -423,7 +445,7 @@ mod test {
         // Ideally the "serialize on both sides" case would just be a BBQueue or
         // some other kind of framed byte pipe thingy, but we should make sure
         // it works anyway i guess...
-        static CHAN: StaticTrickyPipe<SerDeStruct> = StaticTrickyPipe::new();
+        static CHAN: StaticTrickyPipe<SerDeStruct, 4> = StaticTrickyPipe::new();
         let tx = CHAN.ser_sender();
         let rx = CHAN.ser_receiver().unwrap();
         const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
