@@ -66,6 +66,12 @@ struct Core {
     /// whether a receiver has been claimed, whether the receiver has closed the
     /// channel (e.g. is dropped), and the number of active senders.
     state: AtomicUsize,
+
+    /// The queue's capacity limit.
+    ///
+    /// This is the length of the actual queue elements array (which is not part
+    /// of this struct).
+    capacity: u8,
 }
 
 /// A type-erased slice.
@@ -330,6 +336,63 @@ impl<T> Receiver<T> {
             }
         }
     }
+
+    /// Returns `true` if this channel is empty.
+    ///
+    /// If this method returns `true`, calling [`Receiver::recv`] or
+    /// [`SerReceiver::try_recv`] will yield until a new message is sent to the
+    /// channel. Any calls to [`Receiver::try_recv`] or
+    /// [`SerReceiver::try_recv`] while the channel is empty will return
+    /// [`TryRecvError::Empty`].
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pipe.core().is_empty()
+    }
+
+    /// Returns `true` if this channel is full.
+    ///
+    /// If this method returns `true`, then any calls to [`Sender::send`] or
+    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_send`] or [`SerSender`
+    #[inline]
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.pipe.core().is_full()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pipe.core().len()
+    }
+
+    /// Returns the **maximum capacity** of the channel.
+    ///
+    /// This is the maximum number of messages that may be queued before senders
+    /// must wait for additional capacity to become available. The capacity of
+    /// the channel is determined *when it is constructed*, and the value
+    /// returned by this method will never change over the channel's lifetime,
+    /// regardless of the current [length](Self::len) of the channel.
+    ///
+    /// To determine the current remaining capacity in the channel, use the
+    /// [`remaining`](Self::remaining) method, instead.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.pipe.core().capacity as usize
+    }
+
+    /// Returns the **current remaining capacity** of this channel.
+    ///
+    /// This is equivalent to subtracting [`self.len()`](Self::len) from
+    /// [`self.capacity()`](Self::capacity).
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.len() - self.capacity()
+    }
 }
 
 impl<T> Drop for Receiver<T> {
@@ -380,6 +443,63 @@ impl SerReceiver {
             elems: self.pipe.elems(),
             vtable: self.vtable,
         })
+    }
+
+    /// Returns `true` if this channel is empty.
+    ///
+    /// If this method returns `true`, calling [`Receiver::recv`] or
+    /// [`SerReceiver::try_recv`] will yield until a new message is sent to the
+    /// channel. Any calls to [`Receiver::try_recv`] or
+    /// [`SerReceiver::try_recv`] while the channel is empty will return
+    /// [`TryRecvError::Empty`].
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pipe.core().is_empty()
+    }
+
+    /// Returns `true` if this channel is full.
+    ///
+    /// If this method returns `true`, then any calls to [`Sender::send`] or
+    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_send`] or [`SerSender`
+    #[inline]
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.pipe.core().is_full()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pipe.core().len()
+    }
+
+    /// Returns the **maximum capacity** of the channel.
+    ///
+    /// This is the maximum number of messages that may be queued before senders
+    /// must wait for additional capacity to become available. The capacity of
+    /// the channel is determined *when it is constructed*, and the value
+    /// returned by this method will never change over the channel's lifetime,
+    /// regardless of the current [length](Self::len) of the channel.
+    ///
+    /// To determine the current remaining capacity in the channel, use the
+    /// [`remaining`](Self::remaining) method, instead.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.pipe.core().capacity as usize
+    }
+
+    /// Returns the **current remaining capacity** of this channel.
+    ///
+    /// This is equivalent to subtracting [`self.len()`](Self::len) from
+    /// [`self.capacity()`](Self::capacity).
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.len() - self.capacity()
     }
 }
 
@@ -447,6 +567,63 @@ impl SerSender {
     pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
         self.send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
             .await
+    }
+
+    /// Returns `true` if this channel is empty.
+    ///
+    /// If this method returns `true`, calling [`Receiver::recv`] or
+    /// [`SerReceiver::try_recv`] will yield until a new message is sent to the
+    /// channel. Any calls to [`Receiver::try_recv`] or
+    /// [`SerReceiver::try_recv`] while the channel is empty will return
+    /// [`TryRecvError::Empty`].
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pipe.core().is_empty()
+    }
+
+    /// Returns `true` if this channel is full.
+    ///
+    /// If this method returns `true`, then any calls to [`Sender::send`] or
+    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_send`] or [`SerSender`
+    #[inline]
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.pipe.core().is_full()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pipe.core().len()
+    }
+
+    /// Returns the **maximum capacity** of the channel.
+    ///
+    /// This is the maximum number of messages that may be queued before senders
+    /// must wait for additional capacity to become available. The capacity of
+    /// the channel is determined *when it is constructed*, and the value
+    /// returned by this method will never change over the channel's lifetime,
+    /// regardless of the current [length](Self::len) of the channel.
+    ///
+    /// To determine the current remaining capacity in the channel, use the
+    /// [`remaining`](Self::remaining) method, instead.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.pipe.core().capacity as usize
+    }
+
+    /// Returns the **current remaining capacity** of this channel.
+    ///
+    /// This is equivalent to subtracting [`self.len()`](Self::len) from
+    /// [`self.capacity()`](Self::capacity).
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.len() - self.capacity()
     }
 
     async fn send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerSendError> {
@@ -518,6 +695,63 @@ impl<T> Sender<T> {
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(SendRef { cell, pipe })
     }
+
+    /// Returns `true` if this channel is empty.
+    ///
+    /// If this method returns `true`, calling [`Receiver::recv`] or
+    /// [`SerReceiver::try_recv`] will yield until a new message is sent to the
+    /// channel. Any calls to [`Receiver::try_recv`] or
+    /// [`SerReceiver::try_recv`] while the channel is empty will return
+    /// [`TryRecvError::Empty`].
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pipe.core().is_empty()
+    }
+
+    /// Returns `true` if this channel is full.
+    ///
+    /// If this method returns `true`, then any calls to [`Sender::send`] or
+    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_send`] or [`SerSender`
+    #[inline]
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.pipe.core().is_full()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pipe.core().len()
+    }
+
+    /// Returns the **maximum capacity** of the channel.
+    ///
+    /// This is the maximum number of messages that may be queued before senders
+    /// must wait for additional capacity to become available. The capacity of
+    /// the channel is determined *when it is constructed*, and the value
+    /// returned by this method will never change over the channel's lifetime,
+    /// regardless of the current [length](Self::len) of the channel.
+    ///
+    /// To determine the current remaining capacity in the channel, use the
+    /// [`remaining`](Self::remaining) method, instead.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.pipe.core().capacity as usize
+    }
+
+    /// Returns the **current remaining capacity** of this channel.
+    ///
+    /// This is equivalent to subtracting [`self.len()`](Self::len) from
+    /// [`self.capacity()`](Self::capacity).
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.len() - self.capacity()
+    }
 }
 
 impl<T: 'static> Clone for Sender<T> {
@@ -557,6 +791,7 @@ impl Core {
             indices: IndexAllocWord::new(),
             queue,
             state: AtomicUsize::new(0),
+            capacity: max_capacity,
         }
     }
 
@@ -687,6 +922,54 @@ impl Core {
     fn close_tx(&self) {
         atomic::fence(Release);
         self.cons_wait.close();
+    }
+
+    #[must_use]
+    fn is_empty(&self) -> bool {
+        // This *could* be `self.len() == 0` but it's more efficient to avoid
+        // the loop waiting to get a consistent snapshot.
+        let enqueue_pos = self.enqueue_pos.load(SeqCst);
+        let dequeue_pos = self.dequeue_pos.load(SeqCst);
+        // Note that, unlike in the `len()` function, we don't need to reload
+        // the dequeue index, because if the enqueue index changed under us,
+        // that means the queue was not empty when we snapshotted, and it's fine
+        // to say so.
+        enqueue_pos == dequeue_pos
+    }
+
+    #[must_use]
+    fn is_full(&self) -> bool {
+        // This could be `self.len() == self.capacity()` but this is more
+        // efficient.
+        let enqueue_pos = self.enqueue_pos.load(SeqCst);
+        let dequeue_pos = self.dequeue_pos.load(SeqCst);
+
+        // If the dequeue index has lagged behind the enqueue index by an entire
+        // "lap" around the ring buffer, then the queue is full.
+        dequeue_pos.wrapping_add(SEQ_ONE) == enqueue_pos
+    }
+
+    #[must_use]
+    fn len(&self) -> usize {
+        loop {
+            // Load both the enqueue and dequeue indices.
+            let enqueue_pos = self.enqueue_pos.load(SeqCst);
+            let dequeue_pos = self.dequeue_pos.load(SeqCst);
+
+            // If the enqueue index hasn't changed while we were loading the
+            // dequeue index, then we have a consistent snapshot of both
+            // indices.
+            if self.enqueue_pos.load(SeqCst) == enqueue_pos {
+                let head = dequeue_pos & MASK;
+                let tail = enqueue_pos & MASK;
+
+                return match head.cmp(&tail) {
+                    cmp::Ordering::Less => (tail - head) as usize,
+                    cmp::Ordering::Equal => 0,
+                    cmp::Ordering::Greater => self.capacity as usize - (head + tail) as usize,
+                };
+            }
+        }
     }
 }
 
