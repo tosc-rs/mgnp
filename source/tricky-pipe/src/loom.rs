@@ -128,18 +128,17 @@ mod inner {
             T: Send + 'static,
         {
             let track = super::alloc::track::Registry::current();
-            let builder = if let Some(name) = track.as_ref().and_then(Registry::next_thread_name) {
-                std::thread::Builder::new().name(name)
-            } else {
-                std::thread::Builder::new()
-            };
+            let mut builder = std::thread::Builder::new();
+            let span =
+                if let Some((name, num)) = track.as_ref().and_then(Registry::next_thread_name) {
+                    builder = builder.name(name);
+                    tracing::trace_span!(parent: None, "thread", message = num)
+                } else {
+                    tracing::trace_span!(parent: None, "thread", message = "<unknown>")
+                };
             builder
                 .spawn(move || {
-                    let _span = tracing::trace_span!(
-                        "thread",
-                        message = std::thread::current().name().unwrap_or("test")
-                    )
-                    .entered();
+                    let _enter = span.entered();
                     let _tracking = track.map(|track| track.set_default());
                     f()
                 })
@@ -191,8 +190,8 @@ mod inner {
             .with_test_writer()
             .with_max_level(tracing::Level::TRACE)
             .without_time()
-            .with_thread_ids(true)
             .try_init();
+        let _span = tracing::trace_span!("thread", message = 0).entered();
         model::Builder::new().check(f)
     }
 
@@ -318,13 +317,11 @@ mod inner {
             }
 
             impl Registry {
-                pub fn next_thread_name(&self) -> Option<String> {
+                pub fn next_thread_name(&self) -> Option<(String, usize)> {
                     let mut registry = self.0.lock().ok()?;
                     registry.next_thread_num += 1;
-                    Some(format!(
-                        "{}:{}",
-                        registry.thread_name, registry.next_thread_num
-                    ))
+                    let name = format!("{}:{}", registry.thread_name, registry.next_thread_num);
+                    Some((name, registry.next_thread_num))
                 }
 
                 pub(in crate::loom) fn new() -> Self {
