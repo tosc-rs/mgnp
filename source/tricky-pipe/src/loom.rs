@@ -120,16 +120,30 @@ mod inner {
     #[cfg(test)]
     pub(crate) mod thread {
         pub(crate) use std::thread::{yield_now, JoinHandle};
+
+        use super::alloc::track::Registry;
         pub(crate) fn spawn<F, T>(f: F) -> JoinHandle<T>
         where
             F: FnOnce() -> T + Send + 'static,
             T: Send + 'static,
         {
-            // let track = super::alloc::track::Registry::current();
-            std::thread::spawn(move || {
-                // let _tracking = track.map(|track| track.set_default());
-                f()
-            })
+            let track = super::alloc::track::Registry::current();
+            let builder = if let Some(name) = track.as_ref().and_then(Registry::next_thread_name) {
+                std::thread::Builder::new().name(name)
+            } else {
+                std::thread::Builder::new()
+            };
+            builder
+                .spawn(move || {
+                    let _span = tracing::trace_span!(
+                        "thread",
+                        message = std::thread::current().name().unwrap_or("test")
+                    )
+                    .entered();
+                    let _tracking = track.map(|track| track.set_default());
+                    f()
+                })
+                .expect("failed to spawn thread")
         }
     }
 
@@ -160,7 +174,7 @@ mod inner {
             }
 
             pub(crate) fn check(&self, f: impl FnOnce()) {
-                let registry = super::alloc::track::Registry::default();
+                let registry = super::alloc::track::Registry::new();
                 let _tracking = registry.set_default();
                 f();
                 registry.check();
@@ -170,7 +184,15 @@ mod inner {
 
     #[cfg(test)]
     pub(crate) fn model(f: impl FnOnce()) {
-        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let _ = tracing_subscriber::fmt()
+            .with_file(true)
+            .with_line_number(true)
+            .with_target(false)
+            .with_test_writer()
+            .with_max_level(tracing::Level::TRACE)
+            .without_time()
+            .with_thread_ids(true)
+            .try_init();
         model::Builder::new().check(f)
     }
 
@@ -272,13 +294,15 @@ mod inner {
                 },
             };
 
-            #[derive(Clone, Debug, Default)]
+            #[derive(Clone, Debug)]
             pub(crate) struct Registry(Arc<Mutex<RegistryInner>>);
 
-            #[derive(Debug, Default)]
+            #[derive(Debug)]
             struct RegistryInner {
                 tracks: Vec<Weak<TrackData>>,
                 next_id: usize,
+                next_thread_num: usize,
+                thread_name: String,
             }
 
             #[derive(Debug)]
@@ -294,6 +318,24 @@ mod inner {
             }
 
             impl Registry {
+                pub fn next_thread_name(&self) -> Option<String> {
+                    let mut registry = self.0.lock().ok()?;
+                    registry.next_thread_num += 1;
+                    Some(format!(
+                        "{}:{}",
+                        registry.thread_name, registry.next_thread_num
+                    ))
+                }
+
+                pub(in crate::loom) fn new() -> Self {
+                    Self(Arc::new(Mutex::new(RegistryInner {
+                        tracks: Vec::new(),
+                        next_id: 0,
+                        next_thread_num: 0,
+                        thread_name: std::thread::current().name().unwrap_or("test").to_owned(),
+                    })))
+                }
+
                 pub(in crate::loom) fn current() -> Option<Registry> {
                     REGISTRY.with(|current| current.borrow().clone())
                 }

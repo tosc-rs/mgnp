@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 maitake-sync = "0.1.0"
 portable-atomic = "1.4.3"
-mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/more-index-allocs" }
+mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/allocated-iter" }
 
 [dependencies.postcard]
 version = "1.0.7"

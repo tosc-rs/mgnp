@@ -8,7 +8,7 @@ pub struct TrickyPipe<T: 'static>(Arc<Inner<T>>);
 
 struct Inner<T: 'static> {
     core: Core,
-    elements: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    elements: Box<[Cell<T>]>,
 }
 
 impl<T: 'static> TrickyPipe<T> {
@@ -62,11 +62,14 @@ impl<T: 'static> TrickyPipe<T> {
     }
 
     unsafe fn erased_clone(ptr: *const ()) {
+        test_println!("erased_clone({ptr:p})");
         Arc::increment_strong_count(ptr.cast::<Inner<T>>())
     }
 
     unsafe fn erased_drop(ptr: *const ()) {
-        drop(Arc::from_raw(ptr))
+        let arc = Arc::from_raw(ptr.cast::<Inner<T>>());
+        test_println!(refs = Arc::strong_count(&arc), "erased_drop({ptr:p})");
+        drop(arc)
     }
 }
 
@@ -102,10 +105,26 @@ impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
-unsafe impl<T> Send for TrickyPipe<T> {}
+unsafe impl<T: Send> Send for TrickyPipe<T> {}
 unsafe impl<T: Send> Sync for TrickyPipe<T> {}
 
-#[cfg(test)]
+impl<T> Drop for Inner<T> {
+    fn drop(&mut self) {
+        test_span!("Inner::drop");
+
+        // TODO(eliza): there is probably a more efficient way to implement this
+        // rather than by using `try_dequeue`, since we know that we have
+        // exclusive ownership over the queue. But this works.
+        while let Ok(res) = self.core.try_dequeue() {
+            let idx = res.idx as usize;
+            self.elements[test_dbg!(idx)].with_mut(|ptr| unsafe {
+                (*ptr).as_mut_ptr().drop_in_place();
+            });
+        }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
 mod test {
     use super::*;
     use serde::Deserialize;
@@ -450,5 +469,41 @@ mod test {
             rx.try_recv().unwrap().to_slice(&mut buf).unwrap(),
             MSG_THREE
         );
+    }
+}
+
+#[cfg(test)]
+mod loom {
+    use super::*;
+    use crate::loom;
+
+    #[test]
+    fn elements_dropped() {
+        loom::model(|| {
+            let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(4);
+
+            let rx = chan.receiver().expect("can't get rx");
+            let tx = chan.sender();
+            let thread = loom::thread::spawn(move || {
+                tx.try_reserve()
+                    .expect("reserve 1")
+                    .send(loom::alloc::Track::new(1));
+
+                tx.try_reserve()
+                    .expect("reserve 2")
+                    .send(loom::alloc::Track::new(2));
+
+                tx.try_reserve()
+                    .expect("reserve 3")
+                    .send(loom::alloc::Track::new(3));
+            });
+
+            let item1 = loom::future::block_on(rx.recv()).expect("recv 1");
+            assert_eq!(item1.get_ref(), &1);
+            thread.join().expect("thread shouldn't panic");
+
+            drop(rx);
+            drop(chan);
+        })
     }
 }

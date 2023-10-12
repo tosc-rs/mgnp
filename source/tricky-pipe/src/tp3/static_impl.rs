@@ -4,12 +4,12 @@ use super::{
 };
 
 pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize> {
-    elements: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
+    elements: [Cell<T>; CAPACITY],
     core: Core,
 }
 
 impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
-    const EMPTY_CELL: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
+    const EMPTY_CELL: Cell<T> = UnsafeCell::new(MaybeUninit::uninit());
 
     pub const fn new() -> Self {
         assert!(CAPACITY.is_power_of_two());
@@ -107,7 +107,7 @@ where
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
-unsafe impl<T, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY> {}
+unsafe impl<T: Send, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY> {}
 unsafe impl<T: Send, const CAPACITY: usize> Sync for StaticTrickyPipe<T, CAPACITY> {}
 
 #[cfg(test)]

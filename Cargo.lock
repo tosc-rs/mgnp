@@ -339,7 +339,7 @@ dependencies = [
 [[package]]
 name = "mnemos-bitslab"
 version = "0.1.0"
-source = "git+https://github.com/tosc-rs/mnemos?branch=eliza/more-index-allocs#58db9fd01e0e62202164266e459f8fb4e95684dd"
+source = "git+https://github.com/tosc-rs/mnemos?branch=eliza/allocated-iter#9bfc8240d9d4dc7050d6d44549ea4a799a2c3563"
 dependencies = [
  "portable-atomic",
 ]

@@ -106,7 +106,7 @@ mod state {
     pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
 }
 
-pub(super) const MAX_CAPACITY: usize = IndexAllocWord::CAPACITY as usize;
+pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
 const SHIFT: usize = MAX_CAPACITY.trailing_zeros() as usize;
 const SEQ_ONE: u16 = 1 << SHIFT;
 const MASK: u16 = SEQ_ONE - 1;
@@ -136,6 +136,8 @@ impl Core {
             queue,
             state: AtomicUsize::new(0),
             capacity,
+            #[cfg(debug_assertions)]
+            has_dropped: false,
         }
     }
 
@@ -429,6 +431,9 @@ impl<T: 'static> Clone for TypedPipe<T> {
         }
     }
 }
+
+unsafe impl<T: Send> Send for TypedPipe<T> {}
+unsafe impl<T: Send> Sync for TypedPipe<T> {}
 
 impl SerVtable {
     pub(super) fn to_slice<T: Serialize + 'static>(

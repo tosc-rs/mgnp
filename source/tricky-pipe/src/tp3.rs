@@ -8,9 +8,45 @@ use core::{
 use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(not(test))]
-macro_rules! dbg {
+macro_rules! test_dbg {
     ($x:expr) => {
         $x
+    };
+}
+
+#[cfg(test)]
+macro_rules! test_dbg {
+    ($x:expr) => {
+        match $x {
+            x => {
+                tracing::debug!("{} = {x:?}", stringify!($x));
+                x
+            }
+        }
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! test_println {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(test)]
+macro_rules! test_println {
+    ($($arg:tt)*) => {
+        tracing::debug!($($arg)*);
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! test_span {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(test)]
+macro_rules! test_span {
+    ($($arg:tt)*) => {
+        let _span = tracing::debug_span!($($arg)*).entered();
     };
 }
 
@@ -61,6 +97,8 @@ pub struct SendRef<'core, T> {
     cell: cell::MutPtr<MaybeUninit<T>>,
     pipe: Reservation<'core>,
 }
+
+type Cell<T> = UnsafeCell<MaybeUninit<T>>;
 
 // === impl Receiver ===
 
