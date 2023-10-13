@@ -183,6 +183,25 @@ type Cell<T> = UnsafeCell<MaybeUninit<T>>;
 // === impl Receiver ===
 
 impl<T> Receiver<T> {
+    /// Attempts to receive the next message from the channel, without waiting
+    /// for a new message to be sent.
+    ///
+    /// If there are currently messages in the channel's queue, this method
+    /// returns the next message. Otherwise, if the channel has been closed, or
+    /// if no messages are currently available, this method returns a
+    /// [`TryRecvError`].
+    ///
+    /// To wait for a new message to be sent, rather than returning an error,
+    /// use the [`recv`](Self::recv) method, instead.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(T)` if a message was received from the channel.
+    /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
+    ///   (all [`Sender`]s and [`SerSender`]s have been dropped) *and* all
+    ///   messages sent before the channel closed have already been received.
+    /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
+    ///   messages in the queue, but the channel has not been closed.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
         self.pipe
             .core()
@@ -190,7 +209,7 @@ impl<T> Receiver<T> {
             .map(|res| self.take_value(res))
     }
 
-    /// Receives the next value from the channel.
+    /// Receives the next message from the channel.
     ///
     /// This method returns [`None`] if the channel has been closed (all
     /// [`Sender`]s and [`SerSender`]s have been dropped) *and* all messages
@@ -198,8 +217,10 @@ impl<T> Receiver<T> {
     ///
     /// If the channel has not yet been closed, but there are no messages
     /// currently available in the queue, this method yields and waits for a new
-    /// message to be sent, or for the channel to close. To return an error
-    /// rather than waiting, use the [`try_recv`] method, instead.
+    /// message to be sent, or for the channel to close.
+    ///
+    /// To return an error rather than waiting, use the
+    /// [`try_recv`](Self::try_recv) method, instead.
     ///
     /// # Cancellation Safety
     ///
@@ -288,11 +309,34 @@ impl<T> Drop for Receiver<T> {
 // === impl SerReceiver ===
 
 impl SerReceiver {
-    /// Attempt to receive a message from the channel, if there are currently
-    /// any messages in the channel.
+    /// Attempts to receive the serialized representation of next message from
+    /// the channel, without waiting for a new message to be sent if none are
+    /// available.
     ///
-    /// This method returns a [`SerRecvRef`] which may be used to serialize the
-    /// message.
+    /// If there are currently messages in the channel's queue, this method
+    /// returns the next message. Otherwise, if the channel has been closed, or
+    /// if no messages are currently available, this method returns a
+    /// [`TryRecvError`].
+    ///
+    /// To wait for a new message to be sent, rather than returning an error,
+    /// use the [`recv`](Self::recv) method, instead.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`SerRecvRef`]`)` if a message was received from the
+    ///   channel. The [`SerRecvRef::to_slice`] and [`SerRecvRef::to_vec`]
+    ///   methods can be used to serialize the binary representation of the
+    ///   message to a `&mut [u8]` or to a [`Vec`]`<u8>`, respectively. To
+    ///   serialize the message as a COBS frame, use the
+    ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
+    ///   methods, instead.
+    /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
+    ///   (all [`Sender`]s and [`SerSender`]s have been dropped) *and* all
+    ///   messages sent before the channel closed have already been received.
+    /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
+    ///   messages in the queue, but the channel has not been closed.
+    ///
+    /// [`Vec`]: alloc::vec::Vec
     pub fn try_recv(&self) -> Result<SerRecvRef<'_>, TryRecvError> {
         let res = self.pipe.core().try_dequeue()?;
         Ok(SerRecvRef {
@@ -302,11 +346,40 @@ impl SerReceiver {
         })
     }
 
-    /// Receive the next message from the channel, waiting for one to be sent if
-    /// the channel is empty.
+    /// Receives the next message from the channel, returning a [`SerRecvRef`]
+    /// that can be used to serialize that message as bytes.
     ///
-    /// This method returns a [`SerRecvRef`] which may be used to serialize the
-    /// received message.
+    /// This method returns [`None`] if the channel has been closed (all
+    /// [`Sender`]s and [`SerSender`]s have been dropped) *and* all messages
+    /// sent before the channel closed have been received.
+    ///
+    /// If the channel has not yet been closed, but there are no messages
+    /// currently available in the queue, this method yields and waits for a new
+    /// message to be sent, or for the channel to close.
+    ///
+    /// To return an error rather than waiting, use the
+    /// [`try_recv`](Self::try_recv) method, instead.
+    ///
+    /// # Returns
+    ///
+    /// - [`Some`]`(`[`SerRecvRef`]`)` if a message was received from the
+    ///   channel. The [`SerRecvRef::to_slice`] and [`SerRecvRef::to_vec`]
+    ///   methods can be used to serialize the binary representation of the
+    ///   message to a `&mut [u8]` or to a [`Vec`]`<u8>`, respectively. To
+    ///   serialize the message as a COBS frame, use the
+    ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
+    ///   methods, instead.
+    /// - [`None`] if the channel is closed *and* all messages have been
+    ///   received.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method is cancel-safe. If `recv` is used as part of a `select!` or
+    /// other mechanism for waiting for the first of multiple futures to
+    /// complete, and another future completes first, it is guaranteed that no
+    /// message will be received from the channel.
+    ///
+    /// [`Vec`]: alloc::vec::Vec
     pub async fn recv(&self) -> Option<SerRecvRef<'_>> {
         self.pipe.core().dequeue().await.map(|res| SerRecvRef {
             res,
@@ -422,6 +495,40 @@ impl fmt::Debug for SerRecvRef<'_> {
 // === impl SerSender ===
 
 impl SerSender {
+    /// Reserve capacity to send a serialized message to the channel.
+    ///
+    /// If the channel is currently at capacity, this method waits until
+    /// capacity for one message is available. When capacity is available,
+    /// capacity for one message is reserved for the caller. This method returns
+    /// a [`SerPermit`], which represents the reserved capacity. The [`send`]
+    /// and [`send_framed`] methods on [`SerPermit`] can be used to send a message,
+    /// consuming the reserved capacity.
+    ///
+    /// Dropping the [`SerPermit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To attempt to reserve capacity *without* waiting if the channel is full,
+    /// use the [`try_reserve`] method, instead.
+    ///
+    /// [`SerPermit`]: SerPermit
+    /// [`send`]: SerPermit::send
+    /// [`send_framed`]: SerPermit::send_framed
+    /// [`try_reserve`]: Self::try_reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`SerPermit`]`)` if the channel is not closed.
+    /// - [`Err`]`(`[SendError::Closed`]`)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// If a `reserve` future is dropped before it has completed, no capacity
+    /// will be reserved.
+    ///
+    /// This channel uses a queue to ensure that calls to `send` and `reserve`
+    /// complete in the order they were requested. Cancelling a call to
+    /// `reserve` causes the caller to lose its place in that queue.
     pub async fn reserve(&self) -> Result<SerPermit<'_>, SendError> {
         self.pipe.core().reserve().await.map(|res| SerPermit {
             res,
@@ -430,6 +537,39 @@ impl SerSender {
         })
     }
 
+    /// Attempt to reserve capacity to send a serialized message to the channel,
+    /// without waiting for capacity to become available.
+    ///
+    /// If the channel is currently at capacity, this method returns
+    /// [`TrySendError::Full`]. If the channel has capacity available, capacity
+    /// for one message is reserved for the caller, returning a [`SerPermit`]
+    /// which represents the reserved capacity. The [`send`]  and
+    /// [`send_framed`] methods on [`SerPermit`] can be used to send a message,
+    /// consuming the reserved capacity.
+    ///
+    /// Dropping the [`SerPermit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To wait for capacity to become available when the channel is full,
+    /// rather than returning an error, use the [`reserve`] method, instead.
+    ///
+    /// [`SerPermit`]: SerPermit
+    /// [`send`]: SerPermit::send
+    /// [`send_framed`]: SerPermit::send_framed
+    /// [`reserve`]: Self::reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`SerPermit`]`)` if the channel has capacity available and
+    ///   has not closed.
+    /// - [`Err`]`(`[TrySendError::Closed`]`)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
+    ///   subsequent calls to `try_reserve` or [`reserve`] on this channel will
+    ///   always fail.
+    /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
+    ///   have capacity to send another message without waiting. A subsequent
+    ///   call to `try_reserve` may complete successfully, once capacity has
+    ///   become available again.
     pub fn try_reserve(&self) -> Result<SerPermit<'_>, TrySendError> {
         self.pipe.core().try_reserve().map(|res| SerPermit {
             res,
@@ -568,14 +708,81 @@ impl SerPermit<'_> {
 // === impl Sender ===
 
 impl<T> Sender<T> {
-    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError> {
-        let pipe = self.pipe.core().try_reserve()?;
+    /// Reserve capacity to send a `T`-typed message to the channel.
+    ///
+    /// If the channel is currently at capacity, this method waits until
+    /// capacity for one message is available. When capacity is available,
+    /// capacity for one message is reserved for the caller. This method returns
+    /// a [`Permit`], which represents the reserved capacity. The [`send`]
+    /// and [`commit`] methods on [`Permit`] can be used to send a message,
+    /// consuming the reserved capacity.
+    ///
+    /// Dropping the [`Permit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To attempt to reserve capacity *without* waiting if the channel is full,
+    /// use the [`try_reserve`] method, instead.
+    ///
+    /// [`Permit`]: Permit
+    /// [`send`]: Permit::send
+    /// [`commit`]: Permit::commit
+    /// [`try_reserve`]: Self::try_reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`Permit`]`)` if the channel is not closed.
+    /// - [`Err`]`(`[SendError::Closed`]`)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// If a `reserve` future is dropped before it has completed, no capacity
+    /// will be reserved.
+    ///
+    /// This channel uses a queue to ensure that calls to `send` and `reserve`
+    /// complete in the order they were requested. Cancelling a call to
+    /// `reserve` causes the caller to lose its place in that queue.
+    pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError> {
+        let pipe = self.pipe.core().reserve().await?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(Permit { cell, pipe })
     }
 
-    pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError> {
-        let pipe = self.pipe.core().reserve().await?;
+    /// Attempt to reserve capacity to send a `T`-typed message to the channel,
+    /// without waiting for capacity to become available.
+    ///
+    /// If the channel is currently at capacity, this method returns
+    /// [`TrySendError::Full`]. If the channel has capacity available, capacity
+    /// for one message is reserved for the caller, returning a [`Permit`]
+    /// which represents the reserved capacity. The [`send`] and [`commit`]
+    /// methods on [`Permit`] can be used to send a message, consuming the
+    /// reserved capacity.
+    ///
+    /// Dropping the [`Permit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To wait for capacity to become available when the channel is full,
+    /// rather than returning an error, use the [`reserve`] method, instead.
+    ///
+    /// [`Permit`]: Permit
+    /// [`send`]: Permit::send
+    /// [`commit`]: Permit::commit
+    /// [`reserve`]: Self::reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`Permit`]`)` if the channel has capacity available and
+    ///   has not closed.
+    /// - [`Err`]`(`[TrySendError::Closed`]`)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
+    ///   subsequent calls to `try_reserve` or [`reserve`] on this channel will
+    ///   always fail.
+    /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
+    ///   have capacity to send another message without waiting. A subsequent
+    ///   call to `try_reserve` may complete successfully, once capacity has
+    ///   become available again.
+    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError> {
+        let pipe = self.pipe.core().try_reserve()?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(Permit { cell, pipe })
     }
