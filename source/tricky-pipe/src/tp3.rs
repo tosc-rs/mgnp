@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 use crate::loom::cell::{self, UnsafeCell};
 use core::{
     fmt,
@@ -68,30 +69,88 @@ pub use self::static_impl::*;
 #[cfg(any(test, feature = "alloc"))]
 pub use self::arc_impl::*;
 
+/// Receives `T`-typed values from associated [`Sender`]s or [`SerSender`]s.
+///
+/// A `Receiver` for a channel can be obtained using the
+/// [`StaticTrickyPipe::receiver`] and [`TrickyPipe::receiver`] methods.
 pub struct Receiver<T: 'static> {
     pipe: TypedPipe<T>,
 }
 
+/// Sends `T`-typed values to an associated [`Receiver`]s or [`SerReceiver`].
+///
+/// A `Sender` for a channel can be obtained using the
+/// [`StaticTrickyPipe::sender`] and [`TrickyPipe::sender`] methods.
 pub struct Sender<T: 'static> {
     pipe: TypedPipe<T>,
 }
 
+/// Receives serialized values from associated [`Sender`]s or [`SerSender`]s.
+///
+/// A `SerReceiver` for a channel can be obtained using the
+/// [`StaticTrickyPipe::ser_receiver`] and [`TrickyPipe::ser_receiver`] methods,
+/// when the channel's message type implements [`Serialize`]. Messages may be
+/// sent as typed values by a [`Sender`], or as serialized bytes by a [`SerSender`].
 pub struct SerReceiver {
     pipe: ErasedPipe,
     vtable: &'static SerVtable,
 }
 
+/// Sends serialized values to an associated [`Receiver`] or [`SerReceiver`].
+///
+/// A `SerSender` for a channel can be obtained using the
+/// [`StaticTrickyPipe::ser_sender`] or [`TrickyPipe::ser_sender`] methods,
+/// when the channel's message type implements [`DeserializeOwned`]. Messages may be
+/// received as deserialized typed values by a [`Receiver`], or as serialized
+/// bytes by a [`SerReceiver`].
 pub struct SerSender {
     pipe: ErasedPipe,
     vtable: &'static DeserVtable,
 }
 
+/// A reference to a type-erased, serializable message received from a
+/// [`SerReceiver`].
+///
+/// This type is returned by the [`SerReceiver::try_recv`] and
+/// [`SerReceiver::recv`] methods.
+///
+/// The message may be serialized to a `&mut [u8]` using the [`to_slice`] or
+/// [`to_slice_framed`] methods. If the "alloc" feature flag is enabled, the
+/// message may also be serialized to an owned [`Vec`]`<u8>` using the
+/// [`to_vec`] or [`to_vec_owned`] methods.
+///
+/// [`to_slice`]: Self::to_slice
+/// [`to_slice_framed`]: Self::to_slice_framed
+/// [`to_vec`]: Self::to_vec
+/// [`to_vec_framed`]: Self::to_vec_framed
+#[must_use = "a `SerRecvRef` does nothing unless the `to_slice`, \
+    `to_slice_framed`, `to_vec`, or `to_vec_framed` methods are called"]
 pub struct SerRecvRef<'pipe> {
     res: Reservation<'pipe>,
     elems: ErasedSlice,
     vtable: &'static SerVtable,
 }
 
+/// A permit that allows a typed value to be sent to a channel.
+///
+/// This type is returned by the [`Sender::try_reserve`] and [`Sender::reserve`]
+/// methods.
+///
+/// To send a `T`-typed value, call the [`send`] method on this type, consuming
+/// the `SendRef`. Dropping the `SendRef` without sending a value will release
+/// the reserved channel capacity to be used by other senders.
+///
+/// Alternatively, this type implements [`DerefMut`]`<Target =
+/// `[`MaybeUninit`]`<T>>`, which may be used to write directly to the reserved
+/// slot in the channel's buffer. This may improve performance in some cases.
+/// When using the [`DerefMut`] implementation to write a message to the
+/// channel's buffer, the [`commit`] message must be called to complete sending
+/// the message. Dropping the `SendRef` without calling [`commit`] will release
+/// the reserved channel capacity without sending a value.
+///
+/// [`send`]: Self::send
+/// [`commit`]: Self::commit
+#[must_use = "a `SendRef` does nothing unless the `send` or `commit` methods are called"]
 pub struct SendRef<'core, T> {
     // load bearing drop ordering lol lmao
     cell: cell::MutPtr<MaybeUninit<T>>,
@@ -500,9 +559,9 @@ impl<T> Sender<T> {
 
     /// Returns `true` if this channel is full.
     ///
-    /// If this method returns `true`, then any calls to [`Sender::send`] or
+    /// If this method returns `true`, then any calls to [`Sender::reserve`] or
     /// [`SerSender::send`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_send`] or [`SerSender`
+    /// [`Sender::try_reserve`] or [`SerSender::try_send`] will return an error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {

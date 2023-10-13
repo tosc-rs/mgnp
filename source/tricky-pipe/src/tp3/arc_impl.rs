@@ -4,10 +4,21 @@ use alloc::boxed::Box;
 
 use super::channel_core::{Core, CoreVtable};
 
+// TODO(eliza): we should probably replace the use of `Arc` here with manual ref
+// counting, since the `Core` tracks the number of senders and receivers
+// already. But, I was in a hurry to get a prototype working...
 pub struct TrickyPipe<T: 'static>(Arc<Inner<T>>);
 
 struct Inner<T: 'static> {
     core: Core,
+    // TODO(eliza): instead of boxing the elements array, we should probably
+    // manually allocate a `Layout`. This works for now, though.
+    //
+    // TODO(eliza): Also, when we do that, we'll want to make it possible to
+    // integrate with `mnemos-alloc`. I think we can do that by adding functions
+    // like this:
+    //  - `pub const fn layout_for(capacity: u8) -> Layout`
+    //  - `pub unsafe fn from_raw(ptr: *const (), layout: Layout) -> Self`
     elements: Box<[Cell<T>]>,
 }
 
