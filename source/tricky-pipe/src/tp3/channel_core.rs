@@ -23,7 +23,7 @@ pub(super) struct Core {
     // or, we could lay the struct out so that other fields provide "free" padding...
     dequeue_pos: AtomicU16,
     enqueue_pos: AtomicU16,
-    pub(super) cons_wait: WaitCell,
+    cons_wait: WaitCell,
     pub(super) prod_wait: WaitQueue,
     indices: IndexAllocWord,
     queue: [AtomicU16; MAX_CAPACITY],
@@ -160,6 +160,16 @@ impl Core {
                 Err(TrySendError::Full) => {
                     self.prod_wait.wait().await.map_err(|_| SendError::Closed)?
                 }
+            }
+        }
+    }
+
+    pub(super) async fn dequeue(&self) -> Option<Reservation<'_>> {
+        loop {
+            match self.try_dequeue() {
+                Ok(res) => return Some(res),
+                Err(TryRecvError::Closed) => return None,
+                Err(TryRecvError::Empty) => self.cons_wait.wait().await.ok()?,
             }
         }
     }

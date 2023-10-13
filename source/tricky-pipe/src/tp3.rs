@@ -58,9 +58,7 @@ pub mod error;
 mod static_impl;
 
 use self::{
-    channel_core::{
-        DeserFn, DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe,
-    },
+    channel_core::{DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe},
     error::*,
 };
 
@@ -186,26 +184,40 @@ type Cell<T> = UnsafeCell<MaybeUninit<T>>;
 
 impl<T> Receiver<T> {
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        let res = self.pipe.core().try_dequeue()?;
-        let elem =
-            self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() });
-        Ok(elem)
+        self.pipe
+            .core()
+            .try_dequeue()
+            .map(|res| self.take_value(res))
     }
 
-    pub async fn recv(&self) -> Result<T, RecvError> {
-        loop {
-            match self.try_recv() {
-                Ok(e) => return Ok(e),
-                Err(TryRecvError::Closed) => return Err(RecvError::Closed),
-                Err(TryRecvError::Empty) => self
-                    .pipe
-                    .core()
-                    .cons_wait
-                    .wait()
-                    .await
-                    .map_err(|_| RecvError::Closed)?,
-            }
-        }
+    /// Receives the next value from the channel.
+    ///
+    /// This method returns [`None`] if the channel has been closed (all
+    /// [`Sender`]s and [`SerSender`]s have been dropped) *and* all messages
+    /// sent before the channel closed have been received.
+    ///
+    /// If the channel has not yet been closed, but there are no messages
+    /// currently available in the queue, this method yields and waits for a new
+    /// message to be sent, or for the channel to close. To return an error
+    /// rather than waiting, use the [`try_recv`] method, instead.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// This method is cancel-safe. If `recv` is used as part of a `select!` or
+    /// other mechanism for waiting for the first of multiple futures to
+    /// complete, and another future completes first, it is guaranteed that no
+    /// message will be received from the channel.
+    pub async fn recv(&self) -> Option<T> {
+        self.pipe
+            .core()
+            .dequeue()
+            .await
+            .map(|res| self.take_value(res))
+    }
+
+    #[inline(always)]
+    fn take_value(&self, res: Reservation<'_>) -> T {
+        self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() })
     }
 
     /// Returns `true` if this channel is empty.
@@ -295,22 +307,8 @@ impl SerReceiver {
     ///
     /// This method returns a [`SerRecvRef`] which may be used to serialize the
     /// received message.
-    pub async fn recv(&self) -> Result<SerRecvRef<'_>, RecvError> {
-        let res = loop {
-            match self.pipe.core().try_dequeue() {
-                Ok(res) => break res,
-                Err(TryRecvError::Closed) => return Err(RecvError::Closed),
-                Err(TryRecvError::Empty) => self
-                    .pipe
-                    .core()
-                    .cons_wait
-                    .wait()
-                    .await
-                    .map_err(|_| RecvError::Closed)?,
-            }
-        };
-
-        Ok(SerRecvRef {
+    pub async fn recv(&self) -> Option<SerRecvRef<'_>> {
+        self.pipe.core().dequeue().await.map(|res| SerRecvRef {
             res,
             elems: self.pipe.elems(),
             vtable: self.vtable,
