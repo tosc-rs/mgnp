@@ -1,5 +1,5 @@
 #![cfg_attr(not(test), no_std)]
-#![cfg(any(feature = "alloc", test))]
+#[cfg(any(feature = "alloc", test))]
 extern crate alloc;
 
 // TODO: only pub to silence unused warnings
