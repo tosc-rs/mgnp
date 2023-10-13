@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+#![warn(rustdoc::broken_intra_doc_links)]
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;

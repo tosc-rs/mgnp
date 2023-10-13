@@ -6,18 +6,24 @@
 //! [`SerSender`]: super::SerSender
 //! [`SerReceiver`]: super::SerReceiver
 
-/// Error returned by [`Sender::reserve`](super::Sender::reserve).
+/// Error returned by [`Sender::reserve`] and [`SerSender::reserve`].
+///
+/// [`Sender::reserve`]: super::Sender::reserve
+/// [`SerSender::reserve`]: super::SerSender::reserve
 #[derive(Debug, Eq, PartialEq)]
 pub enum SendError {
     /// A message cannot be sent because the channel is closed (no [`Receiver`]
     /// or [`SerReceiver`] exists).
     ///
-    /// [`Sender`]: super::Sender
     /// [`Receiver`]: super::Receiver
+    /// [`SerReceiver`]: super::SerReceiver
     Closed,
 }
 
-/// Error returned by [`Sender::try_reserve`](super::Sender::try_reserve).
+/// Error returned by [`Sender::try_reserve`] and [`SerSender::try_reserve`].
+///
+/// [`Sender::try_reserve`]: super::Sender::try_reserve
+/// [`SerSender::try_reserve`]: super::SerSender::try_reserve
 #[derive(Debug, Eq, PartialEq)]
 pub enum TrySendError {
     /// The channel is currently full, and a message cannot be sent without
@@ -26,8 +32,8 @@ pub enum TrySendError {
     /// A message cannot be sent because the channel is closed (no [`Receiver`]
     /// or [`SerReceiver`] exists).
     ///
-    /// [`Sender`]: super::Sender
     /// [`Receiver`]: super::Receiver
+    /// [`SerReceiver`]: super::SerReceiver
     Closed,
 }
 

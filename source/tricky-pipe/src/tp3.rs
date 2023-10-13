@@ -117,10 +117,11 @@ pub struct SerSender {
 /// The message may be serialized to a `&mut [u8]` using the [`to_slice`] or
 /// [`to_slice_framed`] methods. If the "alloc" feature flag is enabled, the
 /// message may also be serialized to an owned [`Vec`]`<u8>` using the
-/// [`to_vec`] or [`to_vec_owned`] methods.
+/// [`to_vec`] or [`to_vec_framed`] methods.
 ///
 /// [`to_slice`]: Self::to_slice
 /// [`to_slice_framed`]: Self::to_slice_framed
+/// [`Vec`]: alloc::vec::Vec
 /// [`to_vec`]: Self::to_vec
 /// [`to_vec_framed`]: Self::to_vec_framed
 #[must_use = "a `SerRecvRef` does nothing unless the `to_slice`, \
@@ -222,9 +223,10 @@ impl<T> Receiver<T> {
 
     /// Returns `true` if this channel is full.
     ///
-    /// If this method returns `true`, then any calls to [`Sender::send`] or
-    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_send`] or [`SerSender`
+    /// If this method returns `true`, then any calls to [`Sender::reserve`] or
+    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an
+    /// error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {
@@ -330,9 +332,10 @@ impl SerReceiver {
 
     /// Returns `true` if this channel is full.
     ///
-    /// If this method returns `true`, then any calls to [`Sender::send`] or
-    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_send`] or [`SerSender`
+    /// If this method returns `true`, then any calls to [`Sender::reserve`] or
+    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an
+    /// error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {
@@ -482,9 +485,9 @@ impl SerSender {
 
     /// Returns `true` if this channel is full.
     ///
-    /// If this method returns `true`, then any calls to [`Sender::send`] or
-    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_send`] or [`SerSender`
+    /// If this method returns `true`, then any calls to [`Sender::reserve`] or
+    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {
@@ -595,7 +598,7 @@ impl<T> Sender<T> {
     /// Returns `true` if this channel is full.
     ///
     /// If this method returns `true`, then any calls to [`Sender::reserve`] or
-    /// [`SerSender::send`] will yield until the queue is empty. Any calls to
+    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
     /// [`Sender::try_reserve`] or [`SerSender::try_send`] will return an error.
     #[inline]
     #[must_use]

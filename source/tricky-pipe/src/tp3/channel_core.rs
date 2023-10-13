@@ -13,6 +13,9 @@ use maitake_sync::{WaitCell, WaitQueue};
 use mnemos_bitslab::index::IndexAllocWord;
 use serde::{de::DeserializeOwned, Serialize};
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 pub(super) struct Core {
     // TODO(eliza): should maybe cache-pad `dequeue_pos`` and `enqueue_pos` on
     // architectures with big cache lines...?
@@ -471,7 +474,7 @@ impl SerVtable {
     pub(super) fn to_vec<T: Serialize + 'static>(
         elems: ErasedSlice,
         idx: u8,
-    ) -> postcard::Result<alloc::vec::Vec<u8>> {
+    ) -> postcard::Result<Vec<u8>> {
         unsafe {
             let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
             elems[idx as usize].with(|ptr| {
@@ -485,7 +488,7 @@ impl SerVtable {
     pub(super) fn to_vec_framed<T: Serialize + 'static>(
         elems: ErasedSlice,
         idx: u8,
-    ) -> postcard::Result<alloc::vec::Vec<u8>> {
+    ) -> postcard::Result<Vec<u8>> {
         unsafe {
             let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
             elems[idx as usize].with(|ptr| {
