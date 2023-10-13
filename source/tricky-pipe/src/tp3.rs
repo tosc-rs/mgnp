@@ -872,7 +872,20 @@ impl<T> Permit<'_, T> {
         self.pipe.commit_send();
     }
 
-    pub fn commit(self) {
+    /// Send the current value of the reserved slot to the channel.
+    ///
+    /// This method is intended to be used in conjunction with the
+    /// [`DerefMut`]`<Target = `[`MaybeUninit`]`<T>>` implementation for
+    /// `Permit` to allow writing to the reserved slot in the channel's buffer
+    /// in place, rather than by moving a value into the slot. This may, in some
+    /// cases, be more efficient when the messages are large.
+    ///
+    /// # Safety
+    ///
+    /// Calling `commit` without writing to the reserved slot **will result in
+    /// the [`Receiver`] reading uninitialized memory**! Ensure that the slot
+    /// has been initialized prior to calling this method!
+    pub unsafe fn commit(self) {
         self.pipe.commit_send();
     }
 }
