@@ -131,13 +131,13 @@ pub struct SerRecvRef<'pipe> {
     vtable: &'static SerVtable,
 }
 
-/// A permit that allows a typed value to be sent to a channel.
+/// A permit to send a single `T`-typed value to a channel.
 ///
 /// This type is returned by the [`Sender::try_reserve`] and [`Sender::reserve`]
 /// methods.
 ///
 /// To send a `T`-typed value, call the [`send`] method on this type, consuming
-/// the `SendRef`. Dropping the `SendRef` without sending a value will release
+/// the `Permit`. Dropping the `Permit` without sending a value will release
 /// the reserved channel capacity to be used by other senders.
 ///
 /// Alternatively, this type implements [`DerefMut`]`<Target =
@@ -145,16 +145,38 @@ pub struct SerRecvRef<'pipe> {
 /// slot in the channel's buffer. This may improve performance in some cases.
 /// When using the [`DerefMut`] implementation to write a message to the
 /// channel's buffer, the [`commit`] message must be called to complete sending
-/// the message. Dropping the `SendRef` without calling [`commit`] will release
+/// the message. Dropping the `Permit` without calling [`commit`] will release
 /// the reserved channel capacity without sending a value.
 ///
 /// [`send`]: Self::send
 /// [`commit`]: Self::commit
-#[must_use = "a `SendRef` does nothing unless the `send` or `commit` methods are called"]
-pub struct SendRef<'core, T> {
+#[must_use = "a `Permit` does nothing unless the `send` or `commit` \
+              methods are called"]
+pub struct Permit<'core, T> {
     // load bearing drop ordering lol lmao
     cell: cell::MutPtr<MaybeUninit<T>>,
     pipe: Reservation<'core>,
+}
+
+/// A permit to send a single serialized value to a channel.
+///
+/// This type is returned by the [`SerSender::try_reserve`] and
+/// [`SerSender::reserve`] methods.
+///
+/// To send a serialized value, call the [`send`] method on this type. If the
+/// serialized bytes are a COBS frame call the [`send_framed`] method instead.
+/// Sending a value consumes the `SerPermit`  Dropping the `SerPermit` without
+/// sending a value will release the reserved channel capacity to be used by
+/// other senders.
+///
+/// [`send`]: Self::send
+/// [`send_framed`]: Self::send_framed
+#[must_use = "a `SerPermit` does nothing unless the `send` or `send_framed` '
+              methods are called"]
+pub struct SerPermit<'core> {
+    res: Reservation<'core>,
+    elems: ErasedSlice,
+    vtable: &'static DeserVtable,
 }
 
 type Cell<T> = UnsafeCell<MaybeUninit<T>>;
@@ -399,22 +421,50 @@ impl fmt::Debug for SerRecvRef<'_> {
 // === impl SerSender ===
 
 impl SerSender {
+    pub async fn reserve(&self) -> Result<SerPermit<'_>, SendError> {
+        self.pipe.core().reserve().await.map(|res| SerPermit {
+            res,
+            elems: self.pipe.elems(),
+            vtable: self.vtable,
+        })
+    }
+
+    pub fn try_reserve(&self) -> Result<SerPermit<'_>, TrySendError> {
+        self.pipe.core().try_reserve().map(|res| SerPermit {
+            res,
+            elems: self.pipe.elems(),
+            vtable: self.vtable,
+        })
+    }
+
     pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
-        self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
+        self.try_reserve()
+            .map_err(SerTrySendError::Send)?
+            .send(bytes)
+            .map_err(SerTrySendError::Deserialize)
     }
 
     pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
-        self.try_send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
+        self.try_reserve()
+            .map_err(SerTrySendError::Send)?
+            .send_framed(bytes)
+            .map_err(SerTrySendError::Deserialize)
     }
 
     pub async fn send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
-        self.send_inner(bytes.as_ref(), self.vtable.from_bytes)
+        self.reserve()
             .await
+            .map_err(|_| SerSendError::Closed)?
+            .send(bytes)
+            .map_err(SerSendError::Deserialize)
     }
 
     pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
-        self.send_inner(bytes.as_ref(), self.vtable.from_bytes_framed)
+        self.reserve()
             .await
+            .map_err(|_| SerSendError::Closed)?
+            .send_framed(bytes)
+            .map_err(SerSendError::Deserialize)
     }
 
     /// Returns `true` if this channel is empty.
@@ -473,44 +523,6 @@ impl SerSender {
     pub fn remaining(&self) -> usize {
         self.len() - self.capacity()
     }
-
-    async fn send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerSendError> {
-        loop {
-            match self.pipe.core().try_reserve() {
-                Ok(res) => {
-                    // try writing the bytes to the reservation.
-                    deserialize(self.pipe.elems(), res.idx, bytes)
-                        .map_err(SerSendError::Deserialize)?;
-                    // if we successfully deserialized the bytes, commit the send.
-                    // otherwise, we'll release the send index when we drop the reservation.
-                    res.commit_send();
-                    return Ok(());
-                }
-                Err(TrySendError::Closed) => return Err(SerSendError::Closed),
-                Err(TrySendError::Full) => self
-                    .pipe
-                    .core()
-                    .prod_wait
-                    .wait()
-                    .await
-                    .map_err(|_| SerSendError::Closed)?,
-            }
-        }
-    }
-
-    fn try_send_inner(&self, bytes: &[u8], deserialize: DeserFn) -> Result<(), SerTrySendError> {
-        let res = self
-            .pipe
-            .core()
-            .try_reserve()
-            .map_err(SerTrySendError::Send)?;
-        // try writing the bytes to the reservation.
-        deserialize(self.pipe.elems(), res.idx, bytes).map_err(SerTrySendError::Deserialize)?;
-        // if we successfully deserialized the bytes, commit the send.
-        // otherwise, we'll release the send index when we drop the reservation.
-        res.commit_send();
-        Ok(())
-    }
 }
 
 impl Clone for SerSender {
@@ -529,19 +541,42 @@ impl Drop for SerSender {
     }
 }
 
+// === impl SerPermit ===
+
+impl SerPermit<'_> {
+    pub fn send(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
+        // try to deserialize the bytes into the reserved pipe slot.
+        (self.vtable.from_bytes)(self.elems, self.res.idx, bytes.as_ref())?;
+
+        // if we successfully deserialized the bytes, commit the send.
+        // otherwise, we'll release the send index when we drop the reservation.
+        self.res.commit_send();
+        Ok(())
+    }
+
+    pub fn send_framed(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
+        // try to deserialize the bytes into the reserved pipe slot.
+        (self.vtable.from_bytes_framed)(self.elems, self.res.idx, bytes.as_ref())?;
+
+        // if we successfully deserialized the bytes, commit the send.
+        // otherwise, we'll release the send index when we drop the reservation.
+        self.res.commit_send();
+        Ok(())
+    }
+}
 // === impl Sender ===
 
 impl<T> Sender<T> {
-    pub fn try_reserve(&self) -> Result<SendRef<'_, T>, TrySendError> {
+    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError> {
         let pipe = self.pipe.core().try_reserve()?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
-        Ok(SendRef { cell, pipe })
+        Ok(Permit { cell, pipe })
     }
 
-    pub async fn reserve(&self) -> Result<SendRef<'_, T>, SendError> {
+    pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError> {
         let pipe = self.pipe.core().reserve().await?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
-        Ok(SendRef { cell, pipe })
+        Ok(Permit { cell, pipe })
     }
 
     /// Returns `true` if this channel is empty.
@@ -617,7 +652,7 @@ impl<T: 'static> Drop for Sender<T> {
     }
 }
 
-impl<T> SendRef<'_, T> {
+impl<T> Permit<'_, T> {
     pub fn send(self, val: T) {
         // write the value...
         unsafe {
@@ -634,20 +669,20 @@ impl<T> SendRef<'_, T> {
     }
 }
 
-impl<T> fmt::Debug for SendRef<'_, T> {
+impl<T> fmt::Debug for Permit<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SendRef").field(&self.pipe).finish()
+        f.debug_tuple("Permit").field(&self.pipe).finish()
     }
 }
 
-impl<T> Deref for SendRef<'_, T> {
+impl<T> Deref for Permit<'_, T> {
     type Target = MaybeUninit<T>;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.cell.deref() }
     }
 }
 
-impl<T> DerefMut for SendRef<'_, T> {
+impl<T> DerefMut for Permit<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.cell.deref() }
     }
