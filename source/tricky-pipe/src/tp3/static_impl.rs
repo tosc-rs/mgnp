@@ -110,42 +110,9 @@ where
 unsafe impl<T: Send, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY> {}
 unsafe impl<T: Send, const CAPACITY: usize> Sync for StaticTrickyPipe<T, CAPACITY> {}
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use serde::Deserialize;
-
-    #[derive(Debug, Serialize, PartialEq)]
-    struct SerStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct DeStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct SerDeStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
-
-    #[derive(Debug, PartialEq)]
-    struct UnSerStruct {
-        a: u8,
-        b: i16,
-        c: u32,
-        d: String,
-    }
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::{super::tests::*, *};
 
     #[test]
     fn normal_smoke() {

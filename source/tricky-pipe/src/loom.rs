@@ -101,6 +101,7 @@ mod inner {
 }
 
 #[cfg(not(loom))]
+#[allow(clippy::items_after_test_module)]
 mod inner {
     #![allow(dead_code, unused_imports)]
     pub(crate) mod sync {

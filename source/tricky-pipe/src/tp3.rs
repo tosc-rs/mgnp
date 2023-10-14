@@ -57,6 +57,8 @@ mod arc_impl;
 mod channel_core;
 pub mod error;
 mod static_impl;
+#[cfg(test)]
+mod tests;
 
 use self::{
     channel_core::{DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe},
