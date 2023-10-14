@@ -10,7 +10,7 @@ alloc = []
 [dependencies]
 maitake-sync = "0.1.0"
 portable-atomic = "1.4.3"
-mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/allocated-iter" }
+mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/bitslab-loom" }
 
 [dependencies.postcard]
 version = "1.0.7"

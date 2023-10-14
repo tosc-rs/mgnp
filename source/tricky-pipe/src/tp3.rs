@@ -45,10 +45,17 @@ macro_rules! test_span {
     ($($arg:tt)*) => {};
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(loom)))]
 macro_rules! test_span {
     ($($arg:tt)*) => {
         let _span = tracing::debug_span!($($arg)*).entered();
+    };
+}
+
+#[cfg(all(test, loom))]
+macro_rules! test_span {
+    ($($arg:tt)*) => {
+        tracing::info!(message = $($arg)*);
     };
 }
 
@@ -872,9 +879,10 @@ impl<T> Permit<'_, T> {
             // safety: because we allocated the slot's index, we have exclusive
             // mutable access to this slot.
             self.cell.deref().write(val);
+
+            // ...and commit.
+            self.commit();
         }
-        // ...and commit.
-        self.pipe.commit_send();
     }
 
     /// Send the current value of the reserved slot to the channel.
@@ -890,7 +898,13 @@ impl<T> Permit<'_, T> {
     /// Calling `commit` without writing to the reserved slot **will result in
     /// the [`Receiver`] reading uninitialized memory**! Ensure that the slot
     /// has been initialized prior to calling this method!
+    #[inline]
     pub unsafe fn commit(self) {
+        // the write is over, make sure `loom` knows we're done with the mutable
+        // pointer *before* we actually release the slot to the receiver.
+        #[cfg_attr(not(loom), allow(clippy::drop_non_drop))]
+        drop(self.cell);
+
         self.pipe.commit_send();
     }
 }
