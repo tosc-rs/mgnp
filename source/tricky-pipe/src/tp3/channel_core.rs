@@ -1,6 +1,7 @@
 use super::error::*;
 use crate::loom::{
     cell::UnsafeCell,
+    hint,
     sync::atomic::{self, AtomicU16, AtomicUsize, Ordering::*},
 };
 use core::{
@@ -205,7 +206,8 @@ impl Core {
                     // rx is responsible for determining if the channel is
                     // closed by the tx: there may be messages in the channel to
                     // consume before the rx considers it properly closed.
-                    let _ = self.cons_wait.wait().await;
+                    let _ = test_dbg!(self.cons_wait.wait().await);
+                    hint::spin_loop();
                 }
             }
         }
@@ -230,6 +232,8 @@ impl Core {
                     // bit is *unset*, then that means that no senders have been
                     // created yet, and the channel is empty (we are waiting for
                     // senders to be created).
+                    // TODO(eliza): it would be less racy to stick this in the
+                    // dequeue_pos atomic instead...
                     if test_dbg!(self.state.load(Acquire) & state::TX_CLOSED
                         == state::TX_CLOSED) =>
                 {
@@ -276,7 +280,7 @@ impl Core {
                     Ok(_) => {
                         let new = test_dbg!(test_dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
                         slot.store(test_dbg!(idx as u16 | new), Release);
-                        self.cons_wait.wake();
+                        test_dbg!(self.cons_wait.wake());
                         return;
                     }
                     Err(actual) => pos = actual,
