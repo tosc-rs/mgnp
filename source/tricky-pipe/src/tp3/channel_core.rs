@@ -102,11 +102,14 @@ mod state {
     /// channel is closed by the receive side.
     pub(super) const RX_CLOSED: usize = 1 << 2;
 
+    /// If set, a sender has been created.
+    pub(super) const TX_CLOSED: usize = 1 << 3;
+
     /// Sender reference count; value of one sender.
-    pub(super) const TX_ONE: usize = 1 << 3;
+    pub(super) const TX_ONE: usize = 1 << 4;
 
     /// Mask for extracting sender reference count.
-    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED);
+    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED | TX_CLOSED);
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
@@ -197,7 +200,13 @@ impl Core {
             match self.try_dequeue() {
                 Ok(res) => return Some(res),
                 Err(TryRecvError::Closed) => return None,
-                Err(TryRecvError::Empty) => self.cons_wait.wait().await.ok()?,
+                Err(TryRecvError::Empty) => {
+                    // we never close the rx waitcell, because the
+                    // rx is responsible for determining if the channel is
+                    // closed by the tx: there may be messages in the channel to
+                    // consume before the rx considers it properly closed.
+                    let _ = self.cons_wait.wait().await;
+                }
             }
         }
     }
@@ -212,13 +221,21 @@ impl Core {
             let dif = test_dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
             match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less => {
-                    if test_dbg!(self.state.load(Acquire)) & state::TX_MASK == 0 {
-                        return Err(TryRecvError::Closed);
-                    } else {
-                        return Err(TryRecvError::Empty);
-                    }
+                cmp::Ordering::Less
+                    // if the TX_CLOSED bit has been set, but the sender
+                    // reference count is 0, this means that senders *have*
+                    // existed, but are now all dropped. the channel is closed.
+                    //
+                    // if the sender reference count is 0, but the TX_CLOSED
+                    // bit is *unset*, then that means that no senders have been
+                    // created yet, and the channel is empty (we are waiting for
+                    // senders to be created).
+                    if test_dbg!(self.state.load(Acquire) & state::TX_CLOSED
+                        == state::TX_CLOSED) =>
+                {
+                    return Err(TryRecvError::Closed)
                 }
+                cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
@@ -294,6 +311,7 @@ impl Core {
 
     #[inline]
     pub(super) fn add_tx(&self) {
+        // increment the sender reference count.
         test_dbg!(self.state.fetch_add(state::TX_ONE, Relaxed));
     }
 
@@ -301,15 +319,10 @@ impl Core {
     #[inline]
     pub(super) fn drop_tx(&self) {
         let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Relaxed));
-        if val & state::TX_MASK == state::TX_ONE {
-            self.close_tx();
+        if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
+            test_dbg!(self.state.fetch_or(state::TX_CLOSED, Release));
+            self.cons_wait.close();
         }
-    }
-
-    #[inline(never)]
-    pub(super) fn close_tx(&self) {
-        atomic::fence(Release);
-        self.cons_wait.close();
     }
 
     #[must_use]
