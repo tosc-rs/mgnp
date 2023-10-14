@@ -20,7 +20,8 @@ macro_rules! test_dbg {
     ($x:expr) => {
         match $x {
             x => {
-                tracing::debug!("{} = {x:?}", stringify!($x));
+                const EXPR: &str = stringify!($x);
+                tracing::event!(tracing::Level::DEBUG, { EXPR } = ?x);
                 x
             }
         }
