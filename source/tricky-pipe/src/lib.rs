@@ -2,11 +2,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![warn(rustdoc::broken_intra_doc_links)]
 
-#[cfg(any(feature = "alloc", test))]
+#[cfg(any(feature = "alloc", test, loom))]
 extern crate alloc;
 
 // TODO: only pub to silence unused warnings
+#[cfg(not(loom))]
 pub mod spitebuf;
+#[cfg(not(loom))]
 pub mod tp1;
 pub mod tp2;
 

@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 pub(crate) use self::inner::*;
 
-#[cfg(loom)]
+#[cfg(all(loom, test))]
 mod inner {
     #![allow(dead_code)]
     #![allow(unused_imports)]
@@ -100,7 +100,7 @@ mod inner {
     }
 }
 
-#[cfg(not(loom))]
+#[cfg(not(all(loom, test)))]
 #[allow(clippy::items_after_test_module)]
 mod inner {
     #![allow(dead_code, unused_imports)]

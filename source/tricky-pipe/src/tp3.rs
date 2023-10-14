@@ -56,6 +56,7 @@ macro_rules! test_span {
 mod arc_impl;
 mod channel_core;
 pub mod error;
+#[cfg(not(loom))]
 mod static_impl;
 #[cfg(test)]
 mod tests;
@@ -65,6 +66,7 @@ use self::{
     error::*,
 };
 
+#[cfg(not(loom))]
 pub use self::static_impl::*;
 
 #[cfg(any(test, feature = "alloc"))]

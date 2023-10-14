@@ -30,6 +30,5 @@ tracing = "0.1.39"
 futures = { version = "0.3.16" }
 tracing-subscriber = { version = "0.3.17", default-features = false, features = ["fmt", "ansi"] }
 
-[target.'cfg(loom)'.dev-dependencies.loom]
-version = "0.7"
-features = ["futures", "checkpoint"]
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7", features = ["futures", "checkpoint"] }

@@ -117,6 +117,7 @@ const MASK: u16 = SEQ_ONE - 1;
 // === impl Core ===
 
 impl Core {
+    #[cfg(not(loom))]
     pub(super) const fn new(capacity: u8) -> Self {
         #[allow(clippy::declare_interior_mutable_const)]
         const QUEUE_INIT: AtomicU16 = AtomicU16::new(0);
@@ -129,6 +130,33 @@ impl Core {
             queue[i] = AtomicU16::new((i as u16) << SHIFT);
             i += 1;
         }
+
+        Core {
+            dequeue_pos: AtomicU16::new(0),
+            enqueue_pos: AtomicU16::new(0),
+            cons_wait: WaitCell::new(),
+            prod_wait: WaitQueue::new(),
+            indices: IndexAllocWord::new(),
+            queue,
+            state: AtomicUsize::new(0),
+            capacity,
+        }
+    }
+
+    // this can't be a const fn when running loom tests, since constructing an
+    // atomic is not const.
+    #[cfg(loom)]
+    pub(super) fn new(capacity: u8) -> Self {
+        debug_assert!(capacity <= MAX_CAPACITY as u8);
+        let queue = {
+            // this is, unfortunately, the nicest way to initialize an array of
+            // loom atomics, since they don't have a `const fn` constructor. :(
+            // oh well, this is test-only code...
+            let vec = (0..MAX_CAPACITY)
+                .map(|i| AtomicU16::new((i as u16) << SHIFT))
+                .collect::<alloc::vec::Vec<_>>();
+            <[_; MAX_CAPACITY]>::try_from(vec).expect("vec should be the correct length")
+        };
 
         Core {
             dequeue_pos: AtomicU16::new(0),
@@ -365,16 +393,17 @@ impl ErasedSlice {
     pub(super) fn erase<T: 'static>(slice: impl AsRef<[T]>) -> Self {
         let slice = slice.as_ref();
         let len = slice.len();
-        #[cfg(debug_assertions)]
-        let typ = core::any::TypeId::of::<T>();
         Self {
             ptr: slice.as_ptr().cast(),
             len,
-            typ,
+
+            #[cfg(debug_assertions)]
+            typ: core::any::TypeId::of::<T>(),
         }
     }
 
     unsafe fn unerase<'a, T: 'static>(self) -> &'a [T] {
+        #[cfg(debug_assertions)]
         debug_assert_eq!(
             self.typ,
             core::any::TypeId::of::<T>(),
