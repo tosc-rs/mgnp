@@ -352,14 +352,24 @@ impl Core {
     #[inline]
     pub(super) fn add_tx(&self) {
         // increment the sender reference count.
-        test_dbg!(self.state.fetch_add(state::TX_ONE, Relaxed));
+        //
+        // unlike `Arc`, this has to be `Release`, rather than `Relaxed`,
+        // because we *don't* construct the channel with an initial sender ---
+        // since the user has to call a different function depending on what
+        // type of sender they want.
+        test_dbg!(self.state.fetch_add(state::TX_ONE, Release));
     }
 
     /// Drop a sender
     #[inline]
     pub(super) fn drop_tx(&self) {
-        let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Relaxed));
+        let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Release));
         if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
+            // ensure that setting the closed bit happens-after all other
+            // `Release` subs to `state` (this could just be a fence, but loom
+            // doesn't properly simulate fences, so use a load instead).
+            let _val = self.state.load(Acquire);
+            debug_assert_eq!(val - state::TX_ONE, _val);
             test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
             self.cons_wait.close();
         }
