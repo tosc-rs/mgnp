@@ -134,20 +134,13 @@ pub(super) type DeserFn = fn(ErasedSlice, u8, &[u8]) -> postcard::Result<()>;
 mod state {
     /// If set, the channel's receiver has been claimed, indicating that no
     /// additional receivers can be claimed.
-    pub(super) const RX_CLAIMED: usize = 1 << 1;
-
-    /// If set, the channel's receiver has been dropped. This implies that the
-    /// channel is closed by the receive side.
-    pub(super) const RX_CLOSED: usize = 1 << 2;
-
-    /// If set, a sender has been created.
-    pub(super) const TX_CLOSED: usize = 1 << 3;
+    pub(super) const RX_CLAIMED: usize = 1 << 0;
 
     /// Sender reference count; value of one sender.
-    pub(super) const TX_ONE: usize = 1 << 4;
+    pub(super) const TX_ONE: usize = 1 << 1;
 
     /// Mask for extracting sender reference count.
-    pub(super) const TX_MASK: usize = !(RX_CLAIMED | RX_CLOSED | TX_CLOSED);
+    pub(super) const TX_MASK: usize = !RX_CLAIMED;
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
@@ -225,7 +218,7 @@ impl Core {
 
     pub(super) fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
         test_span!("Core::try_reserve");
-        if test_dbg!(self.state.load(Acquire)) & state::RX_CLOSED == state::RX_CLOSED {
+        if test_dbg!(self.enqueue_pos.load(Acquire)) & CLOSED != 0 {
             return Err(TrySendError::Closed);
         }
         test_dbg!(self.indices.allocate())
@@ -266,8 +259,11 @@ impl Core {
         test_span!("Core::try_dequeue");
         let mut head = test_dbg!(self.dequeue_pos.load(Acquire));
         loop {
+            // Shift one bit to the right to extract the actual position, and
+            // discard the `CLOSED` bit.
             let pos = head >> 1;
             let slot = &self.queue[(pos & MASK) as usize];
+            // Load the slot's current value, and extract its sequence number.
             let val = slot.load(Acquire);
             let seq = val >> SEQ_SHIFT;
             let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos).wrapping_add(1) as i8);
@@ -302,6 +298,8 @@ impl Core {
         debug_assert!(idx as u16 <= MASK);
         let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
         loop {
+            // Shift one bit to the right to extract the actual position, and
+            // discard the `CLOSED` bit.
             let pos = tail >> 1;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
             let seq = slot.load(Acquire) >> SEQ_SHIFT;
@@ -346,7 +344,7 @@ impl Core {
     /// Close the channel from the receiver.
     pub(super) fn close_rx(&self) {
         // set the state to indicate that the receiver was dropped.
-        test_dbg!(self.state.fetch_or(state::RX_CLOSED, Release));
+        test_dbg!(self.enqueue_pos.fetch_or(CLOSED, Release));
         // notify any waiting senders that the channel is closed.
         self.prod_wait.close();
     }
