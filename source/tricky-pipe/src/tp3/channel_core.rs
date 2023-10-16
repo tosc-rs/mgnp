@@ -2,7 +2,7 @@ use super::error::*;
 use crate::loom::{
     cell::UnsafeCell,
     hint,
-    sync::atomic::{self, AtomicU16, AtomicUsize, Ordering::*},
+    sync::atomic::{self, AtomicU16, AtomicU32, AtomicUsize, Ordering::*},
 };
 use core::{
     cmp, fmt,
@@ -22,9 +22,9 @@ pub(super) struct Core {
     // architectures with big cache lines...?
     //
     // or, we could lay the struct out so that other fields provide "free" padding...
-    dequeue_pos: AtomicU16,
-    enqueue_pos: AtomicU16,
+    dequeue_pos: AtomicU32,
     cons_wait: WaitCell,
+    enqueue_pos: AtomicU32,
     pub(super) prod_wait: WaitQueue,
     indices: IndexAllocWord,
     queue: [AtomicU16; MAX_CAPACITY],
@@ -114,9 +114,10 @@ mod state {
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
-const SHIFT: usize = MAX_CAPACITY.trailing_zeros() as usize;
+const CLOSED_BIT: u32 = 0b1;
+const SHIFT: u32 = MAX_CAPACITY.trailing_zeros() as u32;
 const SEQ_ONE: u16 = 1 << SHIFT;
-const MASK: u16 = SEQ_ONE - 1;
+const MASK: u32 = SEQ_ONE as u32 - 1;
 
 // === impl Core ===
 
@@ -136,8 +137,8 @@ impl Core {
         }
 
         Core {
-            dequeue_pos: AtomicU16::new(0),
-            enqueue_pos: AtomicU16::new(0),
+            dequeue_pos: AtomicU32::new(0),
+            enqueue_pos: AtomicU32::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::new(),
@@ -163,8 +164,8 @@ impl Core {
         };
 
         Core {
-            dequeue_pos: AtomicU16::new(0),
-            enqueue_pos: AtomicU16::new(0),
+            dequeue_pos: AtomicU32::new(0),
+            enqueue_pos: AtomicU32::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::new(),
@@ -215,34 +216,22 @@ impl Core {
 
     pub(super) fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
         test_span!("Core::try_dequeue");
-        let mut pos = test_dbg!(self.dequeue_pos.load(Relaxed));
+        let mut head = test_dbg!(self.dequeue_pos.load(Relaxed));
         loop {
+            let pos = head >> 1;
             let slot = &self.queue[(pos & MASK) as usize];
             let val = test_dbg!(slot.load(Acquire));
             let seq = test_dbg!(val >> SHIFT);
             let dif = test_dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
             match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less
-                    // if the TX_CLOSED bit has been set, but the sender
-                    // reference count is 0, this means that senders *have*
-                    // existed, but are now all dropped. the channel is closed.
-                    //
-                    // if the sender reference count is 0, but the TX_CLOSED
-                    // bit is *unset*, then that means that no senders have been
-                    // created yet, and the channel is empty (we are waiting for
-                    // senders to be created).
-                    // TODO(eliza): it would be less racy to stick this in the
-                    // dequeue_pos atomic instead...
-                    if test_dbg!(self.state.load(Acquire) & state::TX_CLOSED
-                        == state::TX_CLOSED) =>
-                {
+                cmp::Ordering::Less if head & CLOSED_BIT == CLOSED_BIT => {
                     return Err(TryRecvError::Closed)
                 }
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
-                    pos,
-                    pos.wrapping_add(1),
+                    pos << 1,
+                    pos.wrapping_add(1) << 1,
                     Relaxed,
                     Relaxed,
                 )) {
@@ -250,21 +239,22 @@ impl Core {
                         slot.store(val.wrapping_add(SEQ_ONE), Release);
                         return Ok(Reservation {
                             core: self,
-                            idx: (val & MASK) as u8,
+                            idx: (val & MASK as u16) as u8,
                         });
                     }
-                    Err(actual) => pos = actual,
+                    Err(actual) => head = actual,
                 },
-                cmp::Ordering::Greater => pos = test_dbg!(self.dequeue_pos.load(Relaxed)),
+                cmp::Ordering::Greater => head = test_dbg!(self.dequeue_pos.load(Relaxed)),
             }
         }
     }
 
     fn commit_send(&self, idx: u8) {
         test_span!("Core::commit_send", idx);
-        debug_assert!(test_dbg!(idx) as u16 <= MASK);
-        let mut pos = test_dbg!(self.enqueue_pos.load(Relaxed));
+        // debug_assert!(test_dbg!(idx) as u16 << 1 <= MASK);
+        let mut tail = test_dbg!(self.enqueue_pos.load(Relaxed));
         loop {
+            let pos = tail >> 1;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
             let seq = test_dbg!(slot.load(Acquire)) >> SHIFT;
             let dif = test_dbg!(seq as i8).wrapping_sub(pos as i8);
@@ -272,20 +262,20 @@ impl Core {
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => unreachable!(),
                 cmp::Ordering::Equal => match test_dbg!(self.enqueue_pos.compare_exchange_weak(
-                    pos,
-                    pos.wrapping_add(1),
+                    pos << 1,
+                    pos.wrapping_add(1) << 1,
                     Relaxed,
                     Relaxed,
                 )) {
                     Ok(_) => {
-                        let new = test_dbg!(test_dbg!(pos << SHIFT).wrapping_add(SEQ_ONE));
+                        let new = test_dbg!(test_dbg!((pos as u16) << SHIFT).wrapping_add(SEQ_ONE));
                         slot.store(test_dbg!(idx as u16 | new), Release);
                         test_dbg!(self.cons_wait.wake());
                         return;
                     }
-                    Err(actual) => pos = actual,
+                    Err(actual) => tail = actual,
                 },
-                cmp::Ordering::Greater => pos = test_dbg!(self.enqueue_pos.load(Relaxed)),
+                cmp::Ordering::Greater => tail = test_dbg!(self.enqueue_pos.load(Relaxed)),
             }
         }
     }
@@ -324,7 +314,7 @@ impl Core {
     pub(super) fn drop_tx(&self) {
         let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Relaxed));
         if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
-            test_dbg!(self.state.fetch_or(state::TX_CLOSED, Release));
+            test_dbg!(self.dequeue_pos.fetch_or(CLOSED_BIT, Release));
             self.cons_wait.close();
         }
     }
@@ -351,7 +341,7 @@ impl Core {
 
         // If the dequeue index has lagged behind the enqueue index by an entire
         // "lap" around the ring buffer, then the queue is full.
-        dequeue_pos.wrapping_add(SEQ_ONE) == enqueue_pos
+        dequeue_pos.wrapping_add(SEQ_ONE as u32) == enqueue_pos
     }
 
     #[must_use]

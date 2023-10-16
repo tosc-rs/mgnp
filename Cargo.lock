@@ -339,8 +339,9 @@ dependencies = [
 [[package]]
 name = "mnemos-bitslab"
 version = "0.1.0"
-source = "git+https://github.com/tosc-rs/mnemos?branch=eliza/allocated-iter#9bfc8240d9d4dc7050d6d44549ea4a799a2c3563"
+source = "git+https://github.com/tosc-rs/mnemos?branch=eliza/bitslab-loom#8cfca666d1f3db5a5272746f5a15b472917cb2c4"
 dependencies = [
+ "loom 0.7.0",
  "portable-atomic",
 ]
 
