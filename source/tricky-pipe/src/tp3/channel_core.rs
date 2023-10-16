@@ -156,9 +156,9 @@ const CLOSED: u16 = 0b1;
 /// shifted left by one to account for the lowest bit being used for
 /// [`CLOSED_BIT`].
 const POS_ONE: u16 = 1 << 1;
-const SEQ_SHIFT: u16 = MAX_CAPACITY.trailing_zeros() as u16;
+const MASK: u16 = MAX_CAPACITY as u16 - 1;
+const SEQ_SHIFT: u16 = MASK.trailing_ones() as u16;
 const SEQ_ONE: u16 = 1 << SEQ_SHIFT;
-const MASK: u16 = SEQ_ONE - 1;
 
 // === impl Core ===
 
@@ -182,7 +182,7 @@ impl Core {
             enqueue_pos: AtomicU16::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
-            indices: IndexAllocWord::new(),
+            indices: IndexAllocWord::with_capacity(capacity),
             queue,
             state: AtomicUsize::new(0),
             capacity,
@@ -209,7 +209,7 @@ impl Core {
             enqueue_pos: AtomicU16::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
-            indices: IndexAllocWord::new(),
+            indices: IndexAllocWord::with_capacity(capacity),
             queue,
             state: AtomicUsize::new(0),
             capacity,
