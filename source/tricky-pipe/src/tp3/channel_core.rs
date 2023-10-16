@@ -217,7 +217,7 @@ impl Core {
 
     pub(super) fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
         test_span!("Core::try_dequeue");
-        let mut head = test_dbg!(self.dequeue_pos.load(Relaxed));
+        let mut head = test_dbg!(self.dequeue_pos.load(Acquire));
         loop {
             let pos = head >> 1;
             let slot = &self.queue[(pos & MASK) as usize];
@@ -233,8 +233,8 @@ impl Core {
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
                     head,
                     head.wrapping_add(POS_ONE),
-                    Relaxed,
-                    Relaxed,
+                    AcqRel,
+                    Acquire,
                 )) {
                     Ok(_) => {
                         slot.store(val.wrapping_add(SEQ_ONE), Release);
@@ -245,7 +245,7 @@ impl Core {
                     }
                     Err(actual) => head = actual,
                 },
-                cmp::Ordering::Greater => head = test_dbg!(self.dequeue_pos.load(Relaxed)),
+                cmp::Ordering::Greater => head = test_dbg!(self.dequeue_pos.load(Acquire)),
             }
         }
     }
@@ -253,7 +253,7 @@ impl Core {
     fn commit_send(&self, idx: u8) {
         test_span!("Core::commit_send", idx);
         debug_assert!(idx as u32 <= MASK);
-        let mut tail = test_dbg!(self.enqueue_pos.load(Relaxed));
+        let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
         loop {
             let pos = tail >> 1;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
@@ -265,8 +265,8 @@ impl Core {
                 cmp::Ordering::Equal => match test_dbg!(self.enqueue_pos.compare_exchange_weak(
                     tail,
                     tail.wrapping_add(POS_ONE),
-                    Relaxed,
-                    Relaxed,
+                    AcqRel,
+                    Acquire,
                 )) {
                     Ok(_) => {
                         let new = test_dbg!(test_dbg!((pos as u16) << SHIFT).wrapping_add(SEQ_ONE));
@@ -276,7 +276,7 @@ impl Core {
                     }
                     Err(actual) => tail = actual,
                 },
-                cmp::Ordering::Greater => tail = test_dbg!(self.enqueue_pos.load(Relaxed)),
+                cmp::Ordering::Greater => tail = test_dbg!(self.enqueue_pos.load(Acquire)),
             }
         }
     }
