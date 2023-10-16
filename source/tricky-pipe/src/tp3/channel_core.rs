@@ -2,7 +2,7 @@ use super::error::*;
 use crate::loom::{
     cell::UnsafeCell,
     hint,
-    sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering::*},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering::*},
 };
 use core::{
     cmp, fmt,
@@ -18,21 +18,58 @@ use serde::{de::DeserializeOwned, Serialize};
 use alloc::vec::Vec;
 
 pub(super) struct Core {
-    // TODO(eliza): should maybe cache-pad `dequeue_pos`` and `enqueue_pos` on
+    // === receiver-only state ====
+    /// The head of the queue (i.e. the position at which elements are popped by
+    /// the receiver).
+    ///
+    /// This value consists of a one-bit flag indicating that the queue has been
+    /// closed by the sender, an index into the queue array, and the sequence
+    /// number (the current lap around the queue array). The closed flag is
+    /// represented by the [`CLOSED`] constant. The index is represented by the
+    /// next [`SEQ_SHIFT`] bits (5 bits on 32-bit machines or 6 bits on 64-bit
+    /// machines). Finally, the remaining 9 or 10 bits are the sequence number.
+    ///
+    /// Since we always have a maximum capacity of 32 or 64 elements, a 16-bit
+    /// number is always sufficient to hold all indices in the array, the
+    /// [`CLOSED`] bit, and a sufficiently large sequence number to prevent the
+    /// ABA problem.
+    // TODO(eliza): should maybe cache-pad `dequeue_pos` and `enqueue_pos` on
     // architectures with big cache lines...?
     //
-    // or, we could lay the struct out so that other fields provide "free" padding...
-    dequeue_pos: AtomicU32,
+    // or, we could lay the struct out so that other fields provide "free"
+    // padding...
+    dequeue_pos: AtomicU16,
+    /// WaitCell for the receiver when it's waiting for a message to be
+    /// enqueued.
     cons_wait: WaitCell,
-    enqueue_pos: AtomicU32,
+
+    // === sender-only state ===
+    /// The tail of the queue (i.e. the position at which elements are pushed by
+    /// the sender).
+    ///
+    /// This value consists of a one-bit flag indicating that the queue has been
+    /// closed by the receiver, an index into the queue array, and the sequence
+    /// number (the current lap around the queue array). The closed flag is
+    /// represented by the [`CLOSED`] constant. The index is represented by the
+    /// next [`SEQ_SHIFT`] bits (5 bits on 32-bit machines or 6 bits on 64-bit
+    /// machines). Finally, the remaining 9 or 10 bits are the sequence number.
+    ///
+    /// Since we always have a maximum capacity of 32 or 64 elements, a 16-bit
+    /// number is always sufficient to hold all indices in the array, the
+    /// [`CLOSED`] bit, and a sufficiently large sequence number to prevent the
+    /// ABA problem.
+    enqueue_pos: AtomicU16,
+    /// WaitQueue for senders waiting for queue capacity.
     pub(super) prod_wait: WaitQueue,
+
+    // === shared state ===
+    /// Index allocator used by the sender.
     indices: IndexAllocWord,
+    /// The actual array used to represent the queue of sent indices.
     queue: [AtomicU16; MAX_CAPACITY],
     /// Tracks the state of the the channel's senders/receivers, including
-    /// whether a receiver has been claimed, whether the receiver has closed the
-    /// channel (e.g. is dropped), and the number of active senders.
+    /// whether a receiver has been claimed and the number of active senders.
     state: AtomicUsize,
-
     /// The queue's capacity limit.
     ///
     /// This is the length of the actual queue elements array (which is not part
@@ -114,11 +151,21 @@ mod state {
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
-const CLOSED_BIT: u32 = 0b1;
-const POS_ONE: u32 = 1 << 1;
-const SHIFT: u32 = MAX_CAPACITY.trailing_zeros();
-const SEQ_ONE: u16 = 1 << SHIFT;
-const MASK: u32 = SEQ_ONE as u32 - 1;
+
+/// Bit in `enqueue_pos` and `dequeue_pos` indicating that the channel has been
+/// closed by the other side (the senders, in `dequeue_pos`, and the receiver,
+/// in `enqueue_pos`).
+///
+/// This is the first bit of the pos word, so that it is not clobbered if
+/// incrementing the actual position in the queue wraps around (which is fine).
+const CLOSED: u16 = 0b1;
+/// The value by which `enqueue_pos` and `dequeue_pos` are incremented. This is
+/// shifted left by one to account for the lowest bit being used for
+/// [`CLOSED_BIT`].
+const POS_ONE: u16 = 1 << 1;
+const SEQ_SHIFT: u16 = MAX_CAPACITY.trailing_zeros() as u16;
+const SEQ_ONE: u16 = 1 << SEQ_SHIFT;
+const MASK: u16 = SEQ_ONE - 1;
 
 // === impl Core ===
 
@@ -133,13 +180,13 @@ impl Core {
         let mut i = 0;
 
         while i != MAX_CAPACITY {
-            queue[i] = AtomicU16::new((i as u16) << SHIFT);
+            queue[i] = AtomicU16::new((i as u16) << SEQ_SHIFT);
             i += 1;
         }
 
         Core {
-            dequeue_pos: AtomicU32::new(0),
-            enqueue_pos: AtomicU32::new(0),
+            dequeue_pos: AtomicU16::new(0),
+            enqueue_pos: AtomicU16::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::new(),
@@ -159,14 +206,14 @@ impl Core {
             // loom atomics, since they don't have a `const fn` constructor. :(
             // oh well, this is test-only code...
             let vec = (0..MAX_CAPACITY)
-                .map(|i| AtomicU16::new((i as u16) << SHIFT))
+                .map(|i| AtomicU16::new((i as u16) << SEQ_SHIFT))
                 .collect::<alloc::vec::Vec<_>>();
             <[_; MAX_CAPACITY]>::try_from(vec).expect("vec should be the correct length")
         };
 
         Core {
-            dequeue_pos: AtomicU32::new(0),
-            enqueue_pos: AtomicU32::new(0),
+            dequeue_pos: AtomicU16::new(0),
+            enqueue_pos: AtomicU16::new(0),
             cons_wait: WaitCell::new(),
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::new(),
@@ -222,11 +269,11 @@ impl Core {
             let pos = head >> 1;
             let slot = &self.queue[(pos & MASK) as usize];
             let val = slot.load(Acquire);
-            let seq = val >> SHIFT;
+            let seq = val >> SEQ_SHIFT;
             let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos).wrapping_add(1) as i8);
 
             match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less if test_dbg!(head & CLOSED_BIT) != 0 => {
+                cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
                     return Err(TryRecvError::Closed)
                 }
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
@@ -240,7 +287,7 @@ impl Core {
                         slot.store(val.wrapping_add(SEQ_ONE), Release);
                         return Ok(Reservation {
                             core: self,
-                            idx: (val & MASK as u16) as u8,
+                            idx: (val & MASK) as u8,
                         });
                     }
                     Err(actual) => head = actual,
@@ -252,12 +299,12 @@ impl Core {
 
     fn commit_send(&self, idx: u8) {
         test_span!("Core::commit_send", idx);
-        debug_assert!(idx as u32 <= MASK);
+        debug_assert!(idx as u16 <= MASK);
         let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
         loop {
             let pos = tail >> 1;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
-            let seq = slot.load(Acquire) >> SHIFT;
+            let seq = slot.load(Acquire) >> SEQ_SHIFT;
             let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos as i8));
 
             match test_dbg!(dif).cmp(&0) {
@@ -269,7 +316,7 @@ impl Core {
                     Acquire,
                 )) {
                     Ok(_) => {
-                        let new = test_dbg!(test_dbg!((pos as u16) << SHIFT).wrapping_add(SEQ_ONE));
+                        let new = test_dbg!(test_dbg!((pos) << SEQ_SHIFT).wrapping_add(SEQ_ONE));
                         slot.store(test_dbg!(idx as u16 | new), Release);
                         test_dbg!(self.cons_wait.wake());
                         return;
@@ -315,7 +362,7 @@ impl Core {
     pub(super) fn drop_tx(&self) {
         let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Relaxed));
         if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
-            test_dbg!(self.dequeue_pos.fetch_or(CLOSED_BIT, Release));
+            test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
             self.cons_wait.close();
         }
     }
@@ -342,7 +389,7 @@ impl Core {
 
         // If the dequeue index has lagged behind the enqueue index by an entire
         // "lap" around the ring buffer, then the queue is full.
-        dequeue_pos.wrapping_add(SEQ_ONE as u32) == enqueue_pos
+        dequeue_pos.wrapping_add(SEQ_ONE) == enqueue_pos
     }
 
     #[must_use]
@@ -578,5 +625,25 @@ impl DeserVtable {
             elems[idx as usize].with_mut(|ptr| (*ptr).write(val));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pos_bit_layout() {
+        eprintln!("   CLOSED = {CLOSED:#016b}");
+        eprintln!("  POS_ONE = {POS_ONE:#016b}");
+        eprintln!("  SEQ_ONE = {SEQ_ONE:#016b}");
+        eprintln!("     MASK = {MASK:#016b}");
+        eprintln!("SEQ_SHIFT = {SEQ_SHIFT}");
+        let packed_seq_bits = u16::BITS - (SEQ_SHIFT as u32 + 1);
+        eprintln!(" seq bits = u16::BITS - (SEQ_SHIFT + 1) = {packed_seq_bits}");
+        assert!(
+            packed_seq_bits >= 2,
+            "at least two bits (4 laps) should be used for sequence numbers"
+        );
     }
 }
