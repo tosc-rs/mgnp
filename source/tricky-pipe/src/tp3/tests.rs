@@ -408,11 +408,7 @@ fn elements_dropped() {
 
 #[test]
 fn spsc_try_send_in_capacity() {
-    #[cfg(loom)]
-    const SENDS: usize = 4;
-
-    #[cfg(not(loom))]
-    const SENDS: usize = 32;
+    const SENDS: usize = if cfg!(loom) { 4 } else { 32 };
 
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(SENDS as u8);
@@ -442,27 +438,13 @@ fn spsc_try_send_in_capacity() {
 
 #[test]
 fn spsc_send() {
-    #[cfg(loom)]
-    const SENDS: usize = 8;
-
-    #[cfg(not(loom))]
-    const SENDS: usize = 32;
+    const SENDS: usize = if cfg!(loom) { 8 } else { 32 };
 
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new((SENDS / 2) as u8);
 
         let rx = chan.receiver().expect("can't get rx");
-        let tx = chan.sender();
-        let thread = thread::spawn(move || {
-            future::block_on(async move {
-                for i in 0..4 {
-                    tx.reserve()
-                        .await
-                        .expect("channel shouldn't be closed")
-                        .send(loom::alloc::Track::new(i));
-                }
-            });
-        });
+        let thread = thread::spawn(do_tx(SENDS, 0, chan.sender()));
 
         future::block_on(async move {
             let mut i = 0;
@@ -470,8 +452,63 @@ fn spsc_send() {
                 assert_eq!(msg.get_ref(), &i);
                 i += 1;
             }
+            assert_eq!(i, SENDS);
         });
 
         thread.join().unwrap();
     })
+}
+
+#[test]
+fn mpsc_send() {
+    // try not to make the test run for > 300 seconds under loom...
+    const TX1_SENDS: usize = if cfg!(loom) { 2 } else { 16 };
+    const TX2_SENDS: usize = if cfg!(loom) { 1 } else { 16 };
+    const SENDS: usize = TX1_SENDS + TX2_SENDS;
+    const CAPACITY: u8 = if cfg!(loom) { 2 } else { 32 };
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
+
+        let rx = chan.receiver().expect("can't get rx");
+        let t1 = thread::spawn(do_tx(TX1_SENDS, 0, chan.sender()));
+        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, chan.sender()));
+
+        let recvs = future::block_on(async move {
+            let mut recvs = std::collections::HashSet::new();
+            while let Some(msg) = rx.recv().await {
+                let msg = msg.into_inner();
+                tracing::info!(received = msg);
+                assert!(
+                    recvs.insert(msg),
+                    "each message should only have been received once"
+                );
+            }
+            recvs
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        for msg in 0..SENDS {
+            assert!(recvs.contains(&msg), "didn't receive {}", msg);
+        }
+    })
+}
+
+fn do_tx(
+    sends: usize,
+    offset: usize,
+    tx: Sender<loom::alloc::Track<usize>>,
+) -> impl FnOnce() + Send {
+    move || {
+        let offset = sends * offset;
+        future::block_on(async move {
+            for i in 0..sends {
+                test_dbg!(tx.reserve().await)
+                    .expect("channel shouldn't be closed")
+                    .send(loom::alloc::Track::new(i + offset));
+            }
+        });
+    }
 }
