@@ -221,12 +221,14 @@ impl Core {
         loop {
             let pos = head >> 1;
             let slot = &self.queue[(pos & MASK) as usize];
-            let val = test_dbg!(slot.load(Acquire));
-            let seq = test_dbg!(val >> SHIFT);
-            let dif = test_dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
+            let val = slot.load(Acquire);
+            let seq = val >> SHIFT;
+            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos).wrapping_add(1) as i8);
 
             match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less if head & CLOSED_BIT != 0 => return Err(TryRecvError::Closed),
+                cmp::Ordering::Less if test_dbg!(head & CLOSED_BIT) != 0 => {
+                    return Err(TryRecvError::Closed)
+                }
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
                     head,
@@ -255,8 +257,8 @@ impl Core {
         loop {
             let pos = tail >> 1;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
-            let seq = test_dbg!(slot.load(Acquire)) >> SHIFT;
-            let dif = test_dbg!(seq as i8).wrapping_sub(pos as i8);
+            let seq = slot.load(Acquire) >> SHIFT;
+            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos as i8));
 
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => unreachable!(),
