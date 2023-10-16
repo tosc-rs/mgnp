@@ -115,6 +115,7 @@ mod state {
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
 const CLOSED_BIT: u32 = 0b1;
+const POS_ONE: u32 = 1 << 1;
 const SHIFT: u32 = MAX_CAPACITY.trailing_zeros() as u32;
 const SEQ_ONE: u16 = 1 << SHIFT;
 const MASK: u32 = SEQ_ONE as u32 - 1;
@@ -225,13 +226,11 @@ impl Core {
             let dif = test_dbg!(seq as i8).wrapping_sub(pos.wrapping_add(1) as i8);
 
             match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less if head & CLOSED_BIT == CLOSED_BIT => {
-                    return Err(TryRecvError::Closed)
-                }
+                cmp::Ordering::Less if head & CLOSED_BIT != 0 => return Err(TryRecvError::Closed),
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
-                    pos << 1,
-                    pos.wrapping_add(1) << 1,
+                    head,
+                    head.wrapping_add(POS_ONE),
                     Relaxed,
                     Relaxed,
                 )) {
@@ -251,7 +250,7 @@ impl Core {
 
     fn commit_send(&self, idx: u8) {
         test_span!("Core::commit_send", idx);
-        // debug_assert!(test_dbg!(idx) as u16 << 1 <= MASK);
+        debug_assert!(idx as u32 <= MASK);
         let mut tail = test_dbg!(self.enqueue_pos.load(Relaxed));
         loop {
             let pos = tail >> 1;
@@ -262,8 +261,8 @@ impl Core {
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less => unreachable!(),
                 cmp::Ordering::Equal => match test_dbg!(self.enqueue_pos.compare_exchange_weak(
-                    pos << 1,
-                    pos.wrapping_add(1) << 1,
+                    tail,
+                    tail.wrapping_add(POS_ONE),
                     Relaxed,
                     Relaxed,
                 )) {
