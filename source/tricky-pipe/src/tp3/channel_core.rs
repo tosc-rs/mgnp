@@ -2,7 +2,7 @@ use super::error::*;
 use crate::loom::{
     cell::UnsafeCell,
     hint,
-    sync::atomic::{self, AtomicU16, AtomicU32, AtomicUsize, Ordering::*},
+    sync::atomic::{AtomicU16, AtomicU32, AtomicUsize, Ordering::*},
 };
 use core::{
     cmp, fmt,
@@ -116,7 +116,7 @@ mod state {
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
 const CLOSED_BIT: u32 = 0b1;
 const POS_ONE: u32 = 1 << 1;
-const SHIFT: u32 = MAX_CAPACITY.trailing_zeros() as u32;
+const SHIFT: u32 = MAX_CAPACITY.trailing_zeros();
 const SEQ_ONE: u16 = 1 << SHIFT;
 const MASK: u32 = SEQ_ONE as u32 - 1;
 
