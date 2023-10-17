@@ -66,7 +66,21 @@ mod inner {
     // }
 
     #[cfg(test)]
-    pub(crate) use loom::{alloc, cell, future, hint, model, thread};
+    pub(crate) use loom::{alloc, cell, future, hint, thread};
+
+    #[cfg(test)]
+    pub(crate) fn model(f: impl Fn() + Send + Sync + 'static) {
+        static ITERS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
+        loom::model(move || {
+            tracing::info!("");
+            tracing::info!(
+                "~~~~~~ iteration {} ~~~~~~",
+                ITERS.fetch_add(1, sync::atomic::Ordering::Relaxed)
+            );
+            tracing::info!("");
+            f();
+        })
+    }
 
     pub(crate) mod sync {
         pub(crate) use loom::sync::*;
@@ -173,7 +187,7 @@ mod inner {
                 Self::default()
             }
 
-            pub(crate) fn check(&self, f: impl FnOnce()) {
+            pub(crate) fn check(&self, f: impl Fn() + Send + Sync + 'static) {
                 let registry = super::alloc::track::Registry::new();
                 let _tracking = registry.set_default();
                 f();
@@ -183,7 +197,7 @@ mod inner {
     }
 
     #[cfg(test)]
-    pub(crate) fn model(f: impl FnOnce()) {
+    pub(crate) fn model(f: impl Fn() + Send + Sync + 'static) {
         let _ = tracing_subscriber::fmt()
             .with_file(true)
             .with_line_number(true)
