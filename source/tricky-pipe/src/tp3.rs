@@ -79,7 +79,7 @@ pub use self::static_impl::*;
 #[cfg(any(test, feature = "alloc"))]
 pub use self::arc_impl::*;
 
-/// Receives `T`-typed values from associated [`Sender`]s or [`SerSender`]s.
+/// Receives `T`-typed values from associated [`Sender`]s or [`DeserSender`]s.
 ///
 /// A `Receiver` for a channel can be obtained using the
 /// [`StaticTrickyPipe::receiver`] and [`TrickyPipe::receiver`] methods.
@@ -95,12 +95,12 @@ pub struct Sender<T: 'static> {
     pipe: TypedPipe<T>,
 }
 
-/// Receives serialized values from associated [`Sender`]s or [`SerSender`]s.
+/// Receives serialized values from associated [`Sender`]s or [`DeserSender`]s.
 ///
 /// A `SerReceiver` for a channel can be obtained using the
 /// [`StaticTrickyPipe::ser_receiver`] and [`TrickyPipe::ser_receiver`] methods,
 /// when the channel's message type implements [`Serialize`]. Messages may be
-/// sent as typed values by a [`Sender`], or as serialized bytes by a [`SerSender`].
+/// sent as typed values by a [`Sender`], or as serialized bytes by a [`DeserSender`].
 pub struct SerReceiver {
     pipe: ErasedPipe,
     vtable: &'static SerVtable,
@@ -108,12 +108,12 @@ pub struct SerReceiver {
 
 /// Sends serialized values to an associated [`Receiver`] or [`SerReceiver`].
 ///
-/// A `SerSender` for a channel can be obtained using the
+/// A `DeserSender` for a channel can be obtained using the
 /// [`StaticTrickyPipe::ser_sender`] or [`TrickyPipe::ser_sender`] methods,
 /// when the channel's message type implements [`DeserializeOwned`]. Messages may be
 /// received as deserialized typed values by a [`Receiver`], or as serialized
 /// bytes by a [`SerReceiver`].
-pub struct SerSender {
+pub struct DeserSender {
     pipe: ErasedPipe,
     vtable: &'static DeserVtable,
 }
@@ -171,8 +171,8 @@ pub struct Permit<'core, T> {
 
 /// A permit to send a single serialized value to a channel.
 ///
-/// This type is returned by the [`SerSender::try_reserve`] and
-/// [`SerSender::reserve`] methods.
+/// This type is returned by the [`DeserSender::try_reserve`] and
+/// [`DeserSender::reserve`] methods.
 ///
 /// To send a serialized value, call the [`send`] method on this type. If the
 /// serialized bytes are a COBS frame call the [`send_framed`] method instead.
@@ -210,7 +210,7 @@ impl<T> Receiver<T> {
     ///
     /// - [`Ok`]`(T)` if a message was received from the channel.
     /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
-    ///   (all [`Sender`]s and [`SerSender`]s have been dropped) *and* all
+    ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
     ///   messages sent before the channel closed have already been received.
     /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
     ///   messages in the queue, but the channel has not been closed.
@@ -224,7 +224,7 @@ impl<T> Receiver<T> {
     /// Receives the next message from the channel.
     ///
     /// This method returns [`None`] if the channel has been closed (all
-    /// [`Sender`]s and [`SerSender`]s have been dropped) *and* all messages
+    /// [`Sender`]s and [`DeserSender`]s have been dropped) *and* all messages
     /// sent before the channel closed have been received.
     ///
     /// If the channel has not yet been closed, but there are no messages
@@ -269,8 +269,8 @@ impl<T> Receiver<T> {
     /// Returns `true` if this channel is full.
     ///
     /// If this method returns `true`, then any calls to [`Sender::reserve`] or
-    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an
+    /// [`DeserSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`DeserSender::try_reserve`] will return an
     /// error.
     #[inline]
     #[must_use]
@@ -343,7 +343,7 @@ impl SerReceiver {
     ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
     ///   methods, instead.
     /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
-    ///   (all [`Sender`]s and [`SerSender`]s have been dropped) *and* all
+    ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
     ///   messages sent before the channel closed have already been received.
     /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
     ///   messages in the queue, but the channel has not been closed.
@@ -362,7 +362,7 @@ impl SerReceiver {
     /// that can be used to serialize that message as bytes.
     ///
     /// This method returns [`None`] if the channel has been closed (all
-    /// [`Sender`]s and [`SerSender`]s have been dropped) *and* all messages
+    /// [`Sender`]s and [`DeserSender`]s have been dropped) *and* all messages
     /// sent before the channel closed have been received.
     ///
     /// If the channel has not yet been closed, but there are no messages
@@ -416,8 +416,8 @@ impl SerReceiver {
     /// Returns `true` if this channel is full.
     ///
     /// If this method returns `true`, then any calls to [`Sender::reserve`] or
-    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an
+    /// [`DeserSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`DeserSender::try_reserve`] will return an
     /// error.
     #[inline]
     #[must_use]
@@ -504,9 +504,9 @@ impl fmt::Debug for SerRecvRef<'_> {
     }
 }
 
-// === impl SerSender ===
+// === impl DeserSender ===
 
-impl SerSender {
+impl DeserSender {
     /// Reserve capacity to send a serialized message to the channel.
     ///
     /// If the channel is currently at capacity, this method waits until
@@ -636,8 +636,8 @@ impl SerSender {
     /// Returns `true` if this channel is full.
     ///
     /// If this method returns `true`, then any calls to [`Sender::reserve`] or
-    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_reserve`] or [`SerSender::try_reserve`] will return an error.
+    /// [`DeserSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`DeserSender::try_reserve`] will return an error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {
@@ -678,7 +678,7 @@ impl SerSender {
     }
 }
 
-impl Clone for SerSender {
+impl Clone for DeserSender {
     fn clone(&self) -> Self {
         self.pipe.core().add_tx();
         Self {
@@ -688,7 +688,7 @@ impl Clone for SerSender {
     }
 }
 
-impl Drop for SerSender {
+impl Drop for DeserSender {
     fn drop(&mut self) {
         self.pipe.core().drop_tx();
     }
@@ -815,8 +815,8 @@ impl<T> Sender<T> {
     /// Returns `true` if this channel is full.
     ///
     /// If this method returns `true`, then any calls to [`Sender::reserve`] or
-    /// [`SerSender::reserve`] will yield until the queue is empty. Any calls to
-    /// [`Sender::try_reserve`] or [`SerSender::try_send`] will return an error.
+    /// [`DeserSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`DeserSender::try_send`] will return an error.
     #[inline]
     #[must_use]
     pub fn is_full(&self) -> bool {

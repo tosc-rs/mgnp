@@ -96,9 +96,9 @@ impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
 where
     T: DeserializeOwned + 'static,
 {
-    pub fn ser_sender(&'static self) -> SerSender {
+    pub fn deser_sender(&'static self) -> DeserSender {
         self.core.add_tx();
-        SerSender {
+        DeserSender {
             pipe: self.erased(),
             vtable: Self::DESER_VTABLE,
         }
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn deser_smoke() {
         static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
-        let tx = CHAN.ser_sender();
+        let tx = CHAN.deser_sender();
         let rx = CHAN.receiver().unwrap();
         tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
             .unwrap();
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn deser_closed_rx() {
         static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
-        let tx = CHAN.ser_sender();
+        let tx = CHAN.deser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
         let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn deser_closed_tx() {
         static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
-        let tx = CHAN.ser_sender();
+        let tx = CHAN.deser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
         assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn deser_closed_cloned_tx() {
         static CHAN: StaticTrickyPipe<DeStruct, 4> = StaticTrickyPipe::new();
-        let tx1 = CHAN.ser_sender();
+        let tx1 = CHAN.deser_sender();
         let tx2 = tx1.clone();
         let rx = CHAN.receiver().unwrap();
         drop(tx1);
@@ -413,7 +413,7 @@ mod tests {
         // some other kind of framed byte pipe thingy, but we should make sure
         // it works anyway i guess...
         static CHAN: StaticTrickyPipe<SerDeStruct, 4> = StaticTrickyPipe::new();
-        let tx = CHAN.ser_sender();
+        let tx = CHAN.deser_sender();
         let rx = CHAN.ser_receiver().unwrap();
         const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
         const MSG_TWO: &[u8] = &[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115];

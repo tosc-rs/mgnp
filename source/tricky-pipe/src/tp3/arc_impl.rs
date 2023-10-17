@@ -105,9 +105,9 @@ impl<T: Serialize + 'static> TrickyPipe<T> {
 }
 
 impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
-    pub fn ser_sender(&self) -> SerSender {
+    pub fn deser_sender(&self) -> DeserSender {
         self.0.core.add_tx();
-        SerSender {
+        DeserSender {
             pipe: self.erased(),
             vtable: Self::DESER_VTABLE,
         }

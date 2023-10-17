@@ -262,7 +262,7 @@ mod single_threaded {
     fn deser_smoke() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.ser_sender();
+            let tx = chan.deser_sender();
             let rx = chan.receiver().unwrap();
             tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
                 .unwrap();
@@ -309,7 +309,7 @@ mod single_threaded {
     fn deser_closed_rx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.ser_sender();
+            let tx = chan.deser_sender();
             let rx = chan.receiver().unwrap();
             drop(rx);
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
@@ -324,7 +324,7 @@ mod single_threaded {
     fn deser_closed_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.ser_sender();
+            let tx = chan.deser_sender();
             let rx = chan.receiver().unwrap();
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -335,7 +335,7 @@ mod single_threaded {
     fn deser_closed_cloned_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx1 = chan.ser_sender();
+            let tx1 = chan.deser_sender();
             let tx2 = tx1.clone();
             let rx = chan.receiver().unwrap();
             drop(tx1);
@@ -351,7 +351,7 @@ mod single_threaded {
         // it works anyway i guess...
         loom::model(|| {
             let chan = TrickyPipe::<SerDeStruct>::new(4);
-            let tx = chan.ser_sender();
+            let tx = chan.deser_sender();
             let rx = chan.ser_receiver().unwrap();
             const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
             const MSG_TWO: &[u8] = &[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115];
@@ -471,6 +471,8 @@ fn mpsc_send() {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
 
         let rx = chan.receiver().expect("can't get rx");
+        let tx1 = chan.sender();
+        let tx2 = chan.sender();
         let t1 = thread::spawn(do_tx(TX1_SENDS, 0, chan.sender()));
         let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, chan.sender()));
 
