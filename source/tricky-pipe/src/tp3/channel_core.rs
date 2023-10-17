@@ -338,6 +338,7 @@ impl Core {
         // if the `RX_CLAIMED` bit was not set, we successfully claimed the
         // receiver.
         let claimed = test_dbg!(state & state::RX_CLAIMED) == 0;
+        test_println!(claimed, "Core::try_claim_rx");
         claimed.then_some(())
     }
 
@@ -347,6 +348,7 @@ impl Core {
         test_dbg!(self.enqueue_pos.fetch_or(CLOSED, Release));
         // notify any waiting senders that the channel is closed.
         self.prod_wait.close();
+        test_println!("Core::close_rx: -> closed");
     }
 
     #[inline]
@@ -357,12 +359,14 @@ impl Core {
         // because we *don't* construct the channel with an initial sender ---
         // since the user has to call a different function depending on what
         // type of sender they want.
-        test_dbg!(self.state.fetch_add(state::TX_ONE, Release));
+        let _refs = test_dbg!(self.state.fetch_add(state::TX_ONE, Release));
+        test_println!(refs = _refs, "incremented sender reference count");
     }
 
     /// Drop a sender
     #[inline]
     pub(super) fn drop_tx(&self) {
+        test_span!("Core::drop_tx");
         let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Release));
         if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
             // ensure that setting the closed bit happens-after all other
@@ -372,6 +376,10 @@ impl Core {
             debug_assert_eq!(val - state::TX_ONE, _val);
             test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
             self.cons_wait.close();
+
+            test_println!("Core::drop_tx -> closing");
+        } else {
+            test_println!("Core::drop_tx -> tx refs remaining");
         }
     }
 

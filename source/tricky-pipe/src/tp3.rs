@@ -36,7 +36,7 @@ macro_rules! test_println {
 #[cfg(test)]
 macro_rules! test_println {
     ($($arg:tt)*) => {
-        tracing::debug!($($arg)*);
+        tracing::info!($($arg)*);
     };
 }
 
