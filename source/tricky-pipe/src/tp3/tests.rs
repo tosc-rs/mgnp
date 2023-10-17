@@ -473,8 +473,8 @@ fn mpsc_send() {
         let rx = chan.receiver().expect("can't get rx");
         let tx1 = chan.sender();
         let tx2 = chan.sender();
-        let t1 = thread::spawn(do_tx(TX1_SENDS, 0, chan.sender()));
-        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, chan.sender()));
+        let t1 = thread::spawn(do_tx(TX1_SENDS, 0, tx1));
+        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, tx2));
 
         let recvs = future::block_on(async move {
             let mut recvs = std::collections::HashSet::new();
