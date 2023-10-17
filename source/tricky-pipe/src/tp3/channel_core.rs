@@ -219,10 +219,10 @@ impl Core {
     pub(super) fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
         test_span!("Core::try_reserve");
         if test_dbg!(self.enqueue_pos.load(Acquire)) & CLOSED != 0 {
-            return Err(TrySendError::Closed);
+            return Err(TrySendError::Closed(()));
         }
         test_dbg!(self.indices.allocate())
-            .ok_or(TrySendError::Full)
+            .ok_or(TrySendError::Full(()))
             .map(|idx| Reservation { core: self, idx })
     }
 
@@ -230,9 +230,9 @@ impl Core {
         loop {
             match self.try_reserve() {
                 Ok(res) => return Ok(res),
-                Err(TrySendError::Closed) => return Err(SendError::Closed),
-                Err(TrySendError::Full) => {
-                    self.prod_wait.wait().await.map_err(|_| SendError::Closed)?
+                Err(TrySendError::Closed(())) => return Err(SendError(())),
+                Err(TrySendError::Full(())) => {
+                    self.prod_wait.wait().await.map_err(|_| SendError(()))?
                 }
             }
         }

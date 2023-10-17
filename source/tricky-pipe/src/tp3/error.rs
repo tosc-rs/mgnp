@@ -5,36 +5,46 @@
 //! [`Receiver`]: super::Receiver
 //! [`SerSender`]: super::SerSender
 //! [`SerReceiver`]: super::SerReceiver
+use core::fmt;
 
-/// Error returned by [`Sender::reserve`] and [`SerSender::reserve`].
+/// A message cannot be sent because the channel is closed (no [`Receiver`]
+/// or [`SerReceiver`] exists).
 ///
+/// A `SendError<()>` is returned by the [`Sender::reserve`] and
+/// [`SerSender::reserve`] methods. The [`Sender::send`] method instead returns
+/// a `SendError<T>`, from which the original message can be recovered using
+/// [`SendError::into_inner`].
+///
+/// [`Receiver`]: super::Receiver
+/// [`SerReceiver`]: super::SerReceiver
 /// [`Sender::reserve`]: super::Sender::reserve
 /// [`SerSender::reserve`]: super::SerSender::reserve
-#[derive(Debug, Eq, PartialEq)]
-pub enum SendError {
-    /// A message cannot be sent because the channel is closed (no [`Receiver`]
-    /// or [`SerReceiver`] exists).
-    ///
-    /// [`Receiver`]: super::Receiver
-    /// [`SerReceiver`]: super::SerReceiver
-    Closed,
-}
+/// [`Sender::send`]: super::Sender::send
+#[derive(Eq, PartialEq)]
+pub struct SendError<T = ()>(pub(crate) T);
 
-/// Error returned by [`Sender::try_reserve`] and [`SerSender::try_reserve`].
+/// Error returned by [`Sender::try_reserve`], [`Sender::try_send`], and
+/// [`SerSender::try_reserve`].
+///
+/// A `TrySendError<()>` is returned by the [`Sender::try_reserve`] and
+/// [`SerSender::try_reserve`] methods. The [`Sender::try_send`] method instead
+/// returns a `TrySendError<T>`, from which the original message can be
+/// recovered using [`TrySendError::into_inner`].
 ///
 /// [`Sender::try_reserve`]: super::Sender::try_reserve
 /// [`SerSender::try_reserve`]: super::SerSender::try_reserve
-#[derive(Debug, Eq, PartialEq)]
-pub enum TrySendError {
+/// [`Sender::try_send`]: super::Sender::try_send
+#[derive(Eq, PartialEq)]
+pub enum TrySendError<T = ()> {
     /// The channel is currently full, and a message cannot be sent without
     /// waiting for a slot to become available.
-    Full,
+    Full(T),
     /// A message cannot be sent because the channel is closed (no [`Receiver`]
     /// or [`SerReceiver`] exists).
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
-    Closed,
+    Closed(T),
 }
 
 /// Errors returned by [`Receiver::try_recv`] and [`SerReceiver::try_recv`].
@@ -101,4 +111,42 @@ pub enum SerTrySendError {
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
+}
+
+// === impl SendError ===
+
+impl<T> SendError<T> {
+    #[inline]
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<T> fmt::Debug for SendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendError").finish_non_exhaustive()
+    }
+}
+
+// === impl TrySendError ===
+
+impl<T> TrySendError<T> {
+    #[inline]
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        match self {
+            TrySendError::Closed(t) => t,
+            TrySendError::Full(t) => t,
+        }
+    }
+}
+
+impl<T> fmt::Debug for TrySendError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed(_) => f.write_str("Closed(..)"),
+            Self::Full(_) => f.write_str("Full(..)"),
+        }
+    }
 }

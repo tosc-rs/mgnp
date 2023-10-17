@@ -530,7 +530,7 @@ impl DeserSender {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`SerPermit`]`)` if the channel is not closed.
-    /// - [`Err`]`(`[SendError::Closed`]`)` if the channel is closed (the
+    /// - [`Err`]`(`[SendError`]`<()>)` if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
     ///
     /// # Cancellation Safety
@@ -541,7 +541,7 @@ impl DeserSender {
     /// This channel uses a queue to ensure that calls to `send` and `reserve`
     /// complete in the order they were requested. Cancelling a call to
     /// `reserve` causes the caller to lose its place in that queue.
-    pub async fn reserve(&self) -> Result<SerPermit<'_>, SendError> {
+    pub async fn reserve(&self) -> Result<SerPermit<'_>, SendError<()>> {
         self.pipe.core().reserve().await.map(|res| SerPermit {
             res,
             elems: self.pipe.elems(),
@@ -720,6 +720,77 @@ impl SerPermit<'_> {
 // === impl Sender ===
 
 impl<T> Sender<T> {
+    /// Send a `T`-typed message to the channel.
+    ///
+    /// If the channel is currently at capacity, this method waits until
+    /// capacity for one message is available. When capacity is available, the
+    /// provided message is sent to the channel.
+    ///
+    /// To attempt to send a message *without* waiting if the channel is full,
+    /// use the [`try_send`] method, instead.
+    ///
+    /// [`try_send`]: Self::try_send
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`()`]`)` if the channel is not closed.
+    /// - [`Err`]`(`[SendError`]`<T>)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// If a `send` future is dropped before it has completed, no capacity
+    /// will be reserved.
+    ///
+    /// This channel uses a queue to ensure that calls to `send` and `reserve`
+    /// complete in the order they were requested. Cancelling a call to
+    /// `send` causes the caller to lose its place in that queue.
+    pub async fn send(&self, message: T) -> Result<(), SendError<T>> {
+        match self.reserve().await {
+            Ok(permit) => {
+                permit.send(message);
+                Ok(())
+            }
+            Err(_) => Err(SendError(message)),
+        }
+    }
+
+    /// Attempt to send a `T`-typed message to the channel, without waiting for
+    /// capacity to become available.
+    ///
+    /// If the channel is currently at capacity, this method returns
+    /// [`TrySendError::Full`]. If the channel has capacity available, the
+    /// message is sent to the channel immediately.
+    ///
+    /// To wait for capacity to become available when the channel is full,
+    /// rather than returning an error, use the [`send`] method, instead.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(())` if the message was sent successfully.
+    /// - [`Err`]`(`[TrySendError::Closed`]`<T>)` if the channel is closed (the
+    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
+    ///   subsequent calls to [`send`], `try_send`, [`try_reserve`], or
+    ///   [`reserve`] on this channel will always fail.
+    /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
+    ///   have capacity to send another message without waiting. A subsequent
+    ///   call to `try_reserve` may complete successfully, once capacity has
+    ///   become available again.
+    ///
+    /// [`send`]: Self::send
+    /// [`reserve`]: Self::reserve
+    /// [`try_reserve`]: Self::try_reserve
+    pub fn try_send(&self, message: T) -> Result<(), TrySendError<T>> {
+        match self.try_reserve() {
+            Ok(permit) => {
+                permit.send(message);
+                Ok(())
+            }
+            Err(TrySendError::Closed(())) => Err(TrySendError::Closed(message)),
+            Err(TrySendError::Full(())) => Err(TrySendError::Full(message)),
+        }
+    }
+
     /// Reserve capacity to send a `T`-typed message to the channel.
     ///
     /// If the channel is currently at capacity, this method waits until

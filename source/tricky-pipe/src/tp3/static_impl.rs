@@ -189,7 +189,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed,);
+        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed);
+        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
     }
 
     #[test]
@@ -383,7 +383,7 @@ mod tests {
         let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
         assert_eq!(
             res.unwrap_err(),
-            SerTrySendError::Send(TrySendError::Closed),
+            SerTrySendError::Send(TrySendError::Closed(())),
         );
     }
 

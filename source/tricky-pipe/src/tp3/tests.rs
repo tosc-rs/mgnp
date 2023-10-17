@@ -103,7 +103,7 @@ mod single_threaded {
             let tx = chan.sender();
             let rx = chan.receiver().unwrap();
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed,);
+            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
         });
     }
 
@@ -184,7 +184,7 @@ mod single_threaded {
             let tx = chan.sender();
             let rx = chan.ser_receiver().unwrap();
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed);
+            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
         });
     }
 
@@ -315,7 +315,7 @@ mod single_threaded {
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
             assert_eq!(
                 res.unwrap_err(),
-                SerTrySendError::Send(TrySendError::Closed),
+                SerTrySendError::Send(TrySendError::Closed(())),
             );
         });
     }
