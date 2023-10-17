@@ -139,9 +139,7 @@ mod state {
     /// Sender reference count; value of one sender.
     pub(super) const TX_ONE: usize = 1 << TX_SHIFT;
 
-    /// Mask for extracting sender reference count.
-    pub(super) const TX_MASK: usize = !RX_CLAIMED;
-
+    /// Offset of TX count, in bits
     pub(super) const TX_SHIFT: usize = 1;
 }
 
