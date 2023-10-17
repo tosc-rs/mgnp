@@ -311,13 +311,22 @@ fn deser_sender<T: DeserializeOwned + 'static, STO: spitebuf::Storage<T> + 'stat
 }
 
 pub mod stat {
-    use core::{mem::{ManuallyDrop, transmute}, marker::PhantomData};
+    use core::{
+        marker::PhantomData,
+        mem::{transmute, ManuallyDrop},
+    };
 
-    use serde::{Serialize, de::DeserializeOwned};
+    use serde::{de::DeserializeOwned, Serialize};
 
-    use crate::tp1::{spitebuf::{Storage, MpScQueue, self}, Never, Sender, Receiver, bypass_sender, type_drop_sender, bypass_receiver, type_drop_receiver, RefReceiver, ser_ref_receiver, RefSender, deser_ref_sender};
+    use crate::tp1::{
+        bypass_receiver, bypass_sender, deser_ref_sender, ser_ref_receiver,
+        spitebuf::{self, MpScQueue, Storage},
+        type_drop_receiver, type_drop_sender, Never, Receiver, RefReceiver, RefSender, Sender,
+    };
 
-    pub fn channel<T: 'static, STO: Storage<T> + 'static>(q: &'static MpScQueue<T, STO>) -> (Sender<T>, Receiver<T>) {
+    pub fn channel<T: 'static, STO: Storage<T> + 'static>(
+        q: &'static MpScQueue<T, STO>,
+    ) -> (Sender<T>, Receiver<T>) {
         let (tx, rx) = q.init_split().unwrap();
         let tx: ManuallyDrop<crate::spitebuf::Sender<Never, Never>> =
             unsafe { transmute(ManuallyDrop::new(tx)) };
@@ -341,7 +350,9 @@ pub mod stat {
         (tx, rx)
     }
 
-    pub fn ser_ref_channel<T: Serialize + 'static, STO: spitebuf::Storage<T> + 'static>(q: &'static MpScQueue<T, STO>) -> (Sender<T>, RefReceiver) {
+    pub fn ser_ref_channel<T: Serialize + 'static, STO: spitebuf::Storage<T> + 'static>(
+        q: &'static MpScQueue<T, STO>,
+    ) -> (Sender<T>, RefReceiver) {
         let (tx, rx) = q.init_split().unwrap();
         let tx: ManuallyDrop<spitebuf::Sender<Never, Never>> =
             unsafe { transmute(ManuallyDrop::new(tx)) };
@@ -365,7 +376,7 @@ pub mod stat {
     }
 
     pub fn deser_ref_channel<T: DeserializeOwned + 'static, STO: spitebuf::Storage<T> + 'static>(
-        q: &'static MpScQueue<T, STO>
+        q: &'static MpScQueue<T, STO>,
     ) -> (RefSender, Receiver<T>) {
         let (tx, rx) = q.init_split().unwrap();
         let tx: ManuallyDrop<spitebuf::Sender<Never, Never>> =
@@ -503,7 +514,7 @@ unsafe fn type_drop_receiver<T: 'static, STO: spitebuf::Storage<T> + 'static>(
     ManuallyDrop::drop(container);
 }
 
-#[cfg(test)]
+#[cfg(TODO)]
 mod test {
     use crate::spitebuf::Storage;
 

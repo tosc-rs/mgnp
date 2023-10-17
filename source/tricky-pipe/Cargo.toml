@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+alloc = []
 
 [dependencies]
 maitake-sync = "0.1.0"
 portable-atomic = "1.4.3"
+mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/bitslab-loom" }
 
 [dependencies.postcard]
 version = "1.0.7"
@@ -19,3 +22,13 @@ features = ["derive"]
 
 [dependencies.plugtail]
 path = "../plugtail"
+
+[dev-dependencies]
+tracing = "0.1.39"
+
+[target.'cfg(not(loom))'.dev-dependencies]
+futures = { version = "0.3.16" }
+tracing-subscriber = { version = "0.3.17", default-features = false, features = ["fmt", "ansi"] }
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7", features = ["futures", "checkpoint"] }
