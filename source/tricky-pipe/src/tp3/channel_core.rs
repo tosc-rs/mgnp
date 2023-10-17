@@ -137,10 +137,12 @@ mod state {
     pub(super) const RX_CLAIMED: usize = 1 << 0;
 
     /// Sender reference count; value of one sender.
-    pub(super) const TX_ONE: usize = 1 << 1;
+    pub(super) const TX_ONE: usize = 1 << TX_SHIFT;
 
     /// Mask for extracting sender reference count.
     pub(super) const TX_MASK: usize = !RX_CLAIMED;
+
+    pub(super) const TX_SHIFT: usize = 1;
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
@@ -184,7 +186,11 @@ impl Core {
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::with_capacity(capacity),
             queue,
-            state: AtomicUsize::new(0),
+            // The state starts out with the value of `TX_ONE`, since the
+            // `TrickyPipe` itself can create new senders freely. The channel
+            // only closes when the `TrickyPipe` *and* all senders have been
+            // dropped.
+            state: AtomicUsize::new(state::TX_ONE),
             capacity,
         }
     }
@@ -211,7 +217,7 @@ impl Core {
             prod_wait: WaitQueue::new(),
             indices: IndexAllocWord::with_capacity(capacity),
             queue,
-            state: AtomicUsize::new(0),
+            state: AtomicUsize::new(state::TX_ONE),
             capacity,
         }
     }
@@ -353,27 +359,39 @@ impl Core {
 
     #[inline]
     pub(super) fn add_tx(&self) {
-        // increment the sender reference count.
+        // Using a relaxed ordering is alright here, as knowledge of the
+        // original reference (the `Sender` that was cloned, or the `TrickyPipe`
+        // which is constructing the new `Sender`) prevents other threads from
+        // erroneously closing the channel.
         //
-        // unlike `Arc`, this has to be `Release`, rather than `Relaxed`,
-        // because we *don't* construct the channel with an initial sender ---
-        // since the user has to call a different function depending on what
-        // type of sender they want.
-        let _refs = test_dbg!(self.state.fetch_add(state::TX_ONE, Release));
-        test_println!(refs = _refs, "incremented sender reference count");
+        // As explained in the [Boost documentation][1], Increasing the
+        // reference counter can always be done with memory_order_relaxed: New
+        // references to an object can only be formed from an existing
+        // reference, and passing an existing reference from one thread to
+        // another must already provide any required synchronization.
+        //
+        // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
+        let _refs = test_dbg!(self.state.fetch_add(state::TX_ONE, Relaxed));
+        test_println!(refs = _refs, "Core::add_tx");
     }
 
     /// Drop a sender
     #[inline]
     pub(super) fn drop_tx(&self) {
         test_span!("Core::drop_tx");
-        let val = test_dbg!(self.state.fetch_sub(state::TX_ONE, Release));
-        if test_dbg!(val & state::TX_MASK == state::TX_ONE) {
-            // ensure that setting the closed bit happens-after all other
-            // `Release` subs to `state` (this could just be a fence, but loom
-            // doesn't properly simulate fences, so use a load instead).
-            let _val = self.state.load(Acquire);
-            debug_assert_eq!(val - state::TX_ONE, _val);
+        // Because `fetch_sub` is already atomic, we do not need to synchronize
+        // with other threads unless we are going to delete the object. This
+        // same logic applies to the below `fetch_sub` to the `weak` count.
+        let refs = self.state.fetch_sub(state::TX_ONE, Release) >> state::TX_SHIFT;
+        if test_dbg!(refs) == 1 {
+            // Ensure that setting the closed bit happens-after all other
+            // `Release` adds/subs to `state`. We perform an `Acquire` RMW op on
+            // the `state` to ensure that we are now after all other ref count
+            // ops. The value from this load is not actually used.
+            let _val = test_dbg!(self.state.fetch_or(0, Acquire));
+            debug_assert_eq!(_val >> state::TX_SHIFT, 0);
+            // Now that we're after all other ref count ops, we can close the
+            // channel itself.
             test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
             self.cons_wait.close();
 

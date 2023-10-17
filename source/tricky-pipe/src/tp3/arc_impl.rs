@@ -116,8 +116,33 @@ impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
+impl<T> Clone for TrickyPipe<T> {
+    fn clone(&self) -> Self {
+        test_span!("TrickyPipe::clone");
+        // Since the `TrickyPipe` type can construct new `Sender`s, this
+        // "counts" as cloning a sender with regards to the channel's sender
+        // count --- the channel cannot close until all `Sender`s *and* all
+        // `TrickyPipe`s are dropped.
+        self.0.core.add_tx();
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Drop for TrickyPipe<T> {
+    fn drop(&mut self) {
+        test_span!("TrickyPipe::drop");
+        // Since the `TrickyPipe` type can construct new `Sender`s, this
+        // "counts" as dropping a sender with regards to the channel's sender
+        // count --- the channel cannot close until all `Sender`s *and* all
+        // `TrickyPipe`s are dropped.
+        self.0.core.drop_tx();
+    }
+}
+
 unsafe impl<T: Send> Send for TrickyPipe<T> {}
 unsafe impl<T: Send> Sync for TrickyPipe<T> {}
+
+// === impl Inner ===
 
 impl<T> Drop for Inner<T> {
     fn drop(&mut self) {

@@ -113,6 +113,7 @@ mod single_threaded {
             let chan = TrickyPipe::<UnSerStruct>::new(4);
             let tx = chan.sender();
             let rx = chan.receiver().unwrap();
+            drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
         });
@@ -125,6 +126,7 @@ mod single_threaded {
             let tx1 = chan.sender();
             let tx2 = tx1.clone();
             let rx = chan.receiver().unwrap();
+            drop(chan);
             drop(tx1);
             drop(tx2);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
@@ -194,6 +196,7 @@ mod single_threaded {
             let chan = TrickyPipe::<SerStruct>::new(4);
             let tx = chan.sender();
             let rx = chan.ser_receiver().unwrap();
+            drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
         });
@@ -206,6 +209,7 @@ mod single_threaded {
             let tx1 = chan.sender();
             let tx2 = tx1.clone();
             let rx = chan.ser_receiver().unwrap();
+            drop(chan);
             drop(tx1);
             drop(tx2);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -311,6 +315,7 @@ mod single_threaded {
             let chan = TrickyPipe::<DeStruct>::new(4);
             let tx = chan.deser_sender();
             let rx = chan.receiver().unwrap();
+            drop(chan);
             drop(rx);
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
             assert_eq!(
@@ -326,6 +331,7 @@ mod single_threaded {
             let chan = TrickyPipe::<DeStruct>::new(4);
             let tx = chan.deser_sender();
             let rx = chan.receiver().unwrap();
+            drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
         });
@@ -338,6 +344,7 @@ mod single_threaded {
             let tx1 = chan.deser_sender();
             let tx2 = tx1.clone();
             let rx = chan.receiver().unwrap();
+            drop(chan);
             drop(tx1);
             drop(tx2);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -411,10 +418,15 @@ fn spsc_try_send_in_capacity() {
     const SENDS: usize = if cfg!(loom) { 4 } else { 32 };
 
     loom::model(|| {
-        let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(SENDS as u8);
-
-        let rx = chan.receiver().expect("can't get rx");
-        let tx = chan.sender();
+        tracing::info!("");
+        tracing::info!("~~~ iteration ~~~");
+        tracing::info!("");
+        let (rx, tx) = {
+            let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(SENDS as u8);
+            let rx = chan.receiver().expect("can't get rx");
+            let tx = chan.sender();
+            (rx, tx)
+        };
         let thread = thread::spawn(move || {
             for i in 0..SENDS {
                 tx.try_reserve()
@@ -441,10 +453,15 @@ fn spsc_send() {
     const SENDS: usize = if cfg!(loom) { 8 } else { 32 };
 
     loom::model(|| {
-        let chan = TrickyPipe::<loom::alloc::Track<usize>>::new((SENDS / 2) as u8);
+        tracing::info!("~~~ iteration ~~~");
+        let (rx, tx) = {
+            let chan = TrickyPipe::<loom::alloc::Track<usize>>::new((SENDS / 2) as u8);
+            let rx = chan.receiver().expect("can't get rx");
+            let tx = chan.sender();
+            (rx, tx)
+        };
 
-        let rx = chan.receiver().expect("can't get rx");
-        let thread = thread::spawn(do_tx(SENDS, 0, chan.sender()));
+        let thread = thread::spawn(do_tx(SENDS, 0, tx));
 
         future::block_on(async move {
             let mut i = 0;
@@ -468,11 +485,15 @@ fn mpsc_send() {
     const CAPACITY: u8 = if cfg!(loom) { 2 } else { 32 };
 
     loom::model(|| {
+        tracing::info!("~~~ iteration ~~~");
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
 
         let rx = chan.receiver().expect("can't get rx");
         let tx1 = chan.sender();
         let tx2 = chan.sender();
+        // drop the channel now so that the channel can be tx-closed.
+        drop(chan);
+
         let t1 = thread::spawn(do_tx(TX1_SENDS, 0, tx1));
         let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, tx2));
 
