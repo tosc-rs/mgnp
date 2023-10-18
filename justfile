@@ -64,7 +64,7 @@ export LOOM_MAX_PREEMPTIONS := env_var_or_default("LOOM_MAX_PREEMPTIONS", "2")
 export RUSTDOCFLAGS := env_var_or_default("RUSTDOCFLAGS", "--cfg docsrs")
 
 # run Loom tests
-loom *NEXTEST_ARGS:
+loom *NEXTEST_ARGS="--package tricky-pipe --all-features":
     RUSTFLAGS=" --cfg loom --cfg debug_assertions" \
         {{ _cargo }} {{ _testcmd }} --release {{ NEXTEST_ARGS }}
 
