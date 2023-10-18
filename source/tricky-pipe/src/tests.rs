@@ -490,7 +490,7 @@ fn mpsc_send() {
         drop(chan);
 
         let t1 = thread::spawn(do_tx(TX1_SENDS, 0, tx1));
-        let t2 = thread::spawn(do_tx(TX2_SENDS, 1, tx2));
+        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, tx2));
 
         let recvs = future::block_on(async move {
             let mut recvs = std::collections::BTreeSet::new();
@@ -499,7 +499,7 @@ fn mpsc_send() {
                 tracing::info!(received = msg);
                 assert!(
                     recvs.insert(msg),
-                    "each message should only have been received once"
+                    "each message should only have been received once\nmessage: {msg}\nreceived: {recvs:?}"
                 );
             }
             recvs
@@ -524,12 +524,11 @@ fn do_tx(
     tx: Sender<loom::alloc::Track<usize>>,
 ) -> impl FnOnce() + Send {
     move || {
-        let offset = sends * offset;
         future::block_on(async move {
-            for i in 0..sends {
+            for i in offset..offset + sends {
                 test_dbg!(tx.reserve().await)
                     .expect("channel shouldn't be closed")
-                    .send(loom::alloc::Track::new(i + offset));
+                    .send(loom::alloc::Track::new(i));
             }
         });
     }
