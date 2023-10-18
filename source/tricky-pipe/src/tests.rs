@@ -418,9 +418,6 @@ fn spsc_try_send_in_capacity() {
     const SENDS: usize = if cfg!(loom) { 4 } else { 32 };
 
     loom::model(|| {
-        tracing::info!("");
-        tracing::info!("~~~ iteration ~~~");
-        tracing::info!("");
         let (rx, tx) = {
             let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(SENDS as u8);
             let rx = chan.receiver().expect("can't get rx");
@@ -453,7 +450,6 @@ fn spsc_send() {
     const SENDS: usize = if cfg!(loom) { 8 } else { 32 };
 
     loom::model(|| {
-        tracing::info!("~~~ iteration ~~~");
         let (rx, tx) = {
             let chan = TrickyPipe::<loom::alloc::Track<usize>>::new((SENDS / 2) as u8);
             let rx = chan.receiver().expect("can't get rx");
@@ -485,7 +481,6 @@ fn mpsc_send() {
     const CAPACITY: u8 = if cfg!(loom) { 2 } else { 32 };
 
     loom::model(|| {
-        tracing::info!("~~~ iteration ~~~");
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
 
         let rx = chan.receiver().expect("can't get rx");
@@ -495,10 +490,10 @@ fn mpsc_send() {
         drop(chan);
 
         let t1 = thread::spawn(do_tx(TX1_SENDS, 0, tx1));
-        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, tx2));
+        let t2 = thread::spawn(do_tx(TX2_SENDS, 1, tx2));
 
         let recvs = future::block_on(async move {
-            let mut recvs = std::collections::HashSet::new();
+            let mut recvs = std::collections::BTreeSet::new();
             while let Some(msg) = rx.recv().await {
                 let msg = msg.into_inner();
                 tracing::info!(received = msg);
@@ -514,7 +509,11 @@ fn mpsc_send() {
         t2.join().unwrap();
 
         for msg in 0..SENDS {
-            assert!(recvs.contains(&msg), "didn't receive {}", msg);
+            assert!(
+                recvs.contains(&msg),
+                "didn't receive {}\nreceived: {recvs:?}",
+                msg
+            );
         }
     })
 }
