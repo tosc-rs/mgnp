@@ -2,10 +2,26 @@
 name = "tricky-pipe"
 version = "0.1.0"
 edition = "2021"
+description = """
+Tricky Pipe is a channel that has interchangeable ends to allow for
+transparent serialization and deserialization
+"""
+authors = [
+    "Eliza Weisman <eliza@elizas.website>",
+    "James Munns <james@onevariable.com>",
+]
+readme = "./README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tosc-rs/mgnp"
+homepage = "https://mnemos.dev"
+categories = [
+    "embedded",
+    "no-std",
+]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-alloc = []
+alloc = ["postcard/alloc"]
 
 [dependencies]
 maitake-sync = "0.1.0"
@@ -14,14 +30,11 @@ mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/bi
 
 [dependencies.postcard]
 version = "1.0.7"
-features = ["use-std"]
 
 [dependencies.serde]
 version = "1.0.188"
 features = ["derive"]
-
-[dependencies.plugtail]
-path = "../plugtail"
+default-features = false
 
 [dev-dependencies]
 tracing = "0.1.39"

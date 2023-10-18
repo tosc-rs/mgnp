@@ -736,7 +736,6 @@ dependencies = [
  "loom 0.7.0",
  "maitake-sync",
  "mnemos-bitslab",
- "plugtail",
  "portable-atomic",
  "postcard",
  "serde",
