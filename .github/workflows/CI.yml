@@ -123,5 +123,4 @@ jobs:
     - uses: actions/checkout@v2
     - name: rust toolchain
       run: rustup show
-    - name: cargo fmt
-      run: cargo fmt --check --workspace --all-features
+    - run: cargo fmt --check
