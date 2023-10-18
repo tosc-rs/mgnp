@@ -29,6 +29,4 @@ enum IdentityKind {
     Name(heapless::String<32>),
 }
 
-struct Registry {
-
-}
+struct Registry {}

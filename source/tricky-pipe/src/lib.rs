@@ -1067,5 +1067,4 @@ impl<T> DerefMut for Permit<'_, T> {
     }
 }
 
-
 pub(crate) mod loom;
