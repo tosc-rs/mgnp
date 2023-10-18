@@ -1,4 +1,10 @@
 //! Tricky Pipe
+//!
+//! Tricky Pipe is a channel that has interchangeable ends to allow for
+//! transparent serialization and deserialization.
+//!
+//! It is intended to be used in cases where you *sometimes* need to traverse
+//! a network hop (or similar), and Serialization or Deserialization may occur.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
@@ -118,7 +124,7 @@ pub struct SerReceiver {
 /// Sends serialized values to an associated [`Receiver`] or [`SerReceiver`].
 ///
 /// A `DeserSender` for a channel can be obtained using the
-/// [`StaticTrickyPipe::ser_sender`] or [`TrickyPipe::ser_sender`] methods,
+/// [`StaticTrickyPipe::deser_sender`] or [`TrickyPipe::deser_sender`] methods,
 /// when the channel's message type implements [`DeserializeOwned`]. Messages may be
 /// received as deserialized typed values by a [`Receiver`], or as serialized
 /// bytes by a [`SerReceiver`].
@@ -218,7 +224,7 @@ impl<T> Receiver<T> {
     /// # Returns
     ///
     /// - [`Ok`]`(T)` if a message was received from the channel.
-    /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
+    /// - [`Err`]`(`[`TryRecvError::Closed`]`) if the channel has been closed
     ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
     ///   messages sent before the channel closed have already been received.
     /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
@@ -351,10 +357,10 @@ impl SerReceiver {
     ///   serialize the message as a COBS frame, use the
     ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
     ///   methods, instead.
-    /// - [`Err`]`(`[`TryRecvError::Closed`]``)` if the channel has been closed
+    /// - [`Err`]`([`TryRecvError::Closed`]) if the channel has been closed
     ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
     ///   messages sent before the channel closed have already been received.
-    /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
+    /// - [`Err`]`([`TryRecvError::Empty`]) if there are currently no
     ///   messages in the queue, but the channel has not been closed.
     ///
     /// [`Vec`]: alloc::vec::Vec
@@ -477,10 +483,16 @@ impl Drop for SerReceiver {
 // === impl SerRecvRef ===
 
 impl SerRecvRef<'_> {
+    /// Attempt to serialize the received item into the provided buffer
+    ///
+    /// This function will fail if the provided buffer was too small.
     pub fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
         (self.vtable.to_slice)(self.elems, self.res.idx, buf)
     }
 
+    /// Attempt to serialize the received item into the provided buffer, using COBS encoding
+    ///
+    /// This function will fail if the provided buffer was too small.
     pub fn to_slice_framed<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
         (self.vtable.to_slice_framed)(self.elems, self.res.idx, buf)
     }
@@ -599,6 +611,15 @@ impl DeserSender {
         })
     }
 
+    /// Attempt to immediately send the given bytes
+    ///
+    /// This will attempt to reserve space for a message in the queue, and then deserialize
+    /// the bytes into that reservation.
+    ///
+    /// If space is not immediately available, an error will be returned.
+    ///
+    /// This is equivalent to calling [DeserSender::try_reserve] followed by
+    /// [SerPermit::send].
     pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
         self.try_reserve()
             .map_err(SerTrySendError::Send)?
@@ -606,6 +627,15 @@ impl DeserSender {
             .map_err(SerTrySendError::Deserialize)
     }
 
+    /// Attempt to immediately send the given framed bytes
+    ///
+    /// This will attempt to reserve space for a message in the queue, and then deserialize
+    /// the COBS encoded bytes into that reservation.
+    ///
+    /// If space is not immediately available, an error will be returned.
+    ///
+    /// This is equivalent to calling [DeserSender::try_reserve] followed by
+    /// [SerPermit::send_framed].
     pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
         self.try_reserve()
             .map_err(SerTrySendError::Send)?
@@ -613,6 +643,15 @@ impl DeserSender {
             .map_err(SerTrySendError::Deserialize)
     }
 
+    /// Attempt to send the given bytes
+    ///
+    /// This will attempt to reserve space for a message in the queue, and then deserialize
+    /// the bytes into that reservation.
+    ///
+    /// This function will yield until space is available, or until the channel is closed.
+    ///
+    /// This is equivalent to calling [DeserSender::reserve] followed by
+    /// [SerPermit::send].
     pub async fn send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
         self.reserve()
             .await
@@ -621,6 +660,15 @@ impl DeserSender {
             .map_err(SerSendError::Deserialize)
     }
 
+    /// Attempt to  send the given framed bytes
+    ///
+    /// This will attempt to reserve space for a message in the queue, and then deserialize
+    /// the COBS encoded bytes into that reservation.
+    ///
+    /// This function will yield until space is available, or until the channel is closed.
+    ///
+    /// This is equivalent to calling [DeserSender::reserve] followed by
+    /// [SerPermit::send_framed].
     pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
         self.reserve()
             .await
@@ -706,6 +754,10 @@ impl Drop for DeserSender {
 // === impl SerPermit ===
 
 impl SerPermit<'_> {
+    /// Attempt to send the given bytes
+    ///
+    /// This will attempt to deserialize the bytes into the reservation, consuming
+    /// it. If the deserialization fails, the [SerPermit] is still consumed.
     pub fn send(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
         // try to deserialize the bytes into the reserved pipe slot.
         (self.vtable.from_bytes)(self.elems, self.res.idx, bytes.as_ref())?;
@@ -716,6 +768,10 @@ impl SerPermit<'_> {
         Ok(())
     }
 
+    /// Attempt to send the given bytes
+    ///
+    /// This will attempt to deserialize the COBS-encoded bytes into the reservation, consuming
+    /// it. If the deserialization fails, the [SerPermit] is still consumed.
     pub fn send_framed(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
         // try to deserialize the bytes into the reserved pipe slot.
         (self.vtable.from_bytes_framed)(self.elems, self.res.idx, bytes.as_ref())?;
@@ -743,7 +799,7 @@ impl<T> Sender<T> {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`()`]`)` if the channel is not closed.
-    /// - [`Err`]`(`[SendError`]`<T>)` if the channel is closed (the
+    /// - [`Err`]([1SendError`]`<T>`) if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
     ///
     /// # Cancellation Safety
@@ -777,7 +833,7 @@ impl<T> Sender<T> {
     /// # Returns
     ///
     /// - [`Ok`]`(())` if the message was sent successfully.
-    /// - [`Err`]`(`[TrySendError::Closed`]`<T>)` if the channel is closed (the
+    /// - [`Err`]([`TrySendError::Closed`]`<T>`) if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
     ///   subsequent calls to [`send`], `try_send`, [`try_reserve`], or
     ///   [`reserve`] on this channel will always fail.
@@ -953,6 +1009,9 @@ impl<T: 'static> Drop for Sender<T> {
 }
 
 impl<T> Permit<'_, T> {
+    /// Write the given value into the [Permit], and send it
+    ///
+    /// This makes the data available to the [Receiver].
     pub fn send(self, val: T) {
         // write the value...
         unsafe {

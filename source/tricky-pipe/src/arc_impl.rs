@@ -4,6 +4,10 @@ use alloc::boxed::Box;
 
 use super::channel_core::{Core, CoreVtable};
 
+/// TrickyPipe is an allocated Tricky Pipe.
+///
+/// This variant is intended for use on systems with a heap allocator.
+//
 // TODO(eliza): we should probably replace the use of `Arc` here with manual ref
 // counting, since the `Core` tracks the number of senders and receivers
 // already. But, I was in a hurry to get a prototype working...
@@ -23,6 +27,10 @@ struct Inner<T: 'static> {
 }
 
 impl<T: 'static> TrickyPipe<T> {
+    /// Create a new [TrickyPipe] allocated on the heap.
+    ///
+    /// NOTE: `CAPACITY` MUST be a power of two, and must also be <= the number of bits
+    /// in a `usize`, e.g. <= 64 on a 64-bit system.
     // TODO(eliza): we would need to add a mnemos-alloc version of this...
     pub fn new(capacity: u8) -> Self {
         Self(Arc::new(Inner {
@@ -48,13 +56,19 @@ impl<T: 'static> TrickyPipe<T> {
     fn typed(&self) -> TypedPipe<T> {
         unsafe { self.erased().typed() }
     }
-
+    /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
+    ///
+    /// This method will only return [Some] on the first call. All subsequent calls
+    /// will return [None].
     pub fn receiver(&self) -> Option<Receiver<T>> {
         self.0.core.try_claim_rx()?;
 
         Some(Receiver { pipe: self.typed() })
     }
 
+    /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
+    ///
+    /// This function may be called multiple times.
     pub fn sender(&self) -> Sender<T> {
         self.0.core.add_tx();
         Sender { pipe: self.typed() }
@@ -85,6 +99,11 @@ impl<T: 'static> TrickyPipe<T> {
 }
 
 impl<T: Serialize + 'static> TrickyPipe<T> {
+    /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
+    /// a serialized instance of `T`.
+    ///
+    /// This method will only return [Some] on the first call. All subsequent calls
+    /// will return [None].
     pub fn ser_receiver(&self) -> Option<SerReceiver> {
         self.0.core.try_claim_rx()?;
 
@@ -105,6 +124,11 @@ impl<T: Serialize + 'static> TrickyPipe<T> {
 }
 
 impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
+    /// Try to obtain a [`DeserSender`] capable of sending bytes containing
+    /// a serialized instance of `T`.
+    ///
+    /// This method will only return [Some] on the first call. All subsequent calls
+    /// will return [None].
     pub fn deser_sender(&self) -> DeserSender {
         self.0.core.add_tx();
         DeserSender {
