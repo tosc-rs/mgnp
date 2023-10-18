@@ -57,12 +57,12 @@ pub struct PlugTail<H, T> {
 pub mod alloc {
     extern crate alloc;
 
+    use super::*;
+    use alloc::alloc::{dealloc, Layout};
     use core::{
         ptr::{addr_of, addr_of_mut, drop_in_place, NonNull},
         sync::atomic::{AtomicUsize, Ordering},
     };
-    use alloc::alloc::{dealloc, Layout};
-    use super::*;
 
     /// An Arc-like heap allocated Pluggable
     pub struct ArcPlugTail<H, T>
@@ -72,8 +72,8 @@ pub mod alloc {
         pt: NonNull<PlugTail<ArcHdr<H>, T>>,
     }
 
-    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Send for ArcPlugTail<H, T> { }
-    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Sync for ArcPlugTail<H, T> { }
+    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Send for ArcPlugTail<H, T> {}
+    unsafe impl<H: Send + BodyDrop<Item = T>, T: Send> Sync for ArcPlugTail<H, T> {}
 
     #[repr(C)]
     pub struct ArcHdr<H> {
@@ -177,7 +177,9 @@ pub mod alloc {
 
         unsafe fn unleak(ptr: *const ()) -> Self {
             // welp
-            Self { pt: NonNull::new_unchecked(ptr.cast_mut().cast()) }
+            Self {
+                pt: NonNull::new_unchecked(ptr.cast_mut().cast()),
+            }
         }
     }
 }
@@ -193,8 +195,8 @@ pub struct StaticPlugTail<H, T, const N: usize> {
 
 // TODO: should StaticPlugTail have any kind of blanket impl for
 // Send or Sync?
-unsafe impl<H: Send, T: Send, const N: usize> Send for StaticPlugTail<H, T, N> { }
-unsafe impl<H: Send, T: Send, const N: usize> Sync for StaticPlugTail<H, T, N> { }
+unsafe impl<H: Send, T: Send, const N: usize> Send for StaticPlugTail<H, T, N> {}
+unsafe impl<H: Send, T: Send, const N: usize> Sync for StaticPlugTail<H, T, N> {}
 
 impl<H, T, const N: usize> StaticPlugTail<H, T, N> {
     const ONE: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
@@ -208,8 +210,7 @@ impl<H, T, const N: usize> StaticPlugTail<H, T, N> {
 
     // TODO: Is there any way we could make this not UC<MU<T>> and instead pass
     // a [T; N]? That would be a much nicer API...
-    pub const fn new(hdr: H, val: [UnsafeCell<MaybeUninit<T>>; N]) -> Self
-    {
+    pub const fn new(hdr: H, val: [UnsafeCell<MaybeUninit<T>>; N]) -> Self {
         Self {
             pt: PlugTail { hdr, tail: [] },
             tfr: val,

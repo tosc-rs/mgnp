@@ -1,0 +1,127 @@
+# Lovingly borrowed from mycelium's CI setup
+
+name: CI
+
+on:
+  # build all pushes to PR branches
+  pull_request:
+  # allow builds to be manually triggered from the UI.
+  workflow_dispatch:
+  # for github merge queue
+  merge_group:
+  # build all pushes to `main`
+  push:
+    branches: ["main"]
+
+env:
+  # disable incremental compilation.
+  #
+  # incremental compilation is useful as part of an edit-build-test-edit cycle,
+  # as it lets the compiler avoid recompiling code that hasn't changed. however,
+  # on CI, we're not making small edits; we're almost always building the entire
+  # project from scratch. thus, incremental compilation on CI actually
+  # introduces *additional* overhead to support making future builds
+  # faster...but no future builds will ever occur in any given CI environment.
+  #
+  # see https://matklad.github.io/2021/09/04/fast-rust-builds.html#ci-workflow
+  # for details.
+  CARGO_INCREMENTAL: 0
+  # allow more retries for network requests in cargo (downloading crates) and
+  # rustup (installing toolchains). this should help to reduce flaky CI failures
+  # from transient network timeouts or other issues.
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+  # don't emit giant backtraces in the CI logs.
+  RUST_BACKTRACE: short
+
+jobs:
+  # dummy job to indicate everything has passed
+  all_systems_go:
+    name: "all systems go!"
+    runs-on: ubuntu-latest
+    needs:
+    - check
+    - clippy
+    - test
+    - loom
+    - docs
+    - fmt
+    steps:
+    - run: exit 0
+
+  # run `just check`
+  check:
+    name: just check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: olix0r/cargo-action-fmt@ee1ef42932e44794821dab57ef1bf7a73df8b21f
+    - uses: extractions/setup-just@v1
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - run: just check
+
+  # run `just clippy`
+  clippy:
+    name: just clippy
+    runs-on: ubuntu-latest
+    steps:
+        - uses: olix0r/cargo-action-fmt@ee1ef42932e44794821dab57ef1bf7a73df8b21f
+        - uses: extractions/setup-just@v1
+        - uses: actions/checkout@v2
+        - name: rust toolchain
+          run: rustup show
+        - run: just clippy
+
+  # run `just test`
+  test:
+    name: just test
+    needs: check # skip on commits that don't compile.
+    runs-on: ubuntu-latest
+    steps:
+    - name: install nextest
+      uses: taiki-e/install-action@nextest
+    - uses: extractions/setup-just@v1
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - run: just test
+
+  # run `just loom`
+  loom:
+    name: just loom
+    needs: check # skip on commits that don't compile.
+    # TODO(eliza): this *should* only run if trickypipe changed...
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: install nextest
+      uses: taiki-e/install-action@nextest
+    - uses: extractions/setup-just@v1
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - run: just loom
+
+  # check that RustDoc builds
+  docs:
+    name: just docs
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - uses: olix0r/cargo-action-fmt@ee1ef42932e44794821dab57ef1bf7a73df8b21f
+    - uses: extractions/setup-just@v1
+    - run: just docs
+
+  # check cargo fmt
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - run: cargo fmt --check

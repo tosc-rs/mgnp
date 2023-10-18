@@ -9,6 +9,8 @@ Available variables:
     no-nextest              # disables cargo nextest (use cargo test) instead.
     profile                 # configures what Cargo profile (release or debug)
                             # to use for builds.
+
+Environment variables and defaults:
     LOOM_LOG='debug'        # sets the log level for Loom tests.
     LOOM_LOCATION='true'    # enables/disables location tracking in Loom tests.
 
@@ -55,11 +57,30 @@ default:
     @just --list
 
 
+# passes through the LOOM_LOG env var to loom.
 export LOOM_LOG := env_var_or_default("LOOM_LOG", "debug")
 export LOOM_LOCATION := env_var_or_default("LOOM_LOCATION", "true")
 export LOOM_MAX_PREEMPTIONS := env_var_or_default("LOOM_MAX_PREEMPTIONS", "2")
+export RUSTDOCFLAGS := env_var_or_default("RUSTDOCFLAGS", "--cfg docsrs")
 
 # run Loom tests
-loom *ARGS:
+loom *NEXTEST_ARGS="--package tricky-pipe --all-features":
     RUSTFLAGS=" --cfg loom --cfg debug_assertions" \
-        {{ _cargo }} {{ _testcmd }} --release {{ ARGS }}
+        {{ _cargo }} {{ _testcmd }} --release {{ NEXTEST_ARGS }}
+
+# run cargo check
+check *CARGO_ARGS="--workspace --all-features --all-targets":
+    {{ _cargo }} check {{ CARGO_ARGS }} {{ _fmt_check_doc }}
+
+# run cargo clippy
+clippy *CLIPPY_ARGS="--workspace --all-features --all-targets":
+    {{ _cargo }} clippy {{ CLIPPY_ARGS }} {{ _fmt_check_doc }}
+
+# run cargo test
+test *NEXTEST_ARGS="--workspace --all-features":
+    {{ _cargo }} {{ _testcmd }} {{ NEXTEST_ARGS }}
+    {{ _cargo }} test --doc {{ NEXTEST_ARGS }}
+
+# build RustDoc
+docs *RUSTDOC_ARGS="--workspace":
+    {{ _cargo }} doc --no-deps --all-features {{ RUSTDOC_ARGS }}

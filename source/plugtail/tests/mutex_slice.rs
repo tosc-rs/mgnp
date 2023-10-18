@@ -2,9 +2,15 @@
 //!
 //! Not meant to be used, just for testing the underlying structure out.
 
-use std::{sync::atomic::{AtomicBool, Ordering, AtomicU8}, marker::PhantomData, ptr::drop_in_place, mem::MaybeUninit, ops::{Deref, DerefMut}};
+use std::{
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+    ptr::drop_in_place,
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
+};
 
-use plugtail::{Pluggable, BodyDrop, alloc::ArcPlugTail, PlugDat, StaticPlugTail};
+use plugtail::{alloc::ArcPlugTail, BodyDrop, PlugDat, Pluggable, StaticPlugTail};
 
 //- ACTUAL IMPLEMENTATION STUFF ----
 //
@@ -32,8 +38,7 @@ where
 pub type ArcAms<T> = Ams<T, ArcPlugTail<AmsHdr<T>, T>>;
 pub type StaticAms<T, const N: usize> = Ams<T, &'static StaticPlugTail<AmsHdr<T>, T, N>>;
 
-pub struct AmsGuard<'a, T>
-{
+pub struct AmsGuard<'a, T> {
     dat: PlugDat<'a, AmsHdr<T>, T>,
 }
 
@@ -43,9 +48,7 @@ impl<'a, T> Deref for AmsGuard<'a, T> {
     fn deref(&self) -> &Self::Target {
         let len = self.dat.t.len();
         let ptr: *const T = self.dat.t.as_ptr().cast();
-        unsafe {
-            core::slice::from_raw_parts(ptr, len)
-        }
+        unsafe { core::slice::from_raw_parts(ptr, len) }
     }
 }
 
@@ -60,12 +63,9 @@ impl<'a, T> DerefMut for AmsGuard<'a, T> {
         let len = self.dat.t.len();
         let ptr: *const T = self.dat.t.as_ptr().cast();
         let ptr: *mut T = ptr.cast_mut();
-        unsafe {
-            core::slice::from_raw_parts_mut(ptr, len)
-        }
+        unsafe { core::slice::from_raw_parts_mut(ptr, len) }
     }
 }
-
 
 impl<T, P> Ams<T, P>
 where
@@ -82,10 +82,12 @@ where
     }
 }
 
-impl<T> Ams<T, ArcPlugTail<AmsHdr<T>, T>>
-{
+impl<T> Ams<T, ArcPlugTail<AmsHdr<T>, T>> {
     pub fn new_arc_with<W: Fn() -> T>(n: usize, f: W) -> Self {
-        let h: AmsHdr<T> = AmsHdr { locked: AtomicBool::new(false), pd: PhantomData };
+        let h: AmsHdr<T> = AmsHdr {
+            locked: AtomicBool::new(false),
+            pd: PhantomData,
+        };
         let apt = ArcPlugTail::new(h, n);
         let sto = apt.storage();
         for val in sto.t {
@@ -93,9 +95,7 @@ impl<T> Ams<T, ArcPlugTail<AmsHdr<T>, T>>
                 val.get().write(MaybeUninit::new(f()));
             }
         }
-        Self {
-            pt: apt,
-        }
+        Self { pt: apt }
     }
 }
 
@@ -139,18 +139,29 @@ impl<T, const N: usize> StaticAmsStorage<T, N> {
     pub const fn new() -> Self {
         Self {
             is_init: AtomicU8::new(Self::UNINIT),
-            sp: StaticPlugTail::uninit(AmsHdr { locked: AtomicBool::new(false), pd: PhantomData }),
+            sp: StaticPlugTail::uninit(AmsHdr {
+                locked: AtomicBool::new(false),
+                pd: PhantomData,
+            }),
         }
     }
 
-    pub fn try_init_take<W: Fn() -> T>(&'static self, f: W) -> Option<Ams<T, &'static StaticPlugTail<AmsHdr<T>, T, N>>> {
-        let val = self.is_init.compare_exchange(Self::UNINIT, Self::INITING, Ordering::AcqRel, Ordering::Acquire);
+    pub fn try_init_take<W: Fn() -> T>(
+        &'static self,
+        f: W,
+    ) -> Option<Ams<T, &'static StaticPlugTail<AmsHdr<T>, T, N>>> {
+        let val = self.is_init.compare_exchange(
+            Self::UNINIT,
+            Self::INITING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         match val {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(Self::INITED) => {
                 // Already initialized, good2go
                 return Some(Ams { pt: &self.sp });
-            },
+            }
             Err(Self::INITING) => return None,
             _ => {
                 // It wasn't UNINIT, INITING, or INITED, what was it?
@@ -216,7 +227,6 @@ fn make_a_thing() {
             assert_eq!(*v, i as i32);
         }
     }
-
 }
 
 #[test]
@@ -242,7 +252,9 @@ fn send_arc_works() {
         for v in g.deref() {
             assert_eq!(*v, 123);
         }
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]
