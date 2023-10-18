@@ -116,7 +116,7 @@ pub enum SerTrySendError {
 // === impl SendError ===
 
 impl<T> SendError<T> {
-    /// Obtain the `T` that failed to send, discarding the "kind" of [SendError].
+    /// Obtain the `T` that failed to send, discarding the "kind" of [`SendError`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
@@ -133,7 +133,7 @@ impl<T> fmt::Debug for SendError<T> {
 // === impl TrySendError ===
 
 impl<T> TrySendError<T> {
-    /// Obtain the `T` that failed to send, discarding the "kind" of [TrySendError].
+    /// Obtain the `T` that failed to send, discarding the "kind" of [`TrySendError`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {

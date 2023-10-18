@@ -15,9 +15,11 @@ pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize> {
 impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     const EMPTY_CELL: Cell<T> = UnsafeCell::new(MaybeUninit::uninit());
 
-    /// Create a new [StaticTrickyPipe]
+    /// Create a new [`StaticTrickyPipe`].
     ///
-    /// NOTE: `CAPACITY` MUST be a power of two, and must also be <= the number of bits
+    /// # Panics
+    /// This method panics if `CAPACITY` is not be a power of two, or
+    /// if `CAPACITY`  is greater than [`Self::MAX_CAPACITY`], the number of bits
     /// in a `usize`, e.g. <= 64 on a 64-bit system.
     pub const fn new() -> Self {
         assert!(CAPACITY.is_power_of_two());
@@ -28,7 +30,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
         }
     }
 
-    /// The maximum possible capacity of a [StaticTrickyPipe] on this platform
+    /// The maximum possible capacity of a [`StaticTrickyPipe`] on this platform
     pub const MAX_CAPACITY: usize = channel_core::MAX_CAPACITY;
 
     const CORE_VTABLE: &'static CoreVtable = &CoreVtable {
@@ -48,8 +50,8 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
 
     /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn receiver(&'static self) -> Option<Receiver<T>> {
         self.core.try_claim_rx()?;
 
@@ -92,8 +94,8 @@ where
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn ser_receiver(&'static self) -> Option<SerReceiver> {
         self.core.try_claim_rx()?;
 
@@ -120,8 +122,8 @@ where
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn deser_sender(&'static self) -> DeserSender {
         self.core.add_tx();
         DeserSender {

@@ -27,7 +27,7 @@ struct Inner<T: 'static> {
 }
 
 impl<T: 'static> TrickyPipe<T> {
-    /// Create a new [TrickyPipe] allocated on the heap.
+    /// Create a new [`TrickyPipe`] allocated on the heap.
     ///
     /// NOTE: `CAPACITY` MUST be a power of two, and must also be <= the number of bits
     /// in a `usize`, e.g. <= 64 on a 64-bit system.
@@ -58,8 +58,8 @@ impl<T: 'static> TrickyPipe<T> {
     }
     /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn receiver(&self) -> Option<Receiver<T>> {
         self.0.core.try_claim_rx()?;
 
@@ -102,8 +102,8 @@ impl<T: Serialize + 'static> TrickyPipe<T> {
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn ser_receiver(&self) -> Option<SerReceiver> {
         self.0.core.try_claim_rx()?;
 
@@ -127,8 +127,8 @@ impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///
-    /// This method will only return [Some] on the first call. All subsequent calls
-    /// will return [None].
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
     pub fn deser_sender(&self) -> DeserSender {
         self.0.core.add_tx();
         DeserSender {
