@@ -753,7 +753,32 @@ impl Drop for DeserSender {
 
 // === impl SerPermit ===
 
-impl SerPermit<'_> {
+impl<'a> SerPermit<'a> {
+    fn into_permit<T: 'static>(self) -> Option<Permit<'a, T>> {
+        if !self.elems.type_check::<UnsafeCell<MaybeUninit<T>>>() {
+            return None;
+        }
+        let ptr = self.elems.ptr.cast::<UnsafeCell<MaybeUninit<T>>>();
+        let cell = unsafe {
+            (*ptr.add(self.res.idx as usize)).get_mut()
+        };
+        Some(Permit {
+            cell,
+            pipe: self.res,
+        })
+    }
+
+    pub fn send_with<T, F>(self, f: F) -> Result<(), ()>
+    where
+        T: 'static,
+        F: FnOnce() -> Option<T>
+    {
+        let permit = self.into_permit::<T>().ok_or(())?;
+        let t = f().ok_or(())?;
+        permit.send(t);
+        Ok(())
+    }
+
     /// Attempt to send the given bytes
     ///
     /// This will attempt to deserialize the bytes into the reservation, consuming

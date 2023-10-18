@@ -1,0 +1,21 @@
+[package]
+name = "mini-reg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+postcard = "1.0.8"
+
+[dependencies.serde]
+version = "1.0.189"
+default-features = false
+features = ["derive"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies.uuid]
+version = "1.4.1"
+default-features = false
+
+[dependencies.tricky-pipe]
+path = "../tricky-pipe"

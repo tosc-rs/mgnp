@@ -96,9 +96,8 @@ pub(super) struct TypedPipe<T: 'static> {
 /// A type-erased slice.
 #[derive(Copy, Clone)]
 pub(super) struct ErasedSlice {
-    ptr: *const (),
-    len: usize,
-    #[cfg(debug_assertions)]
+    pub(super) ptr: *const (),
+    pub(super) len: usize,
     typ: core::any::TypeId,
 }
 
@@ -477,14 +476,16 @@ impl fmt::Debug for Reservation<'_> {
 }
 
 impl ErasedSlice {
+    pub(super) fn type_check<T: 'static>(&self) -> bool {
+        core::any::TypeId::of::<T>() == self.typ
+    }
+
     pub(super) fn erase<T: 'static>(slice: impl AsRef<[T]>) -> Self {
         let slice = slice.as_ref();
         let len = slice.len();
         Self {
             ptr: slice.as_ptr().cast(),
             len,
-
-            #[cfg(debug_assertions)]
             typ: core::any::TypeId::of::<T>(),
         }
     }
