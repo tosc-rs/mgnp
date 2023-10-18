@@ -799,7 +799,7 @@ impl<T> Sender<T> {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`()`]`)` if the channel is not closed.
-    /// - [`Err`]([1SendError`]`<T>`) if the channel is closed (the
+    /// - [`Err`]`(`[`SendError`]`<T>)` if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
     ///
     /// # Cancellation Safety
@@ -879,7 +879,7 @@ impl<T> Sender<T> {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`Permit`]`)` if the channel is not closed.
-    /// - [`Err`]`(`[SendError::Closed`]`)` if the channel is closed (the
+    /// - [`Err`]`(`[`SendError::Closed`]`)` if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
     ///
     /// # Cancellation Safety
@@ -921,7 +921,7 @@ impl<T> Sender<T> {
     ///
     /// - [`Ok`]`(`[`Permit`]`)` if the channel has capacity available and
     ///   has not closed.
-    /// - [`Err`]`(`[TrySendError::Closed`]`)` if the channel is closed (the
+    /// - [`Err`]`(`[`TrySendError::Closed`]`)` if the channel is closed (the
     ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
     ///   subsequent calls to `try_reserve` or [`reserve`] on this channel will
     ///   always fail.
@@ -1066,6 +1066,5 @@ impl<T> DerefMut for Permit<'_, T> {
         unsafe { &mut *self.cell.deref() }
     }
 }
-
 
 pub(crate) mod loom;
