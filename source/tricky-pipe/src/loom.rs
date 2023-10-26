@@ -117,7 +117,7 @@ mod inner {
 #[cfg(not(all(loom, test)))]
 #[allow(clippy::items_after_test_module)]
 mod inner {
-    #![allow(dead_code, unused_imports)]
+    #![allow(dead_code, unused_imports, clippy::items_after_test_module)]
     pub(crate) mod sync {
         #[cfg(feature = "alloc")]
         pub use alloc::sync::*;
@@ -288,6 +288,14 @@ mod inner {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn traceln(args: std::fmt::Arguments) {
+        eprintln!("{args}");
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn traceln(_: core::fmt::Arguments) {}
 
     #[cfg(test)]
     pub(crate) mod alloc {
@@ -537,12 +545,4 @@ mod inner {
             }
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn traceln(args: std::fmt::Arguments) {
-        eprintln!("{args}");
-    }
-
-    #[cfg(not(test))]
-    pub(crate) fn traceln(_: core::fmt::Arguments) {}
 }
