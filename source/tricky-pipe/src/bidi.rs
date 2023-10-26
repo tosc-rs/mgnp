@@ -29,6 +29,8 @@ pub struct SerBiDi {
 }
 
 /// Events returned by [`BiDi::wait`] and [`SerBiDi::wait`].
+#[derive(Debug)]
+#[must_use]
 pub enum Event<In, Out> {
     /// A message was received from the remote peer.
     Recv(In),
@@ -118,6 +120,22 @@ where
     }
 }
 
+impl<In, Out> fmt::Debug for BiDi<In, Out>
+where
+    In: 'static,
+    Out: 'static,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { tx, rx } = self;
+        f.debug_struct("BiDi")
+            .field("tx", tx)
+            .field("rx", rx)
+            .finish()
+    }
+}
+
+// === impl SerBiDi ===
+
 impl SerBiDi {
     /// Constructs a new `SerBiDi` from a [`DesererSender`] and a [`SerReceiver`].
     pub fn from_pair(tx: DeserSender, rx: SerReceiver) -> Self {
@@ -193,5 +211,15 @@ impl SerBiDi {
     #[must_use]
     pub fn is_full(&self) -> bool {
         self.tx.is_full() && self.rx.is_full()
+    }
+}
+
+impl fmt::Debug for SerBiDi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { tx, rx } = self;
+        f.debug_struct("SerBiDi")
+            .field("tx", tx)
+            .field("rx", rx)
+            .finish()
     }
 }
