@@ -1,19 +1,38 @@
-#![allow(missing_docs)]
+//! Bidirectional channels.
+//!
+//! This module contains the [`BiDi`] and [`SerBiDi`] types, which combine a
+//! [`Sender`] and [`Receiver`] or a [`DeserSender`] and [`SerReceiver`]
+//! (respectively) into a single bidirectional channel which can both send and
+//! receive messages to/from a remote peer.
 use super::*;
 use futures::FutureExt;
 
+/// A bidirectional typed channel.
+///
+/// This channel consists of a [`Sender`] paired with a [`Receiver`], and can be
+/// used to both send and receive typed messages to and from a remote peer.
+#[must_use]
 pub struct BiDi<In: 'static, Out: 'static = In> {
     tx: Sender<Out>,
     rx: Receiver<In>,
 }
 
+/// A bidirectional type-erased serializing channel.
+///
+/// This channel consists of a [`DeserSender`] paired with a [`SerReceiver`],
+/// and can be  used to both send and receive serialized messages to and from a
+/// remote peer.
+#[must_use]
 pub struct SerBiDi {
     tx: DeserSender,
     rx: SerReceiver,
 }
 
+/// Events returned by [`BiDi::wait`] and [`SerBiDi::wait`].
 pub enum Event<In, Out> {
+    /// A message was received from the remote peer.
     Recv(In),
+    /// The channel has capacity to send a message.
     SendReady(Out),
 }
 
@@ -22,16 +41,19 @@ where
     In: 'static,
     Out: 'static,
 {
-    #[must_use]
-    pub fn new(tx: Sender<Out>, rx: Receiver<In>) -> Self {
+    /// Constructs a new `BiDi` from a [`Sender`] and a [`Receiver`].
+    pub fn from_pair(tx: Sender<Out>, rx: Receiver<In>) -> Self {
         Self { tx, rx }
     }
 
+    /// Consumes `self`, extracting the inner [`Sender`] and [`Receiver`].
     #[must_use]
     pub fn split(self) -> (Sender<Out>, Receiver<In>) {
         (self.tx, self.rx)
     }
 
+    /// Wait until the channel is either ready to send a message *or* a new
+    /// incoming message is received, whichever occurs first.
     #[must_use]
     pub async fn wait(&self) -> Option<Event<In, Permit<'_, Out>>> {
         futures::select_biased! {
@@ -97,16 +119,19 @@ where
 }
 
 impl SerBiDi {
-    #[must_use]
-    pub fn new(tx: DeserSender, rx: SerReceiver) -> Self {
+    /// Constructs a new `SerBiDi` from a [`DesererSender`] and a [`SerReceiver`].
+    pub fn from_pair(tx: DeserSender, rx: SerReceiver) -> Self {
         Self { tx, rx }
     }
 
+    /// Consumes `self`, extracting the inner [`DeserSender`] and [`SerReceiver`].
     #[must_use]
     pub fn split(self) -> (DeserSender, SerReceiver) {
         (self.tx, self.rx)
     }
 
+    /// Wait until the channel is either ready to send a message *or* a new
+    /// incoming message is received, whichever occurs first.
     #[must_use]
     pub async fn wait(&self) -> Option<Event<SerRecvRef<'_>, SerPermit<'_>>> {
         futures::select_biased! {
