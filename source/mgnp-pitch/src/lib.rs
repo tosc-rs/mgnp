@@ -4,9 +4,9 @@
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use futures::FutureExt;
-use uuid::Uuid;
 
 mod conn_table;
+pub mod registry;
 
 pub trait Frame {
     fn as_bytes(&self) -> &[u8];
@@ -24,7 +24,7 @@ pub trait Wire {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Message<'data> {
-    Control(ControlMessage),
+    Control(ControlMessage<'data>),
     Data {
         local_id: Id,
         remote_id: Id,
@@ -32,13 +32,33 @@ pub enum Message<'data> {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ControlMessage<'data> {
+    Ack {
+        local_id: Id,
+        remote_id: Id,
+    },
+    Nak {
+        remote_id: Id,
+        reason: Nak,
+    },
+    Connect {
+        local_id: Id,
+        identity: registry::Identity,
+        hello: &'data [u8],
+    },
+    Reset {
+        remote_id: Id,
+    },
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ControlMessage {
-    Ack { local_id: Id, remote_id: Id },
-    Nak { remote_id: Id },
-    // TODO(eliza): this needs some kind of identity for registry lookups...
-    Connect { local_id: Id },
-    Reset { remote_id: Id },
+pub enum Nak {
+    ConnTableFull(usize),
+    NotFound,
+    Rejected(
+        // TODO(eliza): can we cram a serialized message into this...?
+    ),
 }
 
 pub struct Interface<Fr, Wi, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
@@ -50,17 +70,6 @@ where
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
 }
-
-struct Identity {
-    id: Uuid,
-    kind: IdentityKind,
-}
-
-enum IdentityKind {
-    Name(heapless::String<32>),
-}
-
-struct Registry {}
 
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
@@ -76,7 +85,10 @@ where
         }
     }
 
-    pub async fn handle_connection(&mut self) -> Result<(), ()> {
+    pub async fn handle_connection(
+        &mut self,
+        registry: &impl registry::Registry,
+    ) -> Result<(), ()> {
         let Self { wire, conn_table } = self;
         loop {
             let frame = futures::select_biased! {
@@ -102,14 +114,9 @@ where
             if id == LinkId::INTERFACE {
                 todo!("eliza: handle interface frame");
             } else {
-                // frame is local
-                if let Err(error) = conn_table.process_inbound(msg).await {
-                    tracing::debug!(%id, %error, "resetting connection");
-                    // link does not exist, reject
-                    let reset = Message::Control(ControlMessage::Reset {
-                        remote_id: id.remote.unwrap(),
-                    });
-                    wire.send(reset).await?;
+                // process the inbound message
+                if let Some(rsp) = conn_table.process_inbound(registry, msg).await {
+                    wire.send(rsp).await?;
                 }
             }
         }
@@ -117,6 +124,10 @@ where
 }
 
 impl Message<'_> {
+    pub(crate) fn reset(remote_id: Id) -> Self {
+        Self::Control(ControlMessage::Reset { remote_id })
+    }
+
     fn link_id(&self) -> LinkId {
         match self {
             Self::Control(msg) => msg.link_id(),
@@ -132,7 +143,7 @@ impl Message<'_> {
     }
 }
 
-impl ControlMessage {
+impl ControlMessage<'_> {
     fn link_id(&self) -> LinkId {
         match *self {
             Self::Ack {
@@ -142,11 +153,11 @@ impl ControlMessage {
                 local: Some(local_id),
                 remote: Some(remote_id),
             },
-            Self::Nak { remote_id } => LinkId {
+            Self::Nak { remote_id, .. } => LinkId {
                 local: None,
                 remote: Some(remote_id),
             },
-            Self::Connect { local_id } => LinkId {
+            Self::Connect { local_id, .. } => LinkId {
                 local: Some(local_id),
                 remote: None,
             },

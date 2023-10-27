@@ -23,7 +23,7 @@ features = ["derive"]
 [dependencies.uuid]
 version = "1.4.1"
 default-features = false
-features = ["v4"]
+features = ["v4", "serde"]
 
 [dependencies.spitebuf]
 git = "https://github.com/tosc-rs/mnemos"

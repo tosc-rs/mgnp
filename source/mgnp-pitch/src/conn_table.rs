@@ -1,4 +1,4 @@
-use crate::{ControlMessage, Message};
+use crate::{registry, ControlMessage, Message, Nak};
 use core::{fmt, mem, num::NonZeroU16};
 use tricky_pipe::{bidi::SerBiDi, SerPermit};
 
@@ -29,19 +29,12 @@ pub enum State {
 
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum InboundError {
+enum InboundError {
     /// The connection tracking table doesn't have a connection for the provided ID.
     NoSocket,
 
-    /// The connection was already acked by the remote, so they acked it again
-    /// for some reason?
-    AlreadyEstablished { remote_id: Id },
-
     /// The local channel for this socket has closed.
     ChannelClosed,
-
-    /// The message could not be deserialized.
-    Deserialize(postcard::Error),
 }
 
 #[derive(Debug)]
@@ -78,7 +71,11 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     /// Process an inbound frame.
-    pub async fn process_inbound(&mut self, msg: Message<'_>) -> Result<(), InboundError> {
+    pub async fn process_inbound(
+        &mut self,
+        registry: &impl registry::Registry,
+        msg: Message<'_>,
+    ) -> Option<Message<'_>> {
         let _span = tracing::trace_span!("process_inbound", id = %msg.link_id()).entered();
         match msg {
             Message::Data {
@@ -94,11 +91,22 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 );
                 // the remote peer's remote ID is our local ID.
                 let id = remote_id;
-                let socket = self.conns.get_mut(id).ok_or(InboundError::NoSocket)?;
+                let Some(socket) = self.conns.get_mut(id) else {
+                    tracing::debug!("process_inbound: no socket for data frame, resetting...");
+                    return Some(Message::reset(local_id));
+                };
 
                 // try to reserve send capacity on this socket.
                 let error = match socket.reserve_send().await {
-                    Ok(permit) => return permit.send(data).map_err(InboundError::Deserialize),
+                    Ok(permit) => match permit.send(data) {
+                        Ok(_) => return None,
+                        Err(error) => {
+                            tracing::debug!(%error, "process_inbound: failed to deserialize data");
+                            // TODO(eliza): we should probably tell the peer
+                            // that they sent us something bad...
+                            return None;
+                        }
+                    },
                     Err(error) => error,
                 };
 
@@ -106,28 +114,47 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // channel has closed locally.
                 tracing::trace!("process_inbound: local error: {error}; resetting...");
                 self.close(id);
-                Err(error)
+                Some(Message::reset(local_id))
             }
             Message::Control(ControlMessage::Ack {
                 local_id,
                 remote_id,
             }) => {
                 tracing::trace!(id.remote = %local_id, id.local = %remote_id, "process_inbound: ACK");
-                self.process_ack(remote_id, local_id)
+                match self.process_ack(remote_id, local_id) {
+                    Ok(_) => None,
+                    Err(msg) => Some(msg),
+                }
             }
-            Message::Control(ControlMessage::Nak { remote_id }) => {
-                tracing::trace!(id.local = %remote_id, "process_inbound: NAK");
+            Message::Control(ControlMessage::Nak { remote_id, reason }) => {
+                tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
+                // TODO(eliza): send error to the initiator
                 self.close(remote_id);
-                Ok(())
+                None
             }
             Message::Control(ControlMessage::Reset { remote_id }) => {
                 tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
-                self.close(remote_id);
-                Ok(())
+                let _closed = self.close(remote_id);
+
+                tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
+                None
             }
-            Message::Control(ControlMessage::Connect { local_id }) => {
-                tracing::trace!(id.remote = %local_id, "process_inbound: CONNECT");
-                todo!("eliza: implement registry...")
+            Message::Control(ControlMessage::Connect {
+                local_id,
+                identity,
+                hello,
+            }) => {
+                tracing::trace!(id.remote = %local_id, ?identity, "process_inbound: CONNECT");
+                match registry.connect(identity, hello).await {
+                    Ok(bidi) => {
+                        let rsp = self.accept(local_id, bidi);
+                        Some(Message::Control(rsp))
+                    }
+                    Err(reason) => Some(Message::Control(ControlMessage::Nak {
+                        remote_id: local_id,
+                        reason,
+                    })),
+                }
             }
         }
     }
@@ -135,36 +162,43 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub fn start_connecting(&mut self, bidi: SerBiDi) -> Option<ControlMessage> {
+    pub fn start_connecting<'data>(
+        &mut self,
+        bidi: SerBiDi,
+        identity: registry::Identity,
+        hello: &'data [u8],
+    ) -> Option<ControlMessage<'data>> {
         let sock = Socket {
             state: State::Connecting,
             bidi,
         };
         let local_id = self.insert(sock)?;
 
-        Some(ControlMessage::Connect { local_id })
+        Some(ControlMessage::Connect {
+            local_id,
+            hello,
+            identity,
+        })
     }
 
     /// Process an ack for a locally-initiated connecting socket with `local_id`.
-    pub fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), InboundError> {
+    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), Message<'_>> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
-            tracing::debug!(?local_id, ?remote_id, "process_ack: no such socket");
-            return Err(InboundError::NoSocket);
+            tracing::debug!(id.local = %local_id, id.remote = %remote_id, "process_ack: no such socket");
+            return Err(Message::reset(remote_id));
         };
 
         match sock.state {
             State::Open {
                 remote_id: real_remote_id,
             } => {
-                tracing::trace!(
+                tracing::debug!(
                     %local_id,
                     %remote_id,
                     %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Err(InboundError::AlreadyEstablished {
-                    remote_id: real_remote_id,
-                })
+                Err(Message::reset(remote_id))
             }
             ref mut state @ State::Connecting => {
                 *state = State::Open { remote_id };
@@ -190,7 +224,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 local_id,
             },
             // Conn table is full, can't accept this stream.
-            None => ControlMessage::Nak { remote_id },
+            None => ControlMessage::Nak {
+                remote_id,
+                reason: Nak::ConnTableFull(CAPACITY),
+            },
         }
     }
 
@@ -378,12 +415,7 @@ impl fmt::Display for InboundError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoSocket => f.write_str("no socket exists for this ID"),
-            Self::AlreadyEstablished { remote_id } => write!(
-                f,
-                "cannot process ACK: a connection (remote ID {remote_id}) is already established"
-            ),
             Self::ChannelClosed => f.write_str("local channel has closed"),
-            Self::Deserialize(error) => write!(f, "failed to deserialize inbound message: {error}"),
         }
     }
 }
