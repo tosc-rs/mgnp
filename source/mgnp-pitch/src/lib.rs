@@ -1,14 +1,21 @@
 #![feature(async_fn_in_trait)]
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(any(feature = "alloc", test))]
+extern crate alloc;
+
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use futures::{FutureExt, Stream, StreamExt};
 use tricky_pipe::bidi::SerBiDi;
 
 mod conn_table;
+pub mod message;
 pub mod registry;
+pub use message::Message;
+use message::{ControlMessage, Nak};
 pub use registry::Registry;
+pub use tricky_pipe;
 
 pub trait Frame {
     fn as_bytes(&self) -> &[u8];
@@ -20,47 +27,19 @@ pub trait Frame {
 
 pub trait Wire {
     type Frame: Frame;
-    async fn send(&self, f: Message<'_>) -> Result<(), ()>;
-    async fn recv(&self) -> Result<Self::Frame, ()>;
+    async fn send(&mut self, f: Message<'_>) -> Result<(), ()>;
+    async fn recv(&mut self) -> Result<Self::Frame, ()>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Message<'data> {
-    Control(ControlMessage<'data>),
-    Data {
-        local_id: Id,
-        remote_id: Id,
-        data: &'data [u8],
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ControlMessage<'data> {
-    Ack {
-        local_id: Id,
-        remote_id: Id,
-    },
-    Nak {
-        remote_id: Id,
-        reason: Nak,
-    },
-    Connect {
-        local_id: Id,
-        identity: registry::Identity,
-        hello: &'data [u8],
-    },
-    Reset {
-        remote_id: Id,
-    },
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Nak {
-    ConnTableFull(usize),
-    NotFound,
-    Rejected(
-        // TODO(eliza): can we cram a serialized message into this...?
-    ),
+/// An outbound connect request.
+pub struct OutboundConnect<'data> {
+    /// The identity of the remote service to connect to.
+    identity: registry::Identity,
+    /// The "hello" message to send to the remote service.
+    hello: &'data [u8],
+    /// The local bidirectional channel to bind to the remote service.
+    channel: SerBiDi,
+    // TODO(eliza): add a oneshot for "connect success/connect failed"...
 }
 
 pub struct Interface<Fr, Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
@@ -74,19 +53,6 @@ where
     registry: R,
 }
 
-/// An outbound connect request.
-pub struct OutboundConnect<'data> {
-    /// The identity of the remote service to connect to.
-    pub identity: registry::Identity,
-    /// The "hello" message to send to the remote service.
-    pub hello: &'data [u8],
-    /// The local bidirectional channel to bind to the remote service.
-    pub channel: SerBiDi,
-
-    // TODO(eliza): add a oneshot for "connect success/connect failed"...
-    _p: (),
-}
-
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
 impl<Fr, Wi, R, const MAX_CONNS: usize> Interface<Fr, Wi, R, MAX_CONNS>
@@ -95,6 +61,7 @@ where
     Wi: Wire<Frame = Fr>,
     R: Registry,
 {
+    #[must_use]
     pub fn new(wire: Wi, registry: R) -> Self {
         Self {
             wire,
@@ -168,48 +135,15 @@ where
     }
 }
 
-impl Message<'_> {
-    pub(crate) fn reset(remote_id: Id) -> Self {
-        Self::Control(ControlMessage::Reset { remote_id })
-    }
+// === impl OutboundConnect ===
 
-    fn link_id(&self) -> LinkId {
-        match self {
-            Self::Control(msg) => msg.link_id(),
-            Self::Data {
-                local_id,
-                remote_id,
-                ..
-            } => LinkId {
-                local: Some(*local_id),
-                remote: Some(*remote_id),
-            },
-        }
-    }
-}
-
-impl ControlMessage<'_> {
-    fn link_id(&self) -> LinkId {
-        match *self {
-            Self::Ack {
-                local_id,
-                remote_id,
-            } => LinkId {
-                local: Some(local_id),
-                remote: Some(remote_id),
-            },
-            Self::Nak { remote_id, .. } => LinkId {
-                local: None,
-                remote: Some(remote_id),
-            },
-            Self::Connect { local_id, .. } => LinkId {
-                local: Some(local_id),
-                remote: None,
-            },
-            Self::Reset { remote_id } => LinkId {
-                remote: Some(remote_id),
-                local: None,
-            },
+impl<'data> OutboundConnect<'data> {
+    #[must_use]
+    pub fn new(identity: registry::Identity, hello: &'data [u8], channel: SerBiDi) -> Self {
+        Self {
+            identity,
+            hello,
+            channel,
         }
     }
 }

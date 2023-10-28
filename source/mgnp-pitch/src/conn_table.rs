@@ -67,7 +67,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Returns the next outbound frame.
     pub async fn next_outbound(&mut self) -> Message<'_> {
-        todo!()
+        todo!("eliza: figure out how to select over any bidi that's ready in a nice way...")
     }
 
     /// Process an inbound frame.
@@ -76,7 +76,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         registry: &impl registry::Registry,
         msg: Message<'_>,
     ) -> Option<Message<'_>> {
-        let _span = tracing::trace_span!("process_inbound", id = %msg.link_id()).entered();
+        let span = tracing::trace_span!("process_inbound", id = %msg.link_id());
+        let _enter = span.enter();
         match msg {
             Message::Data {
                 local_id,
@@ -292,6 +293,13 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         tracing::trace!(?local_id, self.len, "insert: added connection");
 
         Some(local_id)
+    }
+
+    fn iter_sockets(&self) -> impl Iterator<Item = &Socket> {
+        self.conns.0.iter().filter_map(|entry| match entry {
+            Entry::Occupied(sock) => Some(sock),
+            _ => None,
+        })
     }
 }
 
