@@ -3,10 +3,12 @@
 
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
-use futures::FutureExt;
+use futures::{FutureExt, Stream, StreamExt};
+use tricky_pipe::bidi::SerBiDi;
 
 mod conn_table;
 pub mod registry;
+pub use registry::Registry;
 
 pub trait Frame {
     fn as_bytes(&self) -> &[u8];
@@ -61,7 +63,7 @@ pub enum Nak {
     ),
 }
 
-pub struct Interface<Fr, Wi, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
+pub struct Interface<Fr, Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
 where
     Fr: Frame,
     // Remote wire type
@@ -69,57 +71,100 @@ where
 {
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
+    registry: R,
+}
+
+/// An outbound connect request.
+pub struct OutboundConnect<'data> {
+    /// The identity of the remote service to connect to.
+    pub identity: registry::Identity,
+    /// The "hello" message to send to the remote service.
+    pub hello: &'data [u8],
+    /// The local bidirectional channel to bind to the remote service.
+    pub channel: SerBiDi,
+
+    // TODO(eliza): add a oneshot for "connect success/connect failed"...
+    _p: (),
 }
 
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
-impl<Fr, Wi, const MAX_CONNS: usize> Interface<Fr, Wi, MAX_CONNS>
+impl<Fr, Wi, R, const MAX_CONNS: usize> Interface<Fr, Wi, R, MAX_CONNS>
 where
     Fr: Frame,
     Wi: Wire<Frame = Fr>,
+    R: Registry,
 {
-    pub fn new(wire: Wi) -> Self {
+    pub fn new(wire: Wi, registry: R) -> Self {
         Self {
             wire,
             conn_table: ConnTable::new(),
+            registry,
         }
     }
 
-    pub async fn handle_connection(
-        &mut self,
-        registry: &impl registry::Registry,
-    ) -> Result<(), ()> {
-        let Self { wire, conn_table } = self;
+    pub async fn run(&mut self, conns: impl Stream<Item = OutboundConnect<'_>>) -> Result<(), ()> {
+        futures::pin_mut!(conns);
         loop {
-            let frame = futures::select_biased! {
+            futures::select_biased! {
                 // inbound frame from the wire.
-                frame = wire.recv().fuse() => frame?,
+                frame = self.wire.recv().fuse() => self.process_inbound(frame?).await?,
                 // either a connection needs to send data, or a connection has
                 // closed locally.
-                frame = conn_table.next_outbound().fuse() => {
-                    wire.send(frame).await?;
-                    continue;
+                frame = self.conn_table.next_outbound().fuse() => {
+                    self.wire.send(frame).await?;
                 },
-                // OR handle local conn request (need to figure out API for this...)
-            };
 
-            let msg = match frame.decode() {
-                Ok(msg) => msg,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to decode inbound frame");
-                    continue;
+                // locally-initiated connect request
+                conn = conns.next().fuse() => {
+                    let Some(OutboundConnect { identity, hello, channel, .. }) = conn else {
+                        tracing::info!("connection stream has terminated");
+                        // TODO(eliza): should the run loop die here instead?
+                        continue;
+                    };
+
+                    tracing::debug!(?identity, "initiating local connection...");
+                    match self.conn_table.start_connecting(identity, hello, channel) {
+                        Some(frame) => {
+                            self.wire.send(Message::Control(frame)).await?;
+                            tracing::debug!("local connect sent!")
+                        }
+                        None => {
+                            tracing::info!("refusing connection; no space in conn table!")
+                            // TODO(eliza): tell the client that they can't have
+                            // what hey want...
+                        },
+                    }
+
                 }
             };
-            let id = msg.link_id();
-            if id == LinkId::INTERFACE {
-                todo!("eliza: handle interface frame");
-            } else {
-                // process the inbound message
-                if let Some(rsp) = conn_table.process_inbound(registry, msg).await {
-                    wire.send(rsp).await?;
-                }
-            }
         }
+    }
+
+    async fn process_inbound(&mut self, frame: Fr) -> Result<(), ()> {
+        let msg = match frame.decode() {
+            Ok(msg) => msg,
+            Err(error) => {
+                tracing::warn!(%error, "failed to decode inbound frame");
+                // return "Ok" here, even though there was an error, because we
+                // want the interface loop to keep running, instead of dying.
+                return Ok(());
+            }
+        };
+
+        let id = msg.link_id();
+        if id == LinkId::INTERFACE {
+            todo!("eliza: handle interface frame");
+            // return Ok(());
+        }
+
+        // process the inbound message, possibly generating a new outbound frame
+        // to send.
+        if let Some(rsp) = self.conn_table.process_inbound(&self.registry, msg).await {
+            self.wire.send(rsp).await?;
+        }
+
+        Ok(())
     }
 }
 

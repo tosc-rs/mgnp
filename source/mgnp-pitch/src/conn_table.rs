@@ -164,9 +164,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     #[must_use]
     pub fn start_connecting<'data>(
         &mut self,
-        bidi: SerBiDi,
         identity: registry::Identity,
         hello: &'data [u8],
+        bidi: SerBiDi,
     ) -> Option<ControlMessage<'data>> {
         let sock = Socket {
             state: State::Connecting,
