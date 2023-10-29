@@ -9,6 +9,7 @@ use core::{
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
     slice,
+    task::{self, Context, Poll},
 };
 use maitake_sync::{WaitCell, WaitQueue};
 use mnemos_bitslab::index::IndexAllocWord;
@@ -238,6 +239,30 @@ impl Core {
                 Err(TrySendError::Closed(())) => return Err(SendError(())),
                 Err(TrySendError::Full(())) => {
                     self.prod_wait.wait().await.map_err(|_| SendError(()))?
+                }
+            }
+        }
+    }
+
+    pub(super) fn poll_dequeue(&self, cx: &mut task::Context<'_>) -> Poll<Option<Reservation<'_>>> {
+        loop {
+            match self.try_dequeue() {
+                Ok(res) => return Poll::Ready(Some(res)),
+                Err(TryRecvError::Closed) => return Poll::Ready(None),
+                Err(TryRecvError::Empty) => {
+                    // we never close the rx waitcell, because the
+                    // rx is responsible for determining if the channel is
+                    // closed by the tx: there may be messages in the channel to
+                    // consume before the rx considers it properly closed.
+                    let _ = task::ready!(test_dbg!(self.cons_wait.poll_wait(cx)));
+                    // if the poll_wait returns ready, then another thread just
+                    // enqueued something. sticking a spin loop hint here tells
+                    // `loom` that we're waiting for that thread before we can
+                    // make progress. in real life, the `PAUSE` instruction or
+                    // similar may also help us actually see the other thread's
+                    // change...if it takes a single cycle of delay for it to
+                    // reflect? idk lol ¯\_(ツ)_/¯
+                    hint::spin_loop();
                 }
             }
         }
