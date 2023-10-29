@@ -17,9 +17,12 @@ extern crate alloc;
 use crate::loom::cell::{self, UnsafeCell};
 use core::{
     fmt,
+    future::Future,
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
+    pin::Pin,
     ptr,
+    task::{ready, Context, Poll},
 };
 use serde::{de::DeserializeOwned, Serialize};
 pub mod bidi;
@@ -134,6 +137,24 @@ pub struct DeserSender {
     vtable: &'static DeserVtable,
 }
 
+/// Future returned by [`Receiver::recv`].
+///
+/// See [the method documentation for `recv`](Receiver::recv) for details.
+#[must_use = "futures do nothing unless `.await`ed or `poll`ed"]
+#[derive(Debug)]
+pub struct Recv<'rx, T: 'static> {
+    rx: &'rx Receiver<T>,
+}
+
+/// Future returned by [`SerReceiver::recv`].
+///
+/// See [the method documentation for `recv`](SerReceiver::recv) for details.
+#[must_use = "futures do nothing unless `.await`ed or `poll`ed"]
+#[derive(Debug)]
+pub struct SerRecv<'rx> {
+    rx: &'rx SerReceiver,
+}
+
 /// A reference to a type-erased, serializable message received from a
 /// [`SerReceiver`].
 ///
@@ -237,15 +258,24 @@ impl<T> Receiver<T> {
             .map(|res| self.take_value(res))
     }
 
-    /// Receives the next message from the channel.
+    /// Receives the next message from the channel, returning a [`Recv`] [`Future`].
     ///
-    /// This method returns [`None`] if the channel has been closed (all
-    /// [`Sender`]s and [`DeserSender`]s have been dropped) *and* all messages
-    /// sent before the channel closed have been received.
+    /// This is equivalent to:
+    /// ```
+    /// # struct Receiver<T>(T);
+    /// # impl<T> Receiver<T> {
+    /// pub async fn recv(&self) -> Option<T>
+    /// # { None }
+    /// # }
+    /// ```
+    ///
+    /// The [`Future`] returned by this method outputs [`None`] if the channel
+    /// has been closed (all [`Sender`]s and [`DeserSender`]s have been dropped)
+    /// *and* all messages sent before the channel closed have been received.
     ///
     /// If the channel has not yet been closed, but there are no messages
-    /// currently available in the queue, this method yields and waits for a new
-    /// message to be sent, or for the channel to close.
+    /// currently available in the queue, the [`Future`] yields and waits for a
+    /// new message to be sent, or for the channel to close.
     ///
     /// To return an error rather than waiting, use the
     /// [`try_recv`](Self::try_recv) method, instead.
@@ -256,12 +286,19 @@ impl<T> Receiver<T> {
     /// other mechanism for waiting for the first of multiple futures to
     /// complete, and another future completes first, it is guaranteed that no
     /// message will be received from the channel.
-    pub async fn recv(&self) -> Option<T> {
+    #[inline]
+    pub fn recv(&self) -> Recv<'_, T> {
+        Recv { rx: self }
+    }
+
+    /// Polls to receive a message from the channel, returning [`Poll::Ready`]
+    /// if a message has been recieved, or [`Poll::Pending`] if there are
+    /// currently no messages in the channel.
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         self.pipe
             .core()
-            .dequeue()
-            .await
-            .map(|res| self.take_value(res))
+            .poll_dequeue(cx)
+            .map(|res| Some(self.take_value(res?)))
     }
 
     #[inline(always)]
@@ -379,17 +416,27 @@ impl SerReceiver {
             vtable: self.vtable,
         })
     }
-
     /// Receives the next message from the channel, returning a [`SerRecvRef`]
     /// that can be used to serialize that message as bytes.
     ///
-    /// This method returns [`None`] if the channel has been closed (all
-    /// [`Sender`]s and [`DeserSender`]s have been dropped) *and* all messages
-    /// sent before the channel closed have been received.
+    /// This is equivalent to:
+    /// ```
+    /// # struct SerRecvRef<'rx>(&'rx ());
+    /// # struct SerReceiver;
+    /// # impl SerReceiver {
+    /// pub async fn recv(&self) -> Option<SerRecvRef<'_>>
+    /// # { None }
+    /// # }
+    /// ```
     ///
-    /// If the channel has not yet been closed, but there are no messages
-    /// currently available in the queue, this method yields and waits for a new
-    /// message to be sent, or for the channel to close.
+    /// This method returns a [`SerRecv`] [`Future`] that outputs an
+    /// [`Option`]`<`[`SerRecvRef`]`>`. The future will complete with [`None`]
+    /// if the channel has been closed (all [`Sender`]s and [`DeserSender`]s
+    /// have been dropped) *and* all messages sent before the channel closed
+    /// have been received. If the channel has not yet been closed, but there
+    /// are no messages currently available in the queue, the [`SerRecv`] future
+    /// yields and waits for a new message to be sent, or for the channel to
+    /// close.
     ///
     /// To return an error rather than waiting, use the
     /// [`try_recv`](Self::try_recv) method, instead.
@@ -414,11 +461,20 @@ impl SerReceiver {
     /// message will be received from the channel.
     ///
     /// [`Vec`]: alloc::vec::Vec
-    pub async fn recv(&self) -> Option<SerRecvRef<'_>> {
-        self.pipe.core().dequeue().await.map(|res| SerRecvRef {
-            res,
-            elems: self.pipe.elems(),
-            vtable: self.vtable,
+    pub fn recv(&self) -> SerRecv<'_> {
+        SerRecv { rx: self }
+    }
+
+    /// Polls to receive a serialized message from the channel, returning
+    /// [`Poll::Ready`] if a message has been recieved, or [`Poll::Pending`] if
+    /// there are currently no messages in the channel.
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<SerRecvRef<'_>>> {
+        self.pipe.core().poll_dequeue(cx).map(|res| {
+            Some(SerRecvRef {
+                res: res?,
+                elems: self.pipe.elems(),
+                vtable: self.vtable,
+            })
         })
     }
 
@@ -490,6 +546,28 @@ impl Drop for SerReceiver {
 impl fmt::Debug for SerReceiver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("SerReceiver"))
+    }
+}
+
+// === impl Recv ===
+
+impl<T: 'static> Future for Recv<'_, T> {
+    type Output = Option<T>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.rx.poll_recv(cx)
+    }
+}
+
+// === impl SerRecv ===
+
+impl<'rx> Future for SerRecv<'rx> {
+    type Output = Option<SerRecvRef<'rx>>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.rx.poll_recv(cx)
     }
 }
 
@@ -1034,6 +1112,7 @@ impl<T: 'static> fmt::Debug for Sender<T> {
 }
 
 // === impl Permit ===
+
 impl<T> Permit<'_, T> {
     /// Write the given value into the [Permit], and send it
     ///
