@@ -377,6 +377,24 @@ impl<T> fmt::Debug for Receiver<T> {
     }
 }
 
+impl<T> futures::Stream for &'_ Receiver<T> {
+    type Item = T;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.as_ref().get_ref().poll_recv(cx)
+    }
+}
+
+impl<T> futures::Stream for Receiver<T> {
+    type Item = T;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.as_ref().get_ref().poll_recv(cx)
+    }
+}
+
 // === impl SerReceiver ===
 
 impl SerReceiver {
@@ -546,6 +564,15 @@ impl Drop for SerReceiver {
 impl fmt::Debug for SerReceiver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("SerReceiver"))
+    }
+}
+
+impl<'rx> futures::Stream for &'rx SerReceiver {
+    type Item = SerRecvRef<'rx>;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.as_ref().get_ref().poll_recv(cx)
     }
 }
 
