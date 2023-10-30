@@ -22,7 +22,7 @@ use core::{
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 use serde::{de::DeserializeOwned, Serialize};
 pub mod bidi;
