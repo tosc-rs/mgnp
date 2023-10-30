@@ -1,5 +1,12 @@
-use crate::{registry, ControlMessage, Message, Nak};
-use core::{fmt, mem, num::NonZeroU16};
+use crate::{
+    message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
+    registry,
+};
+use core::{
+    fmt, mem,
+    num::NonZeroU16,
+    task::{Context, Poll},
+};
 use tricky_pipe::{bidi::SerBiDi, SerPermit};
 
 #[derive(
@@ -19,6 +26,7 @@ pub struct ConnTable<const CAPACITY: usize> {
     conns: Entries<CAPACITY>,
     next_id: Id,
     len: usize,
+    dead_index: Option<Id>,
 }
 
 #[derive(Debug)]
@@ -62,24 +70,66 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             // ID 0 is the link-control channel
             next_id: Id(unsafe { NonZeroU16::new_unchecked(1) }),
             len: 0,
+            dead_index: None,
         }
     }
 
     /// Returns the next outbound frame.
-    pub async fn next_outbound(&mut self) -> Message<'_> {
-        todo!("eliza: figure out how to select over any bidi that's ready in a nice way...")
+    pub async fn next_outbound(&mut self) -> OutboundMessage<'_> {
+        futures::future::poll_fn(|cx| {
+            for (idx, conn) in self.conns.0.iter().enumerate() {
+                if let Entry::Occupied(Socket {
+                    state: State::Open { remote_id },
+                    bidi,
+                }) = conn
+                {
+                    match bidi.rx().poll_recv(cx) {
+                        Poll::Ready(Some(data)) => {
+                            // data frame ready!
+                            let local_id = Id::from_index(idx);
+                            return Poll::Ready(OutboundMessage::Data {
+                                local_id,
+                                remote_id: *remote_id,
+                                data,
+                            });
+                        }
+                        Poll::Ready(None) => {
+                            // the local stream has closed, mark it as dead and
+                            // reset the remote.
+                            self.dead_index = Some(Id::from_index(idx));
+                            return Poll::Ready(OutboundMessage::reset(*remote_id));
+                        }
+                        Poll::Pending => {}
+                    }
+                }
+            }
+
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub fn cleanup_dead(&mut self) {
+        // receiving a data frame from the conn table borrows it, so we must
+        // remove the dead index from the *previous* next_outbound call before
+        // we borrow the whole conn table to poll it. yes, this is confusing and
+        // weird...
+        if let Some(local_id) = self.dead_index.take() {
+            tracing::debug!(id.local = %local_id, "removing closed stream from dead index");
+            self.close(local_id);
+        }
     }
 
     /// Process an inbound frame.
     pub async fn process_inbound(
         &mut self,
-        registry: &impl registry::Registry,
-        msg: Message<'_>,
-    ) -> Option<Message<'_>> {
+        registry: &'_ impl registry::Registry,
+        msg: InboundMessage<'_>,
+    ) -> Option<OutboundMessage<'_>> {
         let span = tracing::trace_span!("process_inbound", id = %msg.link_id());
         let _enter = span.enter();
         match msg {
-            Message::Data {
+            InboundMessage::Data {
                 local_id,
                 remote_id,
                 data,
@@ -94,7 +144,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 let id = remote_id;
                 let Some(socket) = self.conns.get_mut(id) else {
                     tracing::debug!("process_inbound: no socket for data frame, resetting...");
-                    return Some(Message::reset(local_id));
+                    return Some(OutboundMessage::reset(local_id));
                 };
 
                 // try to reserve send capacity on this socket.
@@ -115,9 +165,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // channel has closed locally.
                 tracing::trace!("process_inbound: local error: {error}; resetting...");
                 self.close(id);
-                Some(Message::reset(local_id))
+                Some(OutboundMessage::reset(local_id))
             }
-            Message::Control(ControlMessage::Ack {
+            InboundMessage::Control(ControlMessage::Ack {
                 local_id,
                 remote_id,
             }) => {
@@ -127,20 +177,20 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     Err(msg) => Some(msg),
                 }
             }
-            Message::Control(ControlMessage::Nak { remote_id, reason }) => {
+            InboundMessage::Control(ControlMessage::Nak { remote_id, reason }) => {
                 tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
                 // TODO(eliza): send error to the initiator
                 self.close(remote_id);
                 None
             }
-            Message::Control(ControlMessage::Reset { remote_id }) => {
+            InboundMessage::Control(ControlMessage::Reset { remote_id }) => {
                 tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
                 let _closed = self.close(remote_id);
 
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
                 None
             }
-            Message::Control(ControlMessage::Connect {
+            InboundMessage::Control(ControlMessage::Connect {
                 local_id,
                 identity,
                 hello,
@@ -149,9 +199,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 match registry.connect(identity, hello).await {
                     Ok(bidi) => {
                         let rsp = self.accept(local_id, bidi);
-                        Some(Message::Control(rsp))
+                        Some(OutboundMessage::Control(rsp))
                     }
-                    Err(reason) => Some(Message::Control(ControlMessage::Nak {
+                    Err(reason) => Some(OutboundMessage::Control(ControlMessage::Nak {
                         remote_id: local_id,
                         reason,
                     })),
@@ -163,8 +213,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub fn start_connecting<'data>(
-        &mut self,
+    pub fn start_connecting<'conns, 'data>(
+        &'conns mut self,
         identity: registry::Identity,
         hello: &'data [u8],
         bidi: SerBiDi,
@@ -183,10 +233,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     /// Process an ack for a locally-initiated connecting socket with `local_id`.
-    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), Message<'_>> {
+    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), OutboundMessage<'_>> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
             tracing::debug!(id.local = %local_id, id.remote = %remote_id, "process_ack: no such socket");
-            return Err(Message::reset(remote_id));
+            return Err(OutboundMessage::reset(remote_id));
         };
 
         match sock.state {
@@ -199,7 +249,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Err(Message::reset(remote_id))
+                Err(OutboundMessage::reset(remote_id))
             }
             ref mut state @ State::Connecting => {
                 *state = State::Open { remote_id };
@@ -254,7 +304,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
-    pub fn bidi(&self, local_id: Id) -> Option<&SerBiDi> {
+    fn bidi(&self, local_id: Id) -> Option<&SerBiDi> {
         self.conns.get(local_id).and_then(Entry::bidi)
     }
 
@@ -306,6 +356,27 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 // === impl Id ===
 
 impl Id {
+    #[cfg(not(debug_assertions))]
+    #[must_use]
+    fn from_index(idx: usize) -> Self {
+        let id = (idx as u16).saturating_add(1);
+        Self(unsafe { NonZeroU16::new_unchecked(id) })
+    }
+
+    #[cfg(debug_assertions)]
+    #[must_use]
+    fn from_index(idx: usize) -> Self {
+        let id = match u16::try_from(idx) {
+            Ok(x) => x,
+            Err(_) => {
+                unreachable!("conn table indices may not exceed u16::MAX; tried to convert {idx}")
+            }
+        };
+        let id = NonZeroU16::new(id.saturating_add(1))
+            .expect("we just added 1 to the index, so it must be greater than 0");
+        Self(id)
+    }
+
     #[inline]
     #[must_use]
     fn to_index(self) -> usize {

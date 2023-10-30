@@ -12,22 +12,22 @@ use tricky_pipe::bidi::SerBiDi;
 mod conn_table;
 pub mod message;
 pub mod registry;
-pub use message::Message;
-use message::{ControlMessage, Nak};
+use message::Nak;
+pub use message::{InboundMessage, OutboundMessage};
 pub use registry::Registry;
 pub use tricky_pipe;
 
 pub trait Frame {
     fn as_bytes(&self) -> &[u8];
 
-    fn decode(&self) -> postcard::Result<Message<'_>> {
+    fn decode(&self) -> postcard::Result<InboundMessage<'_>> {
         postcard::from_bytes(self.as_bytes())
     }
 }
 
 pub trait Wire {
     type Frame: Frame;
-    async fn send(&mut self, f: Message<'_>) -> Result<(), ()>;
+    async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), ()>;
     async fn recv(&mut self) -> Result<Self::Frame, ()>;
 }
 
@@ -73,9 +73,11 @@ where
     pub async fn run(&mut self, conns: impl Stream<Item = OutboundConnect<'_>>) -> Result<(), ()> {
         futures::pin_mut!(conns);
         loop {
+            let mut in_frame = None;
+            let mut out_conn = None;
             futures::select_biased! {
                 // inbound frame from the wire.
-                frame = self.wire.recv().fuse() => self.process_inbound(frame?).await?,
+                frame = self.wire.recv().fuse() => in_frame = Some(frame?),
                 // either a connection needs to send data, or a connection has
                 // closed locally.
                 frame = self.conn_table.next_outbound().fuse() => {
@@ -84,25 +86,38 @@ where
 
                 // locally-initiated connect request
                 conn = conns.next().fuse() => {
-                    let Some(OutboundConnect { identity, hello, channel, .. }) = conn else {
+                    let Some(conn) = conn else {
                         tracing::info!("connection stream has terminated");
                         // TODO(eliza): should the run loop die here instead?
                         continue;
                     };
 
-                    tracing::debug!(?identity, "initiating local connection...");
-                    match self.conn_table.start_connecting(identity, hello, channel) {
-                        Some(frame) => {
-                            self.wire.send(Message::Control(frame)).await?;
-                            tracing::debug!("local connect sent!")
-                        }
-                        None => {
-                            tracing::info!("refusing connection; no space in conn table!")
-                            // TODO(eliza): tell the client that they can't have
-                            // what hey want...
-                        },
-                    }
+                    out_conn = Some(conn);
+                }
+            };
 
+            if let Some(frame) = in_frame {
+                self.process_inbound(frame).await?;
+            }
+
+            if let Some(OutboundConnect {
+                identity,
+                hello,
+                channel,
+                ..
+            }) = out_conn
+            {
+                tracing::debug!(?identity, "initiating local connection...");
+                match self.conn_table.start_connecting(identity, hello, channel) {
+                    Some(frame) => {
+                        self.wire.send(OutboundMessage::Control(frame)).await?;
+                        tracing::debug!("local connect sent!")
+                    }
+                    None => {
+                        tracing::info!("refusing connection; no space in conn table!")
+                        // TODO(eliza): tell the client that they can't have
+                        // what hey want...
+                    }
                 }
             };
         }

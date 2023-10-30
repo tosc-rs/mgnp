@@ -1,11 +1,12 @@
 use mgnp_pitch::{
-    message::Nak,
+    message::{InboundMessage, Nak, OutboundMessage},
     registry,
     tricky_pipe::bidi::{BiDi, SerBiDi},
-    Frame, Message, Registry, Wire,
+    Frame, Registry, Wire,
 };
 use std::{
     collections::HashMap,
+    fmt,
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -168,11 +169,35 @@ impl TestWire {
 impl Wire for TestWire {
     type Frame = TestFrame;
     async fn recv(&mut self) -> Result<Self::Frame, ()> {
-        self.rx.recv().await.ok_or(()).map(TestFrame)
+        let frame = self.rx.recv().await;
+        tracing::info!(frame = ?frame.as_ref().map(HexSlice::new), "RECV");
+        frame.ok_or(()).map(TestFrame)
     }
 
-    async fn send(&mut self, msg: Message<'_>) -> Result<(), ()> {
-        let frame = postcard::to_allocvec(&msg).map_err(|_| ())?;
+    async fn send(&mut self, msg: OutboundMessage<'_>) -> Result<(), ()> {
+        // TODO(eliza): this is awkward, the trickypipe SerRecvRef API needs to
+        // suck less so we don't need to do it like this...
+        tracing::info!(?msg, "sending message");
+        let frame = match msg {
+            OutboundMessage::Control(ctrl) => {
+                postcard::to_allocvec(&InboundMessage::Control(ctrl)).unwrap()
+            }
+            OutboundMessage::Data {
+                local_id,
+                remote_id,
+                data,
+            } => {
+                let data = data.to_vec().unwrap();
+                postcard::to_allocvec(&InboundMessage::Data {
+                    local_id,
+                    remote_id,
+                    data: &data[..],
+                })
+                .unwrap()
+            }
+        };
+
+        tracing::info!(frame = ?HexSlice::new(&frame), "SEND");
         self.tx.send(frame).await.map_err(|_| ())
     }
 }
@@ -182,5 +207,32 @@ impl Wire for TestWire {
 impl Frame for TestFrame {
     fn as_bytes(&self) -> &[u8] {
         self.0.as_ref()
+    }
+}
+
+struct HexSlice<'a>(&'a [u8]);
+
+impl<'a> HexSlice<'a> {
+    fn new<T>(data: &'a T) -> HexSlice<'a>
+    where
+        T: ?Sized + AsRef<[u8]> + 'a,
+    {
+        HexSlice(data.as_ref())
+    }
+}
+
+impl fmt::Debug for HexSlice<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[")?;
+
+        let mut bytes = self.0.iter();
+        if let Some(byte) = bytes.next() {
+            write!(f, "{byte:02x}")?;
+            for byte in bytes {
+                write!(f, " {byte:02x}")?;
+            }
+        }
+
+        f.write_str("]")
     }
 }

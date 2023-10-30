@@ -1,12 +1,22 @@
 use crate::{registry::Identity, Id, LinkId};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub enum Message<'data> {
+pub enum InboundMessage<'data> {
     Control(ControlMessage<'data>),
     Data {
         local_id: Id,
         remote_id: Id,
         data: &'data [u8],
+    },
+}
+
+#[derive(Debug)]
+pub enum OutboundMessage<'data> {
+    Control(ControlMessage<'data>),
+    Data {
+        local_id: Id,
+        remote_id: Id,
+        data: tricky_pipe::SerRecvRef<'data>,
     },
 }
 
@@ -39,11 +49,7 @@ pub enum Nak {
     ),
 }
 
-impl Message<'_> {
-    pub(crate) fn reset(remote_id: Id) -> Self {
-        Self::Control(ControlMessage::Reset { remote_id })
-    }
-
+impl InboundMessage<'_> {
     pub(crate) fn link_id(&self) -> LinkId {
         match self {
             Self::Control(msg) => msg.link_id(),
@@ -56,6 +62,12 @@ impl Message<'_> {
                 remote: Some(*remote_id),
             },
         }
+    }
+}
+
+impl OutboundMessage<'_> {
+    pub(crate) fn reset(remote_id: Id) -> Self {
+        Self::Control(ControlMessage::Reset { remote_id })
     }
 }
 
