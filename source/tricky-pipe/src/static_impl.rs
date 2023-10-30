@@ -90,7 +90,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
 
 impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
 where
-    T: Serialize + 'static,
+    T: Serialize + Send + 'static,
 {
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
@@ -118,7 +118,7 @@ where
 
 impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
 where
-    T: DeserializeOwned + 'static,
+    T: DeserializeOwned + Send + 'static,
 {
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.

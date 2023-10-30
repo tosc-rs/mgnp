@@ -34,6 +34,77 @@ pub(crate) struct UnSerStruct {
     pub(crate) d: String,
 }
 
+mod trait_impls {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    fn assert_unpin<T: Unpin>() {}
+
+    #[test]
+    fn receiver() {
+        assert_send::<Receiver<UnSerStruct>>();
+        assert_sync::<Receiver<UnSerStruct>>();
+        assert_unpin::<Receiver<UnSerStruct>>();
+    }
+
+    #[test]
+    fn sender() {
+        assert_send::<Sender<UnSerStruct>>();
+        assert_sync::<Sender<UnSerStruct>>();
+        assert_unpin::<Sender<UnSerStruct>>();
+    }
+
+    #[test]
+    fn ser_receiver() {
+        assert_send::<SerReceiver>();
+        assert_sync::<SerReceiver>();
+        assert_unpin::<SerReceiver>();
+    }
+
+    #[test]
+    fn deser_sender() {
+        assert_send::<DeserSender>();
+        assert_sync::<DeserSender>();
+        assert_unpin::<DeserSender>();
+    }
+
+    #[test]
+    fn recv_future() {
+        assert_send::<Recv<'_, UnSerStruct>>();
+        assert_sync::<Recv<'_, UnSerStruct>>();
+        assert_unpin::<Recv<'_, UnSerStruct>>();
+    }
+
+    #[test]
+    fn ser_recv_future() {
+        assert_send::<SerRecv<'_>>();
+        assert_sync::<SerRecv<'_>>();
+        assert_unpin::<SerRecv<'_>>();
+    }
+
+    #[test]
+    fn ser_recv_ref() {
+        assert_send::<SerRecvRef<'_>>();
+        assert_sync::<SerRecvRef<'_>>();
+        assert_unpin::<SerRecvRef<'_>>();
+    }
+
+    #[test]
+    fn permit() {
+        assert_send::<Permit<'_, UnSerStruct>>();
+        assert_sync::<Permit<'_, UnSerStruct>>();
+        assert_unpin::<Permit<'_, UnSerStruct>>();
+    }
+
+    #[test]
+    fn ser_permit() {
+        assert_send::<SerPermit<'_>>();
+        assert_sync::<SerPermit<'_>>();
+        assert_unpin::<SerPermit<'_>>();
+    }
+}
+
 mod single_threaded {
     use super::*;
 

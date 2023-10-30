@@ -643,6 +643,15 @@ impl fmt::Debug for SerRecvRef<'_> {
     }
 }
 
+// Safety: this is safe, because a `SerRecvRef` can only be constructed by a
+// `SerReceiver`, and `SerReceiver`s may only be constructed for a pipe whose
+// messages are `Send`.
+unsafe impl Send for SerRecvRef<'_> {}
+// Safety: this is safe, because a `SerRecvRef` can only be constructed by a
+// `SerReceiver`, and `SerReceiver`s may only be constructed for a pipe whose
+// messages are `Send`.
+unsafe impl Sync for SerRecvRef<'_> {}
+
 // === impl DeserSender ===
 
 impl DeserSender {
@@ -905,6 +914,15 @@ impl SerPermit<'_> {
         Ok(())
     }
 }
+
+// Safety: this is safe, because a `SerPermit` can only be constructed by a
+// `SerSender`, and `SerSender`s may only be constructed for a pipe whose
+// messages are `Send`.
+unsafe impl Send for SerPermit<'_> {}
+// Safety: this is safe, because a `SerPermit` can only be constructed by a
+// `SerSender`, and `SerSender`s may only be constructed for a pipe whose
+// messages are `Send`.
+unsafe impl Sync for SerPermit<'_> {}
 
 // === impl Sender ===
 
@@ -1198,5 +1216,13 @@ impl<T> DerefMut for Permit<'_, T> {
         unsafe { &mut *self.cell.deref() }
     }
 }
+
+// Safety: a `Permit` allows referencing a `T`, so it's morally equivalent to a
+// reference: a `Permit` is `Send` if `T` is `Send + Sync`.
+unsafe impl<T: Send + Sync> Send for Permit<'_, T> {}
+
+// Safety: a `Permit` allows referencing a `T`, so it's morally equivalent to a
+// reference: a `Permit` is `Sync` if `T` is `Sync`.
+unsafe impl<T: Sync> Sync for Permit<'_, T> {}
 
 pub(crate) mod loom;
