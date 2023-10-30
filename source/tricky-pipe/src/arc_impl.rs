@@ -99,7 +99,10 @@ impl<T: 'static> TrickyPipe<T> {
     }
 }
 
-impl<T: Serialize + 'static> TrickyPipe<T> {
+impl<T> TrickyPipe<T>
+where
+    T: Serialize + Send + 'static,
+{
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
     ///
@@ -124,7 +127,10 @@ impl<T: Serialize + 'static> TrickyPipe<T> {
     };
 }
 
-impl<T: DeserializeOwned + 'static> TrickyPipe<T> {
+impl<T> TrickyPipe<T>
+where
+    T: DeserializeOwned + Send + 'static,
+{
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///

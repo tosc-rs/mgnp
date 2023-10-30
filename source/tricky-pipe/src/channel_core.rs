@@ -562,6 +562,11 @@ impl Drop for ErasedPipe {
     }
 }
 
+// Safety: a pipe's element type must be `Send` in order to be erased.
+unsafe impl Send for ErasedPipe {}
+// Safety: a pipe's element type must be `Send` in order to be erased.
+unsafe impl Sync for ErasedPipe {}
+
 // === impl TypedPipe ===
 
 impl<T: 'static> TypedPipe<T> {
