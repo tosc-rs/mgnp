@@ -38,6 +38,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
         get_elems: Self::get_elems,
         clone: Self::erased_clone,
         drop: Self::erased_drop,
+        type_name: core::any::type_name::<T>,
     };
 
     fn erased(&'static self) -> ErasedPipe {

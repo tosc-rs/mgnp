@@ -22,6 +22,7 @@ use core::{
     ptr,
 };
 use serde::{de::DeserializeOwned, Serialize};
+pub mod bidi;
 
 #[cfg(not(test))]
 macro_rules! test_dbg {
@@ -36,7 +37,7 @@ macro_rules! test_dbg {
         match $x {
             x => {
                 const EXPR: &str = stringify!($x);
-                tracing::event!(tracing::Level::DEBUG, { EXPR } = ?x);
+                tracing::event!(tracing::Level::DEBUG, { EXPR } = ?format_args!("{x:#?}"));
                 x
             }
         }
@@ -333,6 +334,12 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pipe.fmt_into(&mut f.debug_struct("Receiver"))
+    }
+}
+
 // === impl SerReceiver ===
 
 impl SerReceiver {
@@ -477,6 +484,12 @@ impl SerReceiver {
 impl Drop for SerReceiver {
     fn drop(&mut self) {
         self.pipe.core().close_rx();
+    }
+}
+
+impl fmt::Debug for SerReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pipe.fmt_into(&mut f.debug_struct("SerReceiver"))
     }
 }
 
@@ -751,6 +764,11 @@ impl Drop for DeserSender {
     }
 }
 
+impl fmt::Debug for DeserSender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pipe.fmt_into(&mut f.debug_struct("DeserSender"))
+    }
+}
 // === impl SerPermit ===
 
 impl SerPermit<'_> {
@@ -782,6 +800,7 @@ impl SerPermit<'_> {
         Ok(())
     }
 }
+
 // === impl Sender ===
 
 impl<T> Sender<T> {
@@ -1008,6 +1027,13 @@ impl<T: 'static> Drop for Sender<T> {
     }
 }
 
+impl<T: 'static> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pipe.fmt_into(&mut f.debug_struct("Sender"))
+    }
+}
+
+// === impl Permit ===
 impl<T> Permit<'_, T> {
     /// Write the given value into the [Permit], and send it
     ///

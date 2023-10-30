@@ -41,8 +41,8 @@ mod single_threaded {
     fn normal_smoke() {
         loom::model(|| {
             let chan = TrickyPipe::<UnSerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.receiver().unwrap());
             tx.try_reserve().unwrap().send(UnSerStruct {
                 a: 240,
                 b: -6_000,
@@ -100,8 +100,8 @@ mod single_threaded {
     fn normal_closed_rx() {
         loom::model(|| {
             let chan = TrickyPipe::<UnSerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.receiver().unwrap());
             drop(rx);
             assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
         });
@@ -111,8 +111,8 @@ mod single_threaded {
     fn normal_closed_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<UnSerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.receiver().unwrap());
             drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
@@ -123,9 +123,9 @@ mod single_threaded {
     fn normal_closed_cloned_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<UnSerStruct>::new(4);
-            let tx1 = chan.sender();
-            let tx2 = tx1.clone();
-            let rx = chan.receiver().unwrap();
+            let tx1 = test_dbg!(chan.sender());
+            let tx2 = test_dbg!(tx1.clone());
+            let rx = test_dbg!(chan.receiver().unwrap());
             drop(chan);
             drop(tx1);
             drop(tx2);
@@ -137,8 +137,8 @@ mod single_threaded {
     fn ser_smoke() {
         loom::model(|| {
             let chan = TrickyPipe::<SerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.ser_receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             tx.try_reserve().unwrap().send(SerStruct {
                 a: 240,
                 b: -6_000,
@@ -183,8 +183,8 @@ mod single_threaded {
     fn ser_closed_rx() {
         loom::model(|| {
             let chan = TrickyPipe::<SerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.ser_receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(rx);
             assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
         });
@@ -194,8 +194,8 @@ mod single_threaded {
     fn ser_closed_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<SerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.ser_receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -208,7 +208,7 @@ mod single_threaded {
             let chan = TrickyPipe::<SerStruct>::new(4);
             let tx1 = chan.sender();
             let tx2 = tx1.clone();
-            let rx = chan.ser_receiver().unwrap();
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(chan);
             drop(tx1);
             drop(tx2);
@@ -220,8 +220,8 @@ mod single_threaded {
     fn ser_ref_smoke() {
         loom::model(|| {
             let chan = TrickyPipe::<SerStruct>::new(4);
-            let tx = chan.sender();
-            let rx = chan.ser_receiver().unwrap();
+            let tx = test_dbg!(chan.sender());
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             tx.try_reserve().unwrap().send(SerStruct {
                 a: 240,
                 b: -6_000,
@@ -266,8 +266,8 @@ mod single_threaded {
     fn deser_smoke() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.deser_sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.deser_sender());
+            let rx = test_dbg!(chan.receiver()).unwrap();
             tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111])
                 .unwrap();
 
@@ -313,8 +313,8 @@ mod single_threaded {
     fn deser_closed_rx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.deser_sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.deser_sender());
+            let rx = test_dbg!(chan.receiver()).unwrap();
             drop(chan);
             drop(rx);
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
@@ -329,8 +329,8 @@ mod single_threaded {
     fn deser_closed_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx = chan.deser_sender();
-            let rx = chan.receiver().unwrap();
+            let tx = test_dbg!(chan.deser_sender());
+            let rx = test_dbg!(chan.receiver()).unwrap();
             drop(chan);
             drop(tx);
             assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
@@ -341,9 +341,9 @@ mod single_threaded {
     fn deser_closed_cloned_tx() {
         loom::model(|| {
             let chan = TrickyPipe::<DeStruct>::new(4);
-            let tx1 = chan.deser_sender();
+            let tx1 = test_dbg!(chan.deser_sender());
             let tx2 = tx1.clone();
-            let rx = chan.receiver().unwrap();
+            let rx = test_dbg!(chan.receiver()).unwrap();
             drop(chan);
             drop(tx1);
             drop(tx2);
@@ -358,8 +358,8 @@ mod single_threaded {
         // it works anyway i guess...
         loom::model(|| {
             let chan = TrickyPipe::<SerDeStruct>::new(4);
-            let tx = chan.deser_sender();
-            let rx = chan.ser_receiver().unwrap();
+            let tx = test_dbg!(chan.deser_sender());
+            let rx = test_dbg!(chan.ser_receiver()).unwrap();
             const MSG_ONE: &[u8] = &[240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111];
             const MSG_TWO: &[u8] = &[20, 255, 124, 192, 154, 12, 6, 103, 114, 101, 101, 116, 115];
             const MSG_THREE: &[u8] = &[100, 207, 15, 224, 167, 18, 5, 111, 104, 32, 109, 121];
@@ -388,8 +388,8 @@ fn elements_dropped() {
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(4);
 
-        let rx = chan.receiver().expect("can't get rx");
-        let tx = chan.sender();
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx = test_dbg!(chan.sender());
         let thread = thread::spawn(move || {
             tx.try_reserve()
                 .expect("reserve 1")
@@ -420,8 +420,8 @@ fn spsc_try_send_in_capacity() {
     loom::model(|| {
         let (rx, tx) = {
             let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(SENDS as u8);
-            let rx = chan.receiver().expect("can't get rx");
-            let tx = chan.sender();
+            let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+            let tx = test_dbg!(chan.sender());
             (rx, tx)
         };
         let thread = thread::spawn(move || {
@@ -452,8 +452,8 @@ fn spsc_send() {
     loom::model(|| {
         let (rx, tx) = {
             let chan = TrickyPipe::<loom::alloc::Track<usize>>::new((SENDS / 2) as u8);
-            let rx = chan.receiver().expect("can't get rx");
-            let tx = chan.sender();
+            let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+            let tx = test_dbg!(chan.sender());
             (rx, tx)
         };
 
@@ -483,7 +483,7 @@ fn mpsc_send() {
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
 
-        let rx = chan.receiver().expect("can't get rx");
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
         let tx1 = chan.sender();
         let tx2 = chan.sender();
         // drop the channel now so that the channel can be tx-closed.

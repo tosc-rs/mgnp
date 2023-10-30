@@ -107,6 +107,7 @@ pub(super) struct CoreVtable {
     pub(super) get_elems: unsafe fn(*const ()) -> ErasedSlice,
     pub(super) clone: unsafe fn(*const ()),
     pub(super) drop: unsafe fn(*const ()),
+    pub(super) type_name: fn() -> &'static str,
 }
 
 pub(super) struct SerVtable {
@@ -500,6 +501,8 @@ impl ErasedSlice {
     }
 }
 
+// == impl ErasedPipe ===
+
 impl ErasedPipe {
     pub(super) unsafe fn new(ptr: *const (), vtable: &'static CoreVtable) -> Self {
         Self { ptr, vtable }
@@ -522,6 +525,16 @@ impl ErasedPipe {
 
     pub(super) fn elems(&self) -> ErasedSlice {
         unsafe { (self.vtable.get_elems)(self.ptr) }
+    }
+
+    pub(super) fn fmt_into(&self, f: &mut fmt::DebugStruct<'_, '_>) -> fmt::Result {
+        let Self { ptr, vtable } = self;
+        f.field("ptr", &format_args!("{ptr:#p}"))
+            .field("vtable", &format_args!("{vtable:#p}"))
+            .field("type", &format_args!("{}", (vtable.type_name)()))
+            .field("capacity", &self.core().capacity)
+            .field("len", &self.core().len())
+            .finish()
     }
 }
 
@@ -551,6 +564,10 @@ impl<T: 'static> TypedPipe<T> {
     pub(super) fn elems(&self) -> &[UnsafeCell<MaybeUninit<T>>] {
         unsafe { self.pipe.elems().unerase::<UnsafeCell<MaybeUninit<T>>>() }
     }
+
+    pub(super) fn fmt_into(&self, f: &mut fmt::DebugStruct<'_, '_>) -> fmt::Result {
+        self.pipe.fmt_into(f)
+    }
 }
 
 impl<T: 'static> Clone for TypedPipe<T> {
@@ -564,6 +581,8 @@ impl<T: 'static> Clone for TypedPipe<T> {
 
 unsafe impl<T: Send> Send for TypedPipe<T> {}
 unsafe impl<T: Send> Sync for TypedPipe<T> {}
+
+// === impl SerVtable ===
 
 impl SerVtable {
     pub(super) fn to_slice<T: Serialize + 'static>(

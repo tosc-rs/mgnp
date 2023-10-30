@@ -46,6 +46,7 @@ impl<T: 'static> TrickyPipe<T> {
         get_elems: Self::get_elems,
         clone: Self::erased_clone,
         drop: Self::erased_drop,
+        type_name: core::any::type_name::<T>,
     };
 
     fn erased(&self) -> ErasedPipe {
