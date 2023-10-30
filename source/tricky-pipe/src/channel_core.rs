@@ -244,7 +244,7 @@ impl Core {
         }
     }
 
-    pub(super) fn poll_dequeue(&self, cx: &mut task::Context<'_>) -> Poll<Option<Reservation<'_>>> {
+    pub(super) fn poll_dequeue(&self, cx: &mut Context<'_>) -> Poll<Option<Reservation<'_>>> {
         loop {
             match self.try_dequeue() {
                 Ok(res) => return Poll::Ready(Some(res)),
@@ -262,23 +262,6 @@ impl Core {
                     // similar may also help us actually see the other thread's
                     // change...if it takes a single cycle of delay for it to
                     // reflect? idk lol ¯\_(ツ)_/¯
-                    hint::spin_loop();
-                }
-            }
-        }
-    }
-
-    pub(super) async fn dequeue(&self) -> Option<Reservation<'_>> {
-        loop {
-            match self.try_dequeue() {
-                Ok(res) => return Some(res),
-                Err(TryRecvError::Closed) => return None,
-                Err(TryRecvError::Empty) => {
-                    // we never close the rx waitcell, because the
-                    // rx is responsible for determining if the channel is
-                    // closed by the tx: there may be messages in the channel to
-                    // consume before the rx considers it properly closed.
-                    let _ = test_dbg!(self.cons_wait.wait().await);
                     hint::spin_loop();
                 }
             }
