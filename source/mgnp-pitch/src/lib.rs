@@ -3,6 +3,7 @@
 
 #[cfg(any(feature = "alloc", test))]
 extern crate alloc;
+use core::fmt;
 
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
@@ -27,8 +28,9 @@ pub trait Frame {
 
 pub trait Wire {
     type Frame: Frame;
-    async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), ()>;
-    async fn recv(&mut self) -> Result<Self::Frame, ()>;
+    type Error;
+    async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), Self::Error>;
+    async fn recv(&mut self) -> Result<Self::Frame, Self::Error>;
 }
 
 /// An outbound connect request.
@@ -53,6 +55,25 @@ where
     registry: R,
 }
 
+/// Errors returned by [`Interface::run`].
+#[derive(Debug)]
+pub struct InterfaceError<E> {
+    kind: InterfaceErrorKind<E>,
+    ctx: Option<&'static str>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum InterfaceErrorKind<E> {
+    /// A wire error occurred while sending a message.
+    Send(E),
+
+    /// A wire error occurred while receiving a message.
+    Recv(E),
+
+    /// A protocol error occurred.
+    Proto(&'static str),
+}
+
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
 impl<Fr, Wi, R, const MAX_CONNS: usize> Interface<Fr, Wi, R, MAX_CONNS>
@@ -70,18 +91,22 @@ where
         }
     }
 
-    pub async fn run(&mut self, conns: impl Stream<Item = OutboundConnect<'_>>) -> Result<(), ()> {
+    pub async fn run(
+        &mut self,
+        conns: impl Stream<Item = OutboundConnect<'_>>,
+    ) -> Result<(), InterfaceError<Wi::Error>> {
         futures::pin_mut!(conns);
         loop {
             let mut in_frame = None;
             let mut out_conn = None;
             futures::select_biased! {
                 // inbound frame from the wire.
-                frame = self.wire.recv().fuse() => in_frame = Some(frame?),
+                frame = self.wire.recv().fuse() => in_frame = Some(frame.map_err(InterfaceError::recv)?),
+
                 // either a connection needs to send data, or a connection has
                 // closed locally.
                 frame = self.conn_table.next_outbound().fuse() => {
-                    self.wire.send(frame).await?;
+                    self.wire.send(frame).await.map_err(InterfaceError::send)?;
                 },
 
                 // locally-initiated connect request
@@ -110,7 +135,13 @@ where
                 tracing::debug!(?identity, "initiating local connection...");
                 match self.conn_table.start_connecting(identity, hello, channel) {
                     Some(frame) => {
-                        self.wire.send(OutboundMessage::Control(frame)).await?;
+                        self.wire
+                            .send(OutboundMessage::Control(frame))
+                            .await
+                            .map_err(|e| {
+                                InterfaceError::send(e)
+                                    .with_context("while sending local-initiated CONNECT")
+                            })?;
                         tracing::debug!("local connect sent!")
                     }
                     None => {
@@ -123,7 +154,7 @@ where
         }
     }
 
-    async fn process_inbound(&mut self, frame: Fr) -> Result<(), ()> {
+    async fn process_inbound(&mut self, frame: Fr) -> Result<(), InterfaceError<Wi::Error>> {
         let msg = match frame.decode() {
             Ok(msg) => msg,
             Err(error) => {
@@ -143,7 +174,10 @@ where
         // process the inbound message, possibly generating a new outbound frame
         // to send.
         if let Some(rsp) = self.conn_table.process_inbound(&self.registry, msg).await {
-            self.wire.send(rsp).await?;
+            self.wire.send(rsp).await.map_err(|e| {
+                InterfaceError::send(e)
+                    .with_context("while sending inbound frame response (ACK/NAK)")
+            })?;
         }
 
         Ok(())
@@ -159,6 +193,61 @@ impl<'data> OutboundConnect<'data> {
             identity,
             hello,
             channel,
+        }
+    }
+}
+
+// === impl InterfaceError ===
+
+impl<E> InterfaceError<E> {
+    fn send(error: E) -> Self {
+        Self {
+            kind: InterfaceErrorKind::Send(error),
+            ctx: None,
+        }
+    }
+
+    fn recv(error: E) -> Self {
+        Self {
+            kind: InterfaceErrorKind::Recv(error),
+            ctx: None,
+        }
+    }
+
+    fn with_context(self, ctx: &'static str) -> Self {
+        Self {
+            ctx: Some(ctx),
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> &InterfaceErrorKind<E> {
+        &self.kind
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for InterfaceError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { kind, ctx } = self;
+        fmt::Display::fmt(kind, f)?;
+
+        if let Some(ctx) = ctx {
+            write!(f, " ({ctx})")?;
+        }
+
+        Ok(())
+    }
+}
+
+// === impl InterfaceErrorKind ===
+
+impl<E: fmt::Display> fmt::Display for InterfaceErrorKind<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Send(e) => write!(f, "wire send error: {e}"),
+            Self::Recv(e) => write!(f, "wire receive error: {e}"),
+            Self::Proto(e) => write!(f, "protocol error: {e}"),
         }
     }
 }

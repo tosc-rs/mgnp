@@ -168,13 +168,17 @@ impl TestWire {
 
 impl Wire for TestWire {
     type Frame = TestFrame;
-    async fn recv(&mut self) -> Result<Self::Frame, ()> {
+    type Error = &'static str;
+
+    async fn recv(&mut self) -> Result<Self::Frame, &'static str> {
         let frame = self.rx.recv().await;
         tracing::info!(frame = ?frame.as_ref().map(HexSlice::new), "RECV");
-        frame.ok_or(()).map(TestFrame)
+        frame
+            .ok_or("the send end of this wire has been dropped")
+            .map(TestFrame)
     }
 
-    async fn send(&mut self, msg: OutboundMessage<'_>) -> Result<(), ()> {
+    async fn send(&mut self, msg: OutboundMessage<'_>) -> Result<(), &'static str> {
         // TODO(eliza): this is awkward, the trickypipe SerRecvRef API needs to
         // suck less so we don't need to do it like this...
         tracing::info!(?msg, "sending message");
@@ -198,7 +202,10 @@ impl Wire for TestWire {
         };
 
         tracing::info!(frame = ?HexSlice::new(&frame), "SEND");
-        self.tx.send(frame).await.map_err(|_| ())
+        self.tx
+            .send(frame)
+            .await
+            .map_err(|_| "the recv end of this wire has been dropped")
     }
 }
 
