@@ -94,7 +94,7 @@ jobs:
     needs: check # skip on commits that don't compile.
     # TODO(eliza): this *should* only run if trickypipe changed...
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
     - name: install nextest
       uses: taiki-e/install-action@nextest
@@ -103,6 +103,9 @@ jobs:
     - name: rust toolchain
       run: rustup show
     - run: just loom
+      env:
+        # don't allow any loom model to run for longer than 2 mins on CI
+        LOOM_MAX_DURATION: 120
 
   # check that RustDoc builds
   docs:

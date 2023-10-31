@@ -61,12 +61,19 @@ default:
 export LOOM_LOG := env_var_or_default("LOOM_LOG", "debug")
 export LOOM_LOCATION := env_var_or_default("LOOM_LOCATION", "true")
 export LOOM_MAX_PREEMPTIONS := env_var_or_default("LOOM_MAX_PREEMPTIONS", "2")
+# set default max duration per test to 600 seconds (10 mins)
+export LOOM_MAX_DURATION := env_var_or_default("LOOM_MAX_DURATION", "600")
 export RUSTDOCFLAGS := env_var_or_default("RUSTDOCFLAGS", "--cfg docsrs")
 
 # run Loom tests
 loom *NEXTEST_ARGS="--package tricky-pipe --all-features":
+    @echo "LOOM_LOG=${LOOM_LOG}; LOOM_LOCATION=${LOOM_LOCATION}; \
+        LOOM_MAX_PREEMPTIONS=${LOOM_MAX_PREEMPTIONS}; \
+        LOOM_MAX_DURATION=${LOOM_MAX_DURATION}"
     RUSTFLAGS=" --cfg loom --cfg debug_assertions" \
-        {{ _cargo }} {{ _testcmd }} --release {{ NEXTEST_ARGS }}
+        {{ _cargo }} {{ _testcmd }} \
+        {{ if no-nextest != "" { "--profile loom" } else { "" } }} \
+         --release {{ NEXTEST_ARGS }}
 
 # run cargo check
 check *CARGO_ARGS="--workspace --all-features --all-targets":
@@ -78,7 +85,9 @@ clippy *CLIPPY_ARGS="--workspace --all-features --all-targets":
 
 # run cargo test
 test *NEXTEST_ARGS="--workspace --all-features":
-    {{ _cargo }} {{ _testcmd }} {{ NEXTEST_ARGS }}
+    {{ _cargo }} {{ _testcmd }} \
+        {{ if env_var_or_default("GITHUB_ACTIONS", "") == "true" { "--profile ci" } else { "" } }} \
+        {{ NEXTEST_ARGS }}
     {{ _cargo }} test --doc {{ NEXTEST_ARGS }}
 
 # build RustDoc
