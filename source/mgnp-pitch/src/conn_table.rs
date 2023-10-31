@@ -2,11 +2,7 @@ use crate::{
     message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
     registry,
 };
-use core::{
-    fmt, mem,
-    num::NonZeroU16,
-    task::{Context, Poll},
-};
+use core::{fmt, mem, num::NonZeroU16, task::Poll};
 use tricky_pipe::{bidi::SerBiDi, SerPermit};
 
 #[derive(
@@ -22,7 +18,7 @@ pub struct LinkId {
     pub remote: Option<Id>,
 }
 
-pub struct ConnTable<const CAPACITY: usize> {
+pub(crate) struct ConnTable<const CAPACITY: usize> {
     conns: Entries<CAPACITY>,
     next_id: Id,
     len: usize,
@@ -30,7 +26,7 @@ pub struct ConnTable<const CAPACITY: usize> {
 }
 
 #[derive(Debug)]
-pub enum State {
+enum State {
     Open { remote_id: Id },
     Connecting,
 }
@@ -64,7 +60,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     const ENTRY_UNUSED: Entry = Entry::Unused;
 
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             conns: Entries([Self::ENTRY_UNUSED; CAPACITY]),
             // ID 0 is the link-control channel
@@ -75,41 +71,59 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     /// Returns the next outbound frame.
-    pub async fn next_outbound(&mut self) -> OutboundMessage<'_> {
+    pub(crate) async fn next_outbound(&mut self) -> OutboundMessage<'_> {
+        // remove any dead socket that closed during the previous `next_outbound` call.
+        self.cleanup_dead();
+
         futures::future::poll_fn(|cx| {
-            for (idx, conn) in self.conns.0.iter().enumerate() {
-                if let Entry::Occupied(Socket {
+            // TODO(eliza): would be nice if we didn't loop over all sockets
+            // after a wakeup, and could instead use the `Waker` index to more
+            // intelligently track which socket woke us, or something. But
+            // that's Hard...
+            for (idx, entry) in self.conns.0.iter().enumerate() {
+                // Skip entries that are unoccupied or whose sockets are waiting
+                // on the remote to initiate a connection.
+                let Some(Socket {
                     state: State::Open { remote_id },
                     bidi,
-                }) = conn
-                {
-                    match bidi.rx().poll_recv(cx) {
-                        Poll::Ready(Some(data)) => {
-                            // data frame ready!
-                            let local_id = Id::from_index(idx);
-                            return Poll::Ready(OutboundMessage::Data {
-                                local_id,
-                                remote_id: *remote_id,
-                                data,
-                            });
-                        }
-                        Poll::Ready(None) => {
-                            // the local stream has closed, mark it as dead and
-                            // reset the remote.
-                            self.dead_index = Some(Id::from_index(idx));
-                            return Poll::Ready(OutboundMessage::reset(*remote_id));
-                        }
-                        Poll::Pending => {}
+                }) = entry.socket()
+                else {
+                    continue;
+                };
+
+                // poll the socket's local channel to see if it has outbound
+                // data or has closed.
+                match bidi.rx().poll_recv(cx) {
+                    // a local data frame is ready to send!
+                    Poll::Ready(Some(data)) => {
+                        let local_id = Id::from_index(idx);
+                        return Poll::Ready(OutboundMessage::Data {
+                            local_id,
+                            remote_id: *remote_id,
+                            data,
+                        });
                     }
+
+                    // the local stream has closed, so mark the socket as dead
+                    // and generate a reset frame to tell the remote that it's
+                    // closed.
+                    Poll::Ready(None) => {
+                        self.dead_index = Some(Id::from_index(idx));
+                        return Poll::Ready(OutboundMessage::reset(*remote_id));
+                    }
+
+                    // nothing to do, move on to the next socket.
+                    Poll::Pending => {}
                 }
             }
 
+            // if no sockets are ready, yield until one is.
             Poll::Pending
         })
         .await
     }
 
-    pub fn cleanup_dead(&mut self) {
+    fn cleanup_dead(&mut self) {
         // receiving a data frame from the conn table borrows it, so we must
         // remove the dead index from the *previous* next_outbound call before
         // we borrow the whole conn table to poll it. yes, this is confusing and
@@ -129,6 +143,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         let span = tracing::trace_span!("process_inbound", id = %msg.link_id());
         let _enter = span.enter();
         match msg {
+            // Inbound data frame from remote.
             InboundMessage::Data {
                 local_id,
                 remote_id,
@@ -172,10 +187,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 remote_id,
             }) => {
                 tracing::trace!(id.remote = %local_id, id.local = %remote_id, "process_inbound: ACK");
-                match self.process_ack(remote_id, local_id) {
-                    Ok(_) => None,
-                    Err(msg) => Some(msg),
-                }
+                self.process_ack(remote_id, local_id)
             }
             InboundMessage::Control(ControlMessage::Nak { remote_id, reason }) => {
                 tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
@@ -186,7 +198,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             InboundMessage::Control(ControlMessage::Reset { remote_id }) => {
                 tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
                 let _closed = self.close(remote_id);
-
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
                 None
             }
@@ -213,8 +224,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub fn start_connecting<'conns, 'data>(
-        &'conns mut self,
+    pub(crate) fn start_connecting<'data>(
+        &mut self,
         identity: registry::Identity,
         hello: &'data [u8],
         bidi: SerBiDi,
@@ -233,36 +244,37 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     /// Process an ack for a locally-initiated connecting socket with `local_id`.
-    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Result<(), OutboundMessage<'_>> {
+    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Option<OutboundMessage<'_>> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
             tracing::debug!(id.local = %local_id, id.remote = %remote_id, "process_ack: no such socket");
-            return Err(OutboundMessage::reset(remote_id));
+            return Some(OutboundMessage::reset(remote_id));
         };
 
         match sock.state {
             State::Open {
                 remote_id: real_remote_id,
             } => {
+                // this socket is already open locally!
                 tracing::debug!(
-                    %local_id,
-                    %remote_id,
-                    %real_remote_id,
+                    id.local = %local_id,
+                    id.remote = %remote_id,
+                    id.actual_remote = %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Err(OutboundMessage::reset(remote_id))
+                Some(OutboundMessage::reset(remote_id))
             }
             ref mut state @ State::Connecting => {
                 *state = State::Open { remote_id };
 
                 tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
-                Ok(())
+                None
             }
         }
     }
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    pub fn accept(&mut self, remote_id: Id, bidi: SerBiDi) -> ControlMessage {
+    fn accept(&mut self, remote_id: Id, bidi: SerBiDi) -> ControlMessage {
         let sock = Socket {
             state: State::Open { remote_id },
             bidi,
@@ -284,7 +296,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if
     /// no conn existed for that ID.
-    pub fn close(&mut self, local_id: Id) -> bool {
+    fn close(&mut self, local_id: Id) -> bool {
         match self.conns.get_mut(local_id) {
             None => {
                 tracing::trace!(?local_id, "close: ID greater than max conns ({CAPACITY})");
@@ -302,22 +314,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 false
             }
         }
-    }
-
-    fn bidi(&self, local_id: Id) -> Option<&SerBiDi> {
-        self.conns.get(local_id).and_then(Entry::bidi)
-    }
-
-    #[must_use]
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    #[must_use]
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     #[must_use]
@@ -343,13 +339,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         tracing::trace!(?local_id, self.len, "insert: added connection");
 
         Some(local_id)
-    }
-
-    fn iter_sockets(&self) -> impl Iterator<Item = &Socket> {
-        self.conns.0.iter().filter_map(|entry| match entry {
-            Entry::Occupied(sock) => Some(sock),
-            _ => None,
-        })
     }
 }
 
@@ -421,13 +410,6 @@ impl LinkId {
         local: None,
         remote: None,
     };
-
-    pub(crate) fn invert(self) -> Self {
-        Self {
-            local: self.remote,
-            remote: self.local,
-        }
-    }
 }
 
 impl fmt::UpperHex for LinkId {
@@ -457,11 +439,11 @@ impl fmt::Display for LinkId {
 // === impl Entries ===
 
 impl<const CAPACITY: usize> Entries<CAPACITY> {
-    #[inline]
-    #[must_use]
-    fn get(&self, local_id: Id) -> Option<&Entry> {
-        self.0.get(local_id.to_index())
-    }
+    // #[inline]
+    // // #[must_use]
+    // // fn get(&self, local_id: Id) -> Option<&Entry> {
+    // //     self.0.get(local_id.to_index())
+    // // }
 
     #[inline]
     #[must_use]
@@ -482,11 +464,15 @@ impl Entry {
             .map_err(|_| InboundError::ChannelClosed)
     }
 
-    fn bidi(&self) -> Option<&SerBiDi> {
+    fn socket(&self) -> Option<&Socket> {
         match self {
-            Entry::Occupied(ref sock) => Some(&sock.bidi),
+            Entry::Occupied(ref sock) => Some(sock),
             _ => None,
         }
+    }
+
+    fn bidi(&self) -> Option<&SerBiDi> {
+        self.socket().map(|sock| &sock.bidi)
     }
 }
 
