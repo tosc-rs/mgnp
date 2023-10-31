@@ -18,7 +18,7 @@ async fn basically_works() {
         let test_done = test_done.clone();
         async move {
             let mut iface =
-                Interface::<_, _, _, { mgnp_pitch::DEFAULT_MAX_CONNS }>::new(wire1, registry1);
+                Interface::<_, _, { mgnp_pitch::DEFAULT_MAX_CONNS }>::new(wire1, registry1);
 
             tokio::select! {
                 res = iface.run(futures::stream::pending()) => {
@@ -38,7 +38,7 @@ async fn basically_works() {
     let local = tokio::spawn({
         let test_done = test_done.clone();
         async move {
-            let mut iface = Interface::<_, _, _, { mgnp_pitch::DEFAULT_MAX_CONNS }>::new(
+            let mut iface = Interface::<_, _, { mgnp_pitch::DEFAULT_MAX_CONNS }>::new(
                 wire2,
                 TestRegistry::default(),
             );

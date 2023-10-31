@@ -13,6 +13,7 @@ pub enum IdentityKind {
     Name(heapless::String<32>),
 }
 
+/// Represents a mechanism for discovering services on the local node.
 pub trait Registry {
     async fn connect(&self, identity: Identity, hello: &[u8]) -> Result<SerBiDi, Nak>;
 }

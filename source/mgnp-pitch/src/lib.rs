@@ -26,6 +26,7 @@ pub trait Frame {
     }
 }
 
+/// Represents a wire-level transport for MGNP [`Frame`]s.
 pub trait Wire {
     type Frame: Frame;
     type Error;
@@ -44,11 +45,15 @@ pub struct OutboundConnect<'data> {
     // TODO(eliza): add a oneshot for "connect success/connect failed"...
 }
 
-pub struct Interface<Fr, Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
+/// A MGNP network interface for a particular [`Wire`].
+///
+/// This type implements the connection-management state machine for connections
+/// over the provided `Wi`-typed [`Wire`] implementation. Local services are discovered using
+/// the `R`-typed [`Registry`] implementation.
+pub struct Interface<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
 where
-    Fr: Frame,
     // Remote wire type
-    Wi: Wire<Frame = Fr>,
+    Wi: Wire,
 {
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
@@ -76,10 +81,9 @@ pub enum InterfaceErrorKind<E> {
 
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
-impl<Fr, Wi, R, const MAX_CONNS: usize> Interface<Fr, Wi, R, MAX_CONNS>
+impl<Wi, R, const MAX_CONNS: usize> Interface<Wi, R, MAX_CONNS>
 where
-    Fr: Frame,
-    Wi: Wire<Frame = Fr>,
+    Wi: Wire,
     R: Registry,
 {
     #[must_use]
@@ -154,7 +158,7 @@ where
         }
     }
 
-    async fn process_inbound(&mut self, frame: Fr) -> Result<(), InterfaceError<Wi::Error>> {
+    async fn process_inbound(&mut self, frame: Wi::Frame) -> Result<(), InterfaceError<Wi::Error>> {
         let msg = match frame.decode() {
             Ok(msg) => msg,
             Err(error) => {
