@@ -1,4 +1,4 @@
-use mgnp_pitch::{
+use mgnp::{
     message::{InboundMessage, Nak, OutboundMessage},
     registry,
     tricky_pipe::bidi::{BiDi, SerBiDi},
