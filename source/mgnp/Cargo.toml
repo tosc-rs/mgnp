@@ -1,5 +1,5 @@
 [package]
-name = "mgnp-pitch"
+name = "mgnp"
 version = "0.1.0"
 edition = "2021"
 
