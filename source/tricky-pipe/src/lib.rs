@@ -26,6 +26,7 @@ use core::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 pub mod bidi;
+pub mod oneshot;
 
 #[cfg(not(test))]
 macro_rules! test_dbg {
