@@ -39,6 +39,7 @@ default-features = false
 
 [dev-dependencies]
 tracing = "0.1.39"
+maitake-sync = { version = "0.1.0", features = ["tracing"] }
 # ensure `std`/`alloc` support in `serde` and `postcard` are always enabled when
 # building tests.
 serde = { version = "1.0.188", features = ["derive", "std"] }
