@@ -26,7 +26,7 @@ use core::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 pub mod bidi;
-pub mod typeinfo;
+mod typeinfo;
 
 #[cfg(not(test))]
 macro_rules! test_dbg {

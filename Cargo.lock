@@ -1065,6 +1065,7 @@ dependencies = [
  "portable-atomic",
  "postcard",
  "serde",
+ "tokio",
  "tracing 0.1.40",
  "tracing-subscriber",
 ]

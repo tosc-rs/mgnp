@@ -1,6 +1,6 @@
-use core::any;
+use core::{any, fmt};
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub(crate) struct TypeInfo {
     // These are represented as functions because `core::any::type_name` and
     // `core::any::TypeId::of` are not currently stable as `const fn`s. When
@@ -40,5 +40,17 @@ impl TypeInfo {
 
     pub(crate) fn name(self) -> &'static str {
         (self.name)()
+    }
+}
+
+impl fmt::Display for TypeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.name(), f)
+    }
+}
+
+impl fmt::Debug for TypeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self.name(), f)
     }
 }
