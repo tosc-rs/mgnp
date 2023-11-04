@@ -1,9 +1,9 @@
 use crate::{
     message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
-    registry,
+    registry, OutboundConnect,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
-use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit};
+use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -28,7 +28,7 @@ pub(crate) struct ConnTable<const CAPACITY: usize> {
 #[derive(Debug)]
 enum State {
     Open { remote_id: Id },
-    Connecting,
+    Connecting(oneshot::Sender<Result<(), Nak>>),
 }
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ enum InboundError {
 #[derive(Debug)]
 struct Socket {
     state: State,
-    bidi: SerBiDi,
+    channel: SerBiDi,
 }
 
 enum Entry {
@@ -85,7 +85,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // on the remote to initiate a connection.
                 let Some(Socket {
                     state: State::Open { remote_id },
-                    bidi,
+                    channel,
                 }) = entry.socket()
                 else {
                     continue;
@@ -93,7 +93,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
                 // poll the socket's local channel to see if it has outbound
                 // data or has closed.
-                match bidi.rx().poll_recv(cx) {
+                match channel.rx().poll_recv(cx) {
                     // a local data frame is ready to send!
                     Poll::Ready(Some(data)) => {
                         let local_id = Id::from_index(idx);
@@ -208,8 +208,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             }) => {
                 tracing::trace!(id.remote = %local_id, ?identity, "process_inbound: CONNECT");
                 match registry.connect(identity, hello).await {
-                    Ok(bidi) => {
-                        let rsp = self.accept(local_id, bidi);
+                    Ok(channel) => {
+                        let rsp = self.accept(local_id, channel);
                         Some(OutboundMessage::Control(rsp))
                     }
                     Err(reason) => Some(OutboundMessage::Control(ControlMessage::Nak {
@@ -226,15 +226,30 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     #[must_use]
     pub(crate) fn start_connecting<'data>(
         &mut self,
-        identity: registry::Identity,
-        hello: &'data [u8],
-        bidi: SerBiDi,
+        connect: OutboundConnect<'data>,
     ) -> Option<ControlMessage<'data>> {
-        let sock = Socket {
-            state: State::Connecting,
-            bidi,
+        let OutboundConnect {
+            hello,
+            identity,
+            channel,
+            rsp,
+        } = connect;
+
+        let local_id = match self.reserve_id() {
+            Some(id) => id,
+            None => {
+                rsp.send(Err(Nak::ConnTableFull(CAPACITY)));
+                return None;
+            }
         };
-        let local_id = self.insert(sock)?;
+
+        self.insert_at(
+            local_id,
+            Socket {
+                state: State::Connecting(rsp),
+                channel,
+            },
+        );
 
         Some(ControlMessage::Connect {
             local_id,
@@ -263,8 +278,15 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 );
                 Some(OutboundMessage::reset(remote_id))
             }
-            ref mut state @ State::Connecting => {
-                *state = State::Open { remote_id };
+            ref mut state @ State::Connecting(_) => {
+                let State::Connecting(rsp) = mem::replace(state, State::Open { remote_id }) else {
+                    unreachable!(
+                        "if this match arm matched, then the state should already be connecting!"
+                    );
+                };
+
+                // tell the remote that they're okay
+                rsp.send(Ok(()));
 
                 tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
                 None
@@ -274,10 +296,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    fn accept(&mut self, remote_id: Id, bidi: SerBiDi) -> ControlMessage {
+    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> ControlMessage {
         let sock = Socket {
             state: State::Open { remote_id },
-            bidi,
+            channel,
         };
 
         match self.insert(sock) {
@@ -318,15 +340,26 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     #[must_use]
     fn insert(&mut self, socket: Socket) -> Option<Id> {
+        let local_id = self.reserve_id()?;
+        self.insert_at(local_id, socket);
+        Some(local_id)
+    }
+
+    #[must_use]
+    fn reserve_id(&mut self) -> Option<Id> {
         // conn table full
         if self.len == CAPACITY {
             tracing::trace!(capacity = CAPACITY, "insert: conn table full");
             return None;
         }
 
-        let local_id = self.next_id;
+        Some(self.next_id)
+    }
 
-        self.next_id = match mem::replace(self.conns.get_mut(local_id)?, Entry::Occupied(socket)) {
+    #[must_use]
+    fn insert_at(&mut self, local_id: Id, socket: Socket) {
+        let entry = self.conns.get_mut(local_id).expect("ID should be present");
+        self.next_id = match mem::replace(entry, Entry::Occupied(socket)) {
             Entry::Unused => self.next_id.checked_add(1).expect("connection ID overflow"),
             Entry::Closed(next) => next,
             Entry::Occupied(_) => {
@@ -337,8 +370,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         self.len += 1;
 
         tracing::trace!(?local_id, self.len, "insert: added connection");
-
-        Some(local_id)
     }
 }
 
@@ -456,7 +487,7 @@ impl<const CAPACITY: usize> Entries<CAPACITY> {
 
 impl Entry {
     async fn reserve_send(&self) -> Result<SerPermit<'_>, InboundError> {
-        self.bidi()
+        self.channel()
             .ok_or(InboundError::NoSocket)?
             .tx()
             .reserve()
@@ -471,8 +502,8 @@ impl Entry {
         }
     }
 
-    fn bidi(&self) -> Option<&SerBiDi> {
-        self.socket().map(|sock| &sock.bidi)
+    fn channel(&self) -> Option<&SerBiDi> {
+        self.socket().map(|sock| &sock.channel)
     }
 }
 

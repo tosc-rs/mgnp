@@ -8,7 +8,7 @@ use core::fmt;
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use futures::{FutureExt, Stream, StreamExt};
-use tricky_pipe::bidi::SerBiDi;
+use tricky_pipe::{bidi::SerBiDi, oneshot};
 
 mod conn_table;
 pub mod message;
@@ -42,7 +42,8 @@ pub struct OutboundConnect<'data> {
     hello: &'data [u8],
     /// The local bidirectional channel to bind to the remote service.
     channel: SerBiDi,
-    // TODO(eliza): add a oneshot for "connect success/connect failed"...
+    /// Sender for the response from the remote service.
+    rsp: oneshot::Sender<Result<(), Nak>>,
 }
 
 /// A MGNP network interface for a particular [`Wire`].
@@ -129,15 +130,9 @@ where
                 self.process_inbound(frame).await?;
             }
 
-            if let Some(OutboundConnect {
-                identity,
-                hello,
-                channel,
-                ..
-            }) = out_conn
-            {
-                tracing::debug!(?identity, "initiating local connection...");
-                match self.conn_table.start_connecting(identity, hello, channel) {
+            if let Some(out_conn) = out_conn {
+                tracing::debug!(identity = ?out_conn.identity, "initiating local connection...");
+                match self.conn_table.start_connecting(out_conn) {
                     Some(frame) => {
                         self.wire
                             .send(OutboundMessage::Control(frame))
@@ -192,11 +187,17 @@ where
 
 impl<'data> OutboundConnect<'data> {
     #[must_use]
-    pub fn new(identity: registry::Identity, hello: &'data [u8], channel: SerBiDi) -> Self {
+    pub fn new(
+        identity: registry::Identity,
+        hello: &'data [u8],
+        channel: SerBiDi,
+        rsp: oneshot::Sender<Result<(), Nak>>,
+    ) -> Self {
         Self {
             identity,
             hello,
             channel,
+            rsp,
         }
     }
 }
