@@ -76,7 +76,7 @@
 //!
 //! // because the `Receiver` is stored in an `Arc`, we can create a
 //! // `Sender` using the `sender` method:
-//! let tx = rx.static_sender().await.unwrap();
+//! let tx = rx.sender().await.unwrap();
 //!
 //! tx.send(1).unwrap();
 //! assert_eq!(rx.recv().await, Ok(1));
@@ -261,7 +261,7 @@ impl<T> Receiver<T> {
     /// Returns a new one-shot channel receiver.
     ///
     /// In order to construct a [`Sender`] or [`DeserSender`], this value must
-    /// either be stored in a [`static`] or wrapped in an [`Arc`]. See the
+    /// either be stored in a `static` or wrapped in an [`Arc`]. See the
     /// [module-level documentation](../#heap-and-static-storage) on storing the
     /// shared state for details.
     ///
@@ -352,7 +352,7 @@ impl<T> Receiver<T> {
     ///
     /// // because the `Receiver` is stored in an `Arc`, we can create a
     /// // `Sender` using the `sender` method:
-    /// let tx = rx.static_sender().await.unwrap();
+    /// let tx = rx.sender().await.unwrap();
     ///
     /// tx.send(1).unwrap();
     /// assert_eq!(rx.recv().await, Ok(1));
