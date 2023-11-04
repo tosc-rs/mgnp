@@ -295,7 +295,7 @@ impl<T> Receiver<T> {
     ///
     /// // because the `Receiver` is stored in an `Arc`, we can create a
     /// // `Sender` using the `sender` method:
-    /// let tx = rx.static_sender().await.unwrap();
+    /// let tx = rx.sender().await.unwrap();
     ///
     /// tx.send(1).unwrap();
     /// assert_eq!(rx.recv().await, Ok(1));
