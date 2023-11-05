@@ -26,6 +26,7 @@ use core::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 pub mod bidi;
+mod typeinfo;
 
 #[cfg(not(test))]
 macro_rules! test_dbg {
@@ -86,6 +87,8 @@ pub mod error;
 mod static_impl;
 #[cfg(test)]
 mod tests;
+
+pub mod oneshot;
 
 use self::{
     channel_core::{DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe},

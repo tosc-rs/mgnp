@@ -70,7 +70,7 @@ loom *NEXTEST_ARGS="--package tricky-pipe --all-features":
     @echo "LOOM_LOG=${LOOM_LOG}; LOOM_LOCATION=${LOOM_LOCATION}; \
         LOOM_MAX_PREEMPTIONS=${LOOM_MAX_PREEMPTIONS}; \
         LOOM_MAX_DURATION=${LOOM_MAX_DURATION}"
-    RUSTFLAGS=" --cfg loom --cfg debug_assertions" \
+    RUSTFLAGS=" --cfg loom --cfg debug_assertions --cfg maitake_ultraverbose" \
         {{ _cargo }} {{ _testcmd }} \
         {{ if no-nextest != "" { "--profile loom" } else { "" } }} \
          --release {{ NEXTEST_ARGS }}
