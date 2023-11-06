@@ -646,6 +646,18 @@ impl fmt::Debug for SerRecvRef<'_> {
     }
 }
 
+impl Drop for SerRecvRef<'_> {
+    fn drop(&mut self) {
+        let Self { res, elems, vtable } = self;
+        unsafe {
+            // Safety: if a `SerRecvRef` was created for this index, it is
+            // assumed to have unique access to the element, and is responsible
+            // for dropping it.
+            (vtable.drop_elem)(*elems, res.idx);
+        }
+    }
+}
+
 // Safety: this is safe, because a `SerRecvRef` can only be constructed by a
 // `SerReceiver`, and `SerReceiver`s may only be constructed for a pipe whose
 // messages are `Send`.

@@ -118,6 +118,7 @@ pub(super) struct SerVtable {
     pub(super) to_vec_framed: SerVecFn,
     pub(super) to_slice: SerFn,
     pub(super) to_slice_framed: SerFn,
+    pub(super) drop_elem: unsafe fn(ErasedSlice, u8),
 }
 
 pub(super) struct DeserVtable {
@@ -654,6 +655,14 @@ impl SerVtable {
                 postcard::to_allocvec_cobs(elem)
             })
         }
+    }
+
+    pub(super) unsafe fn drop_elem<T: Serialize + 'static>(elems: ErasedSlice, idx: u8) {
+        let elems = elems.unerase::<UnsafeCell<MaybeUninit<T>>>();
+        elems[idx as usize].with_mut(|ptr| {
+            let elem = (*ptr).as_mut_ptr();
+            core::ptr::drop_in_place(elem)
+        })
     }
 }
 

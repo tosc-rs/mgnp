@@ -113,6 +113,7 @@ where
         to_vec_framed: SerVtable::to_vec_framed::<T>,
         to_slice: SerVtable::to_slice::<T>,
         to_slice_framed: SerVtable::to_slice_framed::<T>,
+        drop_elem: SerVtable::drop_elem::<T>,
     };
 }
 
