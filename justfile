@@ -11,8 +11,14 @@ Available variables:
                             # to use for builds.
 
 Environment variables and defaults:
-    LOOM_LOG='debug'        # sets the log level for Loom tests.
-    LOOM_LOCATION='true'    # enables/disables location tracking in Loom tests.
+    RUST_LOG='debug'            # sets the log level for normal tests & tools.
+
+    LOOM_LOG='debug'            # sets the log level for Loom tests.
+    LOOM_LOCATION='true'        # enables location tracking in Loom tests.
+    LOOM_MAX_PREEMPTIONS='2'    # sets maximum number of preemptions in Loom.
+
+    # configures Miri behavior when running Miri tests
+    MIRIFLAGS='-Zmiri-strict-provenance -Zmiri-disable-isolation'
 
 Variables can be set using `just VARIABLE=VALUE ...` or
 `just --set VARIABLE VALUE ...`.
@@ -32,6 +38,8 @@ profile := 'release'
 
 _cargo := "cargo" + if toolchain != "" { " +" + toolchain } else { "" }
 _testcmd := if no-nextest != "" { "test" } else { "nextest run" }
+
+_rust_log := "RUST_LOG=" + env_var_or_default("RUST_LOG", "debug")
 
 # If we're running in Github Actions and cargo-action-fmt is installed, then add
 # a command suffix that formats errors.
@@ -65,15 +73,26 @@ export LOOM_MAX_PREEMPTIONS := env_var_or_default("LOOM_MAX_PREEMPTIONS", "2")
 export LOOM_MAX_DURATION := env_var_or_default("LOOM_MAX_DURATION", "600")
 export RUSTDOCFLAGS := env_var_or_default("RUSTDOCFLAGS", "--cfg docsrs")
 
+# passes through MIRIFLAGS to miri
+export MIRIFLAGS := env_var_or_default("MIRIFLAGS", "-Zmiri-strict-provenance -Zmiri-disable-isolation")
+
 # run Loom tests
 loom *NEXTEST_ARGS="--package tricky-pipe --all-features":
     @echo "LOOM_LOG=${LOOM_LOG}; LOOM_LOCATION=${LOOM_LOCATION}; \
         LOOM_MAX_PREEMPTIONS=${LOOM_MAX_PREEMPTIONS}; \
         LOOM_MAX_DURATION=${LOOM_MAX_DURATION}"
-    RUSTFLAGS=" --cfg loom --cfg debug_assertions --cfg maitake_ultraverbose" \
+    RUSTFLAGS="--cfg loom --cfg debug_assertions --cfg maitake_ultraverbose" \
         {{ _cargo }} {{ _testcmd }} \
-        {{ if no-nextest != "" { "--profile loom" } else { "" } }} \
+        {{ if no-nextest != "true" { "--profile loom" } else { "" } }} \
          --release {{ NEXTEST_ARGS }}
+
+# run Miri tests
+miri *MIRI_ARGS="--package tricky-pipe --all-features --lib":
+    @echo "MIRIFLAGS=${MIRIFLAGS}"
+    RUSTFLAGS="{{ env_var_or_default("RUSTFLAGS", "-Zrandomize-layout") }}" \
+        {{ _rust_log }} {{ _cargo }} miri {{ _testcmd }} \
+        {{ if no-nextest != "true" { "--profile miri" } else { "" } }} \
+        {{ MIRI_ARGS }}
 
 # run cargo check
 check *CARGO_ARGS="--workspace --all-features --all-targets":
@@ -85,9 +104,9 @@ clippy *CLIPPY_ARGS="--workspace --all-features --all-targets":
 
 # run cargo test
 test *NEXTEST_ARGS="--workspace --all-features":
-    {{ _cargo }} {{ _testcmd }} \
-        {{ if env_var_or_default("GITHUB_ACTIONS", "") == "true" { "--profile ci" } else { "" } }} \
-        {{ NEXTEST_ARGS }}
+    {{ _rust_log }} {{ _cargo }} {{ _testcmd }} \
+            {{ if env_var_or_default("GITHUB_ACTIONS", "") == "true" { "--profile ci" } else { "" } }} \
+            {{ NEXTEST_ARGS }}
     {{ _cargo }} test --doc {{ NEXTEST_ARGS }}
 
 # build RustDoc

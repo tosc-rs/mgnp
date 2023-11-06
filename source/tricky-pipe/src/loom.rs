@@ -206,6 +206,9 @@ mod inner {
             .with_max_level(tracing::Level::TRACE)
             .without_time()
             .try_init();
+
+        tracing::info!(loom = cfg!(loom), miri = cfg!(miri));
+
         let _span = tracing::trace_span!("thread", message = 0).entered();
         model::Builder::new().check(f)
     }

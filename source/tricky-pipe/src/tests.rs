@@ -486,7 +486,7 @@ fn elements_dropped() {
 
 #[test]
 fn spsc_try_send_in_capacity() {
-    const SENDS: usize = if cfg!(loom) { 4 } else { 32 };
+    const SENDS: usize = if cfg!(loom) || cfg!(miri) { 4 } else { 32 };
 
     loom::model(|| {
         let (rx, tx) = {
@@ -518,7 +518,7 @@ fn spsc_try_send_in_capacity() {
 
 #[test]
 fn spsc_send() {
-    const SENDS: usize = if cfg!(loom) { 8 } else { 32 };
+    const SENDS: usize = if cfg!(loom) || cfg!(miri) { 8 } else { 32 };
 
     loom::model(|| {
         let (rx, tx) = {
@@ -545,11 +545,11 @@ fn spsc_send() {
 
 #[test]
 fn mpsc_send() {
-    // try not to make the test run for > 300 seconds under loom...
-    const TX1_SENDS: usize = if cfg!(loom) { 2 } else { 16 };
-    const TX2_SENDS: usize = if cfg!(loom) { 1 } else { 16 };
+    // try not to make the test run for > 300 seconds under loom/miri...
+    const TX1_SENDS: usize = if cfg!(loom) || cfg!(miri) { 2 } else { 16 };
+    const TX2_SENDS: usize = if cfg!(loom) || cfg!(miri) { 1 } else { 16 };
     const SENDS: usize = TX1_SENDS + TX2_SENDS;
-    const CAPACITY: u8 = if cfg!(loom) { 2 } else { 32 };
+    const CAPACITY: u8 = if cfg!(loom) || cfg!(miri) { 2 } else { 32 };
 
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);

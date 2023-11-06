@@ -5,4 +5,5 @@ components = [
     "clippy",
     "rustfmt",
     "rust-src",
+    "miri",
 ]
