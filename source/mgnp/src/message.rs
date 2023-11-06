@@ -13,7 +13,7 @@ pub enum InboundMessage<'data> {
 
 #[derive(Debug)]
 pub enum OutboundMessage<'data> {
-    Control(ControlMessage<Option<serbox::Consumer>>),
+    Control(ControlMessage<serbox::Consumer>),
     Data {
         local_id: Id,
         remote_id: Id,

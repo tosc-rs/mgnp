@@ -25,6 +25,16 @@ pub fn hello_world_id() -> registry::Identity {
     }
 }
 
+pub struct HelloWorldService;
+
+impl registry::Service for HelloWorldService {
+    type ClientMsg = HelloWorldRequest;
+    type ServerMsg = HelloWorldResponse;
+    type ConnectError = ();
+    type Hello = ();
+    const UUID: Uuid = HELLO_WORLD_UUID;
+}
+
 pub fn trace_init() {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::Level::TRACE.into())

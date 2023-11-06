@@ -1,5 +1,5 @@
 use crate::{
-    connector::OutboundConnect,
+    channel,
     message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
     registry,
 };
@@ -29,7 +29,7 @@ pub(crate) struct ConnTable<const CAPACITY: usize> {
 #[derive(Debug)]
 enum State {
     Open { remote_id: Id },
-    Connecting(oneshot::Sender<Result<(), Nak>>),
+    Connecting(oneshot::Sender<Result<channel::Ids, Nak>>),
 }
 
 #[derive(Debug)]
@@ -228,7 +228,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     pub(crate) fn start_connecting(
         &mut self,
         connect: OutboundConnect,
-    ) -> Option<ControlMessage<Option<serbox::Consumer>>> {
+    ) -> Option<ControlMessage<serbox::Consumer>> {
         let OutboundConnect {
             hello,
             identity,
@@ -289,7 +289,13 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 };
 
                 // tell the local connection initiator that they're okay
-                if rsp.send(Ok(())).is_err() {
+                if rsp
+                    .send(Ok(channel::Ids {
+                        local_id,
+                        remote_id,
+                    }))
+                    .is_err()
+                {
                     // local initiator is no longer there, reset!
                     tracing::debug!(
                         ?local_id,
@@ -307,11 +313,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    fn accept(
-        &mut self,
-        remote_id: Id,
-        channel: SerBiDi,
-    ) -> ControlMessage<Option<serbox::Consumer>> {
+    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> ControlMessage<serbox::Consumer> {
         let sock = Socket {
             state: State::Open { remote_id },
             channel,

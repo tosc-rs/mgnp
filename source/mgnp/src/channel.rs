@@ -9,8 +9,8 @@ pub struct ClientChannel<S: Service> {
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Ids {
-    local_id: Id,
-    remote_id: Id,
+    pub(crate) local_id: Id,
+    pub(crate) remote_id: Id,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,5 +33,9 @@ impl<S: Service> ClientChannel<S> {
             })
             .await
             .map_err(|err| err.into_inner().data)
+    }
+
+    pub async fn recv(&self) -> Option<S::ServerMsg> {
+        self.chan.rx().recv().await
     }
 }

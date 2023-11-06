@@ -1,13 +1,14 @@
+#![cfg(feature = "alloc")]
 mod support;
-use mgnp::{Interface, OutboundConnect};
+use mgnp::Interface;
 use support::*;
 
 use std::sync::Arc;
+use tricky_pipe::{oneshot, serbox};
 
 #[tokio::test]
 async fn basically_works() {
     trace_init();
-
     let test_done = Arc::new(tokio::sync::Notify::new());
 
     let registry1 = TestRegistry::default();
@@ -17,31 +18,37 @@ async fn basically_works() {
     let remote = tokio::spawn({
         let test_done = test_done.clone();
         async move {
-            let mut iface = Interface::<_, _, { mgnp::DEFAULT_MAX_CONNS }>::new(wire1, registry1);
+            let (_, mut machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
+                wire1,
+                registry1,
+                tricky_pipe::TrickyPipe::new(8),
+            );
 
             tokio::select! {
-                res = iface.run(futures::stream::pending()) => {
+                res = machine.run() => {
                     tracing::info!(?res, "remote interface run loop terminated!");
                     // the remote may be terminated by an interface error, since
                     // the wire will be dropped.
                 },
                 _ = test_done.notified() => {
                     tracing::debug!("test done, remote shutting down...");
+                    
                 },
             }
         }
         .instrument(tracing::info_span!("remote"))
     });
 
-    let (conn_tx, conn_rx) = tokio::sync::mpsc::channel(4);
+    let (iface, mut machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
+        wire2,
+        TestRegistry::default(),
+        tricky_pipe::TrickyPipe::new(8),
+    );
     let local = tokio::spawn({
         let test_done = test_done.clone();
         async move {
-            let mut iface =
-                Interface::<_, _, { mgnp::DEFAULT_MAX_CONNS }>::new(wire2, TestRegistry::default());
-            let conns = tokio_stream::wrappers::ReceiverStream::new(conn_rx);
             tokio::select! {
-            res = iface.run(conns) => {
+            res = machine.run() => {
                 tracing::info!(?res, "local interface run loop terminated!");
                 // the local task may be terminated by an interface error, since
                 // the wire will be dropped.
@@ -54,19 +61,19 @@ async fn basically_works() {
         .instrument(tracing::info_span!("local"))
     });
 
-    let (ser_chan, chan) = make_bidis::<HelloWorldResponse, HelloWorldRequest>(8);
-    conn_tx
-        .send(OutboundConnect::new(hello_world_id(), None, ser_chan))
-        .await
-        .unwrap();
+    let mut connector =
+        iface.connector::<HelloWorldService>(serbox::Sharer::new(), oneshot::Receiver::new());
 
-    chan.tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+    let chan = connector
+        .connect(hello_world_id(), (), mgnp::connector::Channels::new(8))
         .await
-        .expect("send request");
-    let rsp = chan.rx().recv().await;
+        .expect("connection should be established");
+    chan.send(HelloWorldRequest {
+        hello: "hello".to_string(),
+    })
+    .await
+    .expect("send request");
+    let rsp = chan.recv().await;
     assert_eq!(
         rsp,
         Some(HelloWorldResponse {

@@ -7,12 +7,13 @@ use core::fmt;
 
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
+use connector::OutboundConnect;
 use futures::{FutureExt, Stream, StreamExt};
 use tricky_pipe::{bidi::SerBiDi, oneshot, serbox};
 
 pub mod channel;
 mod conn_table;
-mod connector;
+pub mod connector;
 pub mod message;
 pub mod registry;
 use message::Nak;
@@ -36,12 +37,12 @@ pub trait Wire {
     async fn recv(&mut self) -> Result<Self::Frame, Self::Error>;
 }
 
-/// A MGNP network interface for a particular [`Wire`].
+/// A MGNP network interface state machine for a particular [`Wire`].
 ///
 /// This type implements the connection-management state machine for connections
 /// over the provided `Wi`-typed [`Wire`] implementation. Local services are discovered using
 /// the `R`-typed [`Registry`] implementation.
-pub struct Interface<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
+pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
 where
     // Remote wire type
     Wi: Wire,
@@ -49,7 +50,11 @@ where
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
     registry: R,
+    conns_rx: tricky_pipe::Receiver<OutboundConnect>,
 }
+
+#[derive(Clone)]
+pub struct Interface(tricky_pipe::Sender<OutboundConnect>);
 
 /// Errors returned by [`Interface::run`].
 #[derive(Debug)]
@@ -72,28 +77,63 @@ pub enum InterfaceErrorKind<E> {
 
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
-impl<Wi, R, const MAX_CONNS: usize> Interface<Wi, R, MAX_CONNS>
+impl Interface {
+    #[must_use]
+    pub fn new<Wi, R, const MAX_CONNS: usize>(
+        wire: Wi,
+        registry: R,
+        conns: tricky_pipe::TrickyPipe<OutboundConnect>,
+    ) -> (Self, Machine<Wi, R, MAX_CONNS>)
+    where
+        Wi: Wire,
+        R: Registry,
+    {
+        let iface = Self(conns.sender());
+        let worker = Machine {
+            wire,
+            conn_table: ConnTable::new(),
+            registry,
+            conns_rx: conns.receiver().unwrap(),
+        };
+        (iface, worker)
+    }
+
+    /// Returns a `Connector` that initiates connections for a particular
+    /// service type.
+    pub fn connector<S: registry::Service>(
+        &self,
+        hello_sharer: serbox::Sharer<S::Hello>,
+        rsp: oneshot::Receiver<Result<channel::Ids, Nak>>,
+    ) -> connector::Connector<S> {
+        connector::Connector {
+            hello_sharer,
+            rsp,
+            tx: self.0.clone(),
+        }
+    }
+}
+
+impl<Wi, R, const MAX_CONNS: usize> Machine<Wi, R, MAX_CONNS>
 where
     Wi: Wire,
     R: Registry,
 {
-    #[must_use]
-    pub fn new(wire: Wi, registry: R) -> Self {
-        Self {
-            wire,
-            conn_table: ConnTable::new(),
-            registry,
-        }
-    }
+    pub async fn run(&mut self) -> Result<(), InterfaceError<Wi::Error>> {
+        use futures::future;
 
-    pub async fn run(
-        &mut self,
-        conns: impl Stream<Item = OutboundConnect>,
-    ) -> Result<(), InterfaceError<Wi::Error>> {
-        futures::pin_mut!(conns);
+        let mut conns_remaining = true;
         loop {
             let mut in_frame = None;
             let mut out_conn = None;
+
+            // if the outbound connection stream has terminated, don't let it
+            // wake us again.
+            let next_conn = if conns_remaining {
+                future::Either::Left(self.conns_rx.recv())
+            } else {
+                future::Either::Right(future::pending())
+            };
+
             futures::select_biased! {
                 // inbound frame from the wire.
                 frame = self.wire.recv().fuse() => in_frame = Some(frame.map_err(InterfaceError::recv)?),
@@ -105,14 +145,14 @@ where
                 },
 
                 // locally-initiated connect request
-                conn = conns.next().fuse() => {
-                    let Some(conn) = conn else {
+                conn = next_conn.fuse() => {
+                    if let Some(conn) = conn {
+                        out_conn = Some(conn);
+                    } else {
                         tracing::info!("connection stream has terminated");
-                        // TODO(eliza): should the run loop die here instead?
-                        continue;
+                        conns_remaining = false;
                     };
 
-                    out_conn = Some(conn);
                 }
             };
 
