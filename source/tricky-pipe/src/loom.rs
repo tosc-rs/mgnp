@@ -64,9 +64,17 @@ mod inner {
     //         }
     //     }
     // }
+    #[cfg(any(test, feature = "alloc"))]
+    pub(crate) mod alloc {
+        pub(crate) use loom::alloc::*;
+        pub(crate) mod sync {
+            pub(crate) use loom::sync::Arc;
+        }
+        pub(crate) use alloc::boxed;
+    }
 
     #[cfg(test)]
-    pub(crate) use loom::{alloc, cell, future, hint, thread};
+    pub(crate) use loom::{cell, future, hint, thread};
 
     #[cfg(test)]
     pub(crate) fn model(f: impl Fn() + Send + Sync + 'static) {
@@ -300,16 +308,11 @@ mod inner {
     #[cfg(not(test))]
     pub(crate) fn traceln(_: core::fmt::Arguments) {}
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "alloc"))]
     pub(crate) mod alloc {
-        // use core::{
-        //     future::Future,
-        //     pin::Pin,
-        //     task::{Context, Poll},
-        // };
+        pub(crate) use ::alloc::*;
 
-        use std::sync::Arc;
-
+        #[cfg(test)]
         pub(in crate::loom) mod track {
             use std::{
                 cell::RefCell,
@@ -513,7 +516,7 @@ mod inner {
             value: T,
 
             #[cfg(test)]
-            track: Option<Arc<track::TrackData>>,
+            track: Option<sync::Arc<track::TrackData>>,
         }
 
         impl<T> Track<T> {
