@@ -187,7 +187,7 @@ impl Wire for TestWire {
         tracing::info!(?msg, "sending message");
         let frame = match msg {
             OutboundMessage::Control(ctrl) => {
-                postcard::to_allocvec(&InboundMessage::Control(ctrl)).unwrap()
+                todo!("eliza: serialize!");
             }
             OutboundMessage::Data {
                 local_id,

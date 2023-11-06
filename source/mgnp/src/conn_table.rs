@@ -1,9 +1,10 @@
 use crate::{
+    connector::OutboundConnect,
     message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
-    registry, OutboundConnect,
+    registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
-use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot};
+use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot, serbox};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -224,10 +225,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Start a locally-initiated connecting socket, returning the frame to send
     /// in order to initiate that connection.
     #[must_use]
-    pub(crate) fn start_connecting<'data>(
+    pub(crate) fn start_connecting(
         &mut self,
-        connect: OutboundConnect<'data>,
-    ) -> Option<ControlMessage<'data>> {
+        connect: OutboundConnect,
+    ) -> Option<ControlMessage<Option<serbox::Consumer>>> {
         let OutboundConnect {
             hello,
             identity,
@@ -238,7 +239,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         let local_id = match self.reserve_id() {
             Some(id) => id,
             None => {
-                rsp.send(Err(Nak::ConnTableFull(CAPACITY)));
+                // if the local initiator dropped the response channel, that's
+                // fine, we're bailing anyway!
+                let _ = rsp.send(Err(Nak::ConnTableFull(CAPACITY)));
                 return None;
             }
         };
@@ -285,8 +288,16 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     );
                 };
 
-                // tell the remote that they're okay
-                rsp.send(Ok(()));
+                // tell the local connection initiator that they're okay
+                if rsp.send(Ok(())).is_err() {
+                    // local initiator is no longer there, reset!
+                    tracing::debug!(
+                        ?local_id,
+                        ?remote_id,
+                        "process_ack: local initiator is no longer there; resetting"
+                    );
+                    return Some(OutboundMessage::reset(remote_id));
+                }
 
                 tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
                 None
@@ -296,7 +307,11 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> ControlMessage {
+    fn accept(
+        &mut self,
+        remote_id: Id,
+        channel: SerBiDi,
+    ) -> ControlMessage<Option<serbox::Consumer>> {
         let sock = Socket {
             state: State::Open { remote_id },
             channel,
@@ -356,7 +371,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         Some(self.next_id)
     }
 
-    #[must_use]
     fn insert_at(&mut self, local_id: Id, socket: Socket) {
         let entry = self.conns.get_mut(local_id).expect("ID should be present");
         self.next_id = match mem::replace(entry, Entry::Occupied(socket)) {

@@ -56,7 +56,7 @@ async fn basically_works() {
 
     let (ser_chan, chan) = make_bidis::<HelloWorldResponse, HelloWorldRequest>(8);
     conn_tx
-        .send(OutboundConnect::new(hello_world_id(), &[], ser_chan))
+        .send(OutboundConnect::new(hello_world_id(), None, ser_chan))
         .await
         .unwrap();
 

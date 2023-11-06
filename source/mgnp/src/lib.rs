@@ -8,9 +8,11 @@ use core::fmt;
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use futures::{FutureExt, Stream, StreamExt};
-use tricky_pipe::{bidi::SerBiDi, oneshot};
+use tricky_pipe::{bidi::SerBiDi, oneshot, serbox};
 
+pub mod channel;
 mod conn_table;
+mod connector;
 pub mod message;
 pub mod registry;
 use message::Nak;
@@ -32,18 +34,6 @@ pub trait Wire {
     type Error;
     async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), Self::Error>;
     async fn recv(&mut self) -> Result<Self::Frame, Self::Error>;
-}
-
-/// An outbound connect request.
-pub struct OutboundConnect<'data> {
-    /// The identity of the remote service to connect to.
-    identity: registry::Identity,
-    /// The "hello" message to send to the remote service.
-    hello: &'data [u8],
-    /// The local bidirectional channel to bind to the remote service.
-    channel: SerBiDi,
-    /// Sender for the response from the remote service.
-    rsp: oneshot::Sender<Result<(), Nak>>,
 }
 
 /// A MGNP network interface for a particular [`Wire`].
@@ -98,7 +88,7 @@ where
 
     pub async fn run(
         &mut self,
-        conns: impl Stream<Item = OutboundConnect<'_>>,
+        conns: impl Stream<Item = OutboundConnect>,
     ) -> Result<(), InterfaceError<Wi::Error>> {
         futures::pin_mut!(conns);
         loop {
@@ -184,23 +174,6 @@ where
 }
 
 // === impl OutboundConnect ===
-
-impl<'data> OutboundConnect<'data> {
-    #[must_use]
-    pub fn new(
-        identity: registry::Identity,
-        hello: &'data [u8],
-        channel: SerBiDi,
-        rsp: oneshot::Sender<Result<(), Nak>>,
-    ) -> Self {
-        Self {
-            identity,
-            hello,
-            channel,
-            rsp,
-        }
-    }
-}
 
 // === impl InterfaceError ===
 

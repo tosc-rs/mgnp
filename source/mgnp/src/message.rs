@@ -1,9 +1,9 @@
 use crate::{registry::Identity, Id, LinkId};
-use tricky_pipe::mpsc;
+use tricky_pipe::{mpsc::SerRecvRef, serbox};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum InboundMessage<'data> {
-    Control(ControlMessage<'data>),
+    Control(ControlMessage<&'data [u8]>),
     Data {
         local_id: Id,
         remote_id: Id,
@@ -13,16 +13,16 @@ pub enum InboundMessage<'data> {
 
 #[derive(Debug)]
 pub enum OutboundMessage<'data> {
-    Control(ControlMessage<'data>),
+    Control(ControlMessage<Option<serbox::Consumer>>),
     Data {
         local_id: Id,
         remote_id: Id,
-        data: mpsc::SerRecvRef<'data>,
+        data: SerRecvRef<'data>,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum ControlMessage<'data> {
+pub enum ControlMessage<T> {
     Ack {
         local_id: Id,
         remote_id: Id,
@@ -34,7 +34,7 @@ pub enum ControlMessage<'data> {
     Connect {
         local_id: Id,
         identity: Identity,
-        hello: &'data [u8],
+        hello: T,
     },
     Reset {
         remote_id: Id,
@@ -72,7 +72,7 @@ impl OutboundMessage<'_> {
     }
 }
 
-impl ControlMessage<'_> {
+impl<T> ControlMessage<T> {
     pub(crate) fn link_id(&self) -> LinkId {
         match *self {
             Self::Ack {
