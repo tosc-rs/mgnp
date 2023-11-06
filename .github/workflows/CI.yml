@@ -45,6 +45,7 @@ jobs:
     - clippy
     - test
     - loom
+    - miri
     - docs
     - fmt
     steps:
@@ -106,6 +107,22 @@ jobs:
       env:
         # don't allow any loom model to run for longer than 2 mins on CI
         LOOM_MAX_DURATION: 120
+
+  # run `just miri`
+  miri:
+    name: just miri
+    needs: check # skip on commits that don't compile.
+    # TODO(eliza): this *should* only run if trickypipe changed...
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: install nextest
+      uses: taiki-e/install-action@nextest
+    - uses: extractions/setup-just@v1
+    - uses: actions/checkout@v2
+    - name: rust toolchain
+      run: rustup show
+    - run: just miri
 
   # check that RustDoc builds
   docs:
