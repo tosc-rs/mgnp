@@ -1,7 +1,5 @@
 //! A type-erased, serializable, reusable shared box thingy.
 #![warn(missing_debug_implementations)]
-#![allow(missing_docs)] // i'll fix this later...
-
 use crate::{
     loom::{
         cell::UnsafeCell,
@@ -18,12 +16,52 @@ use crate::loom::alloc::boxed::Box;
 #[cfg(any(test, feature = "alloc"))]
 use alloc::vec::Vec;
 
+/// Shares a `T`-typed value as a type-erased, serializable [`Consumer`].
+///
+/// A `Sharer` is an owning reference to a shareable memory location (either a
+/// heap-allocated [`Box`] or a `static`) which contains a [`SerBox`]`<T>`. The
+/// `Sharer` can be used to store a `T`-typed value in that memory location,
+/// producing a [`Consumer`], a type-erased reference to that value which can be
+/// used to serialize the value.
+///
+/// A `Sharer` may only store a single value at a time, constructing a single
+/// [`Consumer`]. The value remains shared as long as the [`Consumer`] exists.
+/// When the [`Consumer`] is dropped, the shared value is also dropped, and the
+/// `Sharer` may be used to share a new value.
+///
+/// Values can be shared using the [`Sharer::try_share`] method, which returns
+/// an error if a previously-shared value is still being used, or
+/// [`Sharer::share`], which will asynchronously wait until any currently alive
+/// [`Consumer`]s are dropped before sharing a new value.
+///
+/// A `Sharer` can be constructed from a [`Box`]`<`[`SerBox`]`<T>>` using
+/// [`SerBox::sharer`], if the "alloc" crate feature flag is enabled.
+/// Alternatively, one may be constructed from an `&'static `[`SerBox`]`<T>`
+/// using [`SerBox::static_sharer`].
+///
+/// When the "alloc" feature flag is enabled, the [`Sharer::new`] and
+/// [`Sharer::default`] methods provide shorthand for constructing a `Sharer`
+/// from a [`Box`]`<`[`SerBox`]`<T>>`.
 #[must_use = "a Sharer does nothing if `share` or `try_share` are not called"]
 pub struct Sharer<T> {
     shared: NonNull<SerBox<T>>,
     drop_shared: unsafe fn(NonNull<SerBox<()>>),
 }
 
+/// A type-erased owning reference to a serializable value shared by a
+/// [`Sharer`].
+///
+/// A `Consumer` may be used to serialize the referenced value to a byte slice
+/// using the [`Consumer::to_slice`] method. The [`Consumer::to_slice_framed`]
+/// method serializes the referenced value to a byte slice as a COBS frame.
+///
+/// If the "alloc" crate feature flag is enabled, the [`Consumer::to_vec`] and
+/// [`Consumer::to_vec_framed`] methods may be used to serialize the value to a
+/// [`Vec`]`<u8>`.
+///
+/// The shared value is (conceptually) owned by the `Consumer`, and dropping the
+/// `Consumer` will drop the value. Once the `Consumer` has been dropped, the
+/// [`Sharer`] may share another value, producing a new `Consumer`.
 #[must_use = "a Consumer does nothing if `to_vec`, `to_vec_framed`, \
              `to_slice`, or `to_slice_framed` are not called"]
 pub struct Consumer {
@@ -32,7 +70,33 @@ pub struct Consumer {
     drop_shared: unsafe fn(NonNull<SerBox<()>>),
 }
 
-#[repr(C)]
+/// The shared memory location used by [`Sharer`]s and [`Consumer`]s to store a
+/// shared value.
+///
+/// This type is not used directly. Instead, it is used to construct a
+/// [`Sharer`] when it has been stored in a shareable memory location. This may
+/// be a `static SerBox<T>`, using the [`SerBox::static_sharer`] method, or, if
+/// the "alloc" crate feature flag is enabled, a [`Box`]`<`[`SerBox`]`<T>>`,
+/// using [`SerBox::sharer`].
+///
+/// When using "alloc", users need not construct a `SerBox` directly, and can
+/// instead construct [`Sharer`]s using [`Sharer::new`] or [`Sharer::default`].
+/// However, when using a `static` to store the `SerBox`, it is necessary to
+/// construct instances of `SerBox` as part of the static initializer.
+///
+/// For example:
+/// ```
+/// use tricky_pipe::serbox::SerBox;
+///
+/// static MY_SERBOX: SerBox<u32> = SerBox::new();
+///
+/// let sharer = MY_SERBOX.static_sharer()
+///     .expect("no Sharer has been constructed yet, so we can claim it");
+///
+/// // ... use the `Sharer` to share type-erased values ...
+/// # drop(sharer);
+/// ```
+#[must_use = "a SerBox does nothing if it is not used to construct a `Sharer`"]
 pub struct SerBox<T> {
     state: AtomicU8,
     typeinfo: TypeInfo,
@@ -62,11 +126,69 @@ impl<T> Sharer<T>
 where
     T: serde::Serialize + Send + Sync + 'static,
 {
+    /// Returns a new `Sharer`, using a heap-allocated [`Box`] as the shared
+    /// memory location.
+    ///
+    /// This function is only available when the "alloc" crate feature flag is
+    /// enabled. When "alloc" is not enabled, a statically-allocated `Sharer`
+    /// may be constructed by using [`SerBox::static_sharer`].
     #[cfg(any(test, feature = "alloc"))]
     pub fn new() -> Self {
         Box::new(SerBox::new()).sharer()
     }
 
+    /// Attempts to share `value` as a type-erased serializable [`Consumer`], if
+    /// this `Sharer` is not currently sharing a value.
+    ///
+    /// If a value is currently shared (i.e. a previously-created [`Consumer`]
+    /// still exists), this method returns an [`Err`]`(T)` with the shared
+    /// value, so that it may be reused by the caller.
+    ///
+    /// # Examples
+    ///
+    /// Sharing a value:
+    ///
+    /// ```
+    /// use tricky_pipe::serbox::Sharer;
+    ///
+    /// let mut sharer = Sharer::new();
+    ///
+    /// // Since no `Consumer` currently exists, `try_share` will succeed.
+    /// let consumer = sharer.try_share(42)
+    ///     .expect("no value is currently shared");
+    ///
+    /// // the `Consumer` can be used to serialize the shared value.
+    /// let bytes = consumer.to_vec().expect("serialization should succeed");
+    /// # drop(bytes);
+    /// ```
+    ///
+    /// A new value can be shared once any previously-existing [`Consumer`] has
+    /// been dropped:
+    ///
+    /// ```
+    /// use tricky_pipe::serbox::Sharer;
+    ///
+    /// let mut sharer = Sharer::new();
+    ///
+    /// // Share a value:
+    /// let consumer = sharer.try_share(42)
+    ///     .expect("no value is currently shared");
+    ///
+    /// // A subsequent call to `try_share` will fail, because a value is
+    /// // currently being shared.
+    /// let val2 = sharer.try_share(420).expect_err("a value is currently shared");
+    ///
+    /// // Use the existing `Consumer`, and drop it once we're done.
+    /// let bytes = consumer.to_vec().expect("serialization should succeed");
+    /// # drop(bytes);
+    /// drop(consumer);
+    ///
+    /// // Now that the previous consumer no longer exists, and the box is
+    /// // unoccupied, we can share a new value:
+    /// let consumer = sharer.try_share(420)
+    ///     .expect("previous Consumer has been dropped");
+    /// # drop(consumer);
+    /// ```
     pub fn try_share(&mut self, value: T) -> Result<Consumer, T> {
         unsafe { self.shared.as_ref() }.try_share(value)?;
 
