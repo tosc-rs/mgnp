@@ -191,7 +191,7 @@ where
     /// # drop(consumer);
     /// ```
     pub fn try_share(&mut self, value: T) -> Result<Consumer, T> {
-        unsafe { self.shared.as_ref() }.try_share(value)?;
+        self.shared().try_share(value)?;
 
         Ok(Consumer {
             shared: self.shared.cast(),
@@ -206,10 +206,7 @@ where
                 Ok(consumer) => return consumer,
                 Err(v) => {
                     value = v;
-                    unsafe { self.shared.as_ref() }
-                        .sharer_ready
-                        .wait()
-                        .await
+                    test_dbg!(self.shared().sharer_ready.wait().await)
                         .expect("sharer_ready waitcell is never closed");
                 }
             }
@@ -217,15 +214,49 @@ where
     }
 }
 
+impl<T> Sharer<T> {
+    /// Borrows the shared data.
+    #[inline]
+    fn shared(&self) -> &SerBox<T> {
+        unsafe {
+            // Safety: the only part of the shared state that is aliased mutably
+            // is the `data`, which lives in an `UnsafeCell` anyway. And, it's
+            // okay to use `NonNull::as_ref` here, because the returned
+            // reference will not outlive this `Sharer`, and the `Sharer` owns
+            // the shared memory location pointed to by that `NonNull`...
+            self.shared.as_ref()
+        }
+    }
+}
+
 impl<T> Drop for Sharer<T> {
     fn drop(&mut self) {
-        let state = unsafe { self.shared.as_ref() }
+        let state = test_dbg!(self
+            .shared()
             .state
-            .fetch_and(!(HAS_SHARER | HAS_DATA), AcqRel);
+            .fetch_and(!(HAS_SHARER | HAS_DATA), AcqRel));
 
+        // if there's no consumer, we can deallocate...
         if test_dbg!(state) & HAS_CONSUMER == 0 {
-            // no consumer, we can deallocate
+            // if there's no consumer, but the `HAS_DATA` bit is still set, this
+            // means someone is `mem::forget`ting `Consumer`s. make sure the
+            // data gets dropped.
+            if test_dbg!(state & HAS_DATA == 0) {
+                self.shared().data.with_mut(|data| unsafe {
+                    // Safety: since there's no consumer, as indicated by the
+                    // `HAS_CONSUMER` bit being unset, we have exclusive mutable
+                    // access to the shared memory. And, since the `HAS_DATA`
+                    // bit *is* set, we know the data is initialized, so we can
+                    // drop it.
+                    core::ptr::drop_in_place((*data).as_mut_ptr());
+                });
+            }
+
             unsafe {
+                // Safety: since there's no consumer, as indicated by the
+                // `HAS_CONSUMER` bit being unset, we have exclusive mutable
+                // access to the shared memory, and therefore, we can (and
+                // must!) deallocate it.
                 (self.drop_shared)(self.shared.cast());
             }
         }
@@ -244,13 +275,9 @@ where
 
 impl<T> fmt::Debug for Sharer<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            shared,
-            drop_shared,
-        } = self;
         f.debug_struct("Sharer")
-            .field("shared", &unsafe { shared.as_ref() })
-            .field("drop_shared", &drop_shared)
+            .field("shared", &self.shared())
+            .field("drop_shared", &self.drop_shared)
             .finish()
     }
 }
@@ -450,7 +477,7 @@ impl<T> fmt::Debug for SerBox<T> {
             data: _,
         } = self;
         f.debug_struct("SerBox")
-            .field("state", &format_args!("{:#02b}", state.load(Acquire)))
+            .field("state", &format_args!("{:#06b}", state.load(Acquire)))
             .field("sharer_ready", &sharer_ready)
             .field(
                 "data",
@@ -513,6 +540,20 @@ mod tests {
         loom::model(|| {
             let serbox = Box::new(SerBox::<SerStruct>::new());
             basically_works(serbox.sharer());
+        })
+    }
+
+    #[test]
+    fn debug_impls() {
+        loom::model(|| {
+            let serbox = test_dbg!(Box::new(SerBox::<SerStruct>::new()));
+            let mut sharer = test_dbg!(serbox.sharer());
+            let _ = test_dbg!(sharer.try_share(SerStruct {
+                a: 1,
+                b: 2,
+                c: 3,
+                d: "hello".into()
+            }));
         })
     }
 
