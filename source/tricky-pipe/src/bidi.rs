@@ -4,7 +4,8 @@
 //! [`Sender`] and [`Receiver`] or a [`DeserSender`] and [`SerReceiver`]
 //! (respectively) into a single bidirectional channel which can both send and
 //! receive messages to/from a remote peer.
-use super::*;
+use crate::mpsc::*;
+use core::fmt;
 use futures::FutureExt;
 
 /// A bidirectional typed channel.
