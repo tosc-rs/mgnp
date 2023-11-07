@@ -97,6 +97,7 @@ pub struct Consumer {
 /// # drop(sharer);
 /// ```
 #[must_use = "a SerBox does nothing if it is not used to construct a `Sharer`"]
+#[repr(C)]
 pub struct SerBox<T> {
     state: AtomicU8,
     typeinfo: TypeInfo,
@@ -116,7 +117,7 @@ struct Vtable {
     drop_data: fn(NonNull<SerBox<()>>),
 }
 
-const IDLE: u8 = 0;
+const NEW: u8 = 0;
 const HAS_SHARER: u8 = 1 << 0;
 const HAS_DATA: u8 = 1 << 1;
 const HAS_CONSUMER: u8 = 1 << 2;
@@ -221,13 +222,8 @@ impl<T> Drop for Sharer<T> {
         let state = unsafe { self.shared.as_ref() }
             .state
             .fetch_and(!(HAS_SHARER | HAS_DATA), AcqRel);
-        if state & HAS_DATA != 0 {
-            unsafe { self.shared.as_ref() }
-                .data
-                .with_mut(|data| unsafe { core::ptr::drop_in_place((*data).as_mut_ptr()) })
-        }
 
-        if state & HAS_CONSUMER == 0 {
+        if test_dbg!(state) & HAS_CONSUMER == 0 {
             // no consumer, we can deallocate
             unsafe {
                 (self.drop_shared)(self.shared.cast());
@@ -294,7 +290,7 @@ impl Drop for Consumer {
         let state = unsafe { self.shared.as_ref() }
             .state
             .fetch_and(!HAS_DATA, AcqRel);
-        if state & HAS_SHARER == 0 {
+        if test_dbg!(state & HAS_SHARER) == 0 {
             // no sharer, we can deallocate
             unsafe { (self.drop_shared)(self.shared) }
         } else {
@@ -338,7 +334,7 @@ where
     #[cfg(any(test, feature = "alloc"))]
     pub fn sharer(self: Box<Self>) -> Sharer<T> {
         self.state
-            .compare_exchange(IDLE, HAS_SHARER, AcqRel, Acquire)
+            .compare_exchange(NEW, HAS_SHARER, AcqRel, Acquire)
             .expect("this SerBox was already converted into a Sharer");
         Sharer {
             shared: unsafe { NonNull::new_unchecked(Box::into_raw(self)) },
@@ -348,7 +344,7 @@ where
 
     pub fn static_sharer(&'static self) -> Option<Sharer<T>> {
         self.state
-            .compare_exchange(IDLE, HAS_SHARER, AcqRel, Acquire)
+            .compare_exchange(NEW, HAS_SHARER, AcqRel, Acquire)
             .ok()?;
 
         Some(Sharer {
@@ -361,7 +357,7 @@ where
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            state: AtomicU8::new(IDLE),
+            state: AtomicU8::new(NEW),
             typeinfo: TypeInfo::of::<T>(),
             sharer_ready: WaitCell::new(),
             data: UnsafeCell::new(MaybeUninit::uninit()),
@@ -372,7 +368,7 @@ where
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: AtomicU8::new(IDLE),
+            state: AtomicU8::new(NEW),
             typeinfo: TypeInfo::of::<T>(),
             sharer_ready: WaitCell::new(),
             data: UnsafeCell::new(MaybeUninit::uninit()),
@@ -419,10 +415,10 @@ where
     }
 
     fn try_share(&self, value: T) -> Result<(), T> {
-        if self
+        if test_dbg!(self
             .state
-            .compare_exchange(HAS_SHARER, SHARED, AcqRel, Acquire)
-            .is_err()
+            .compare_exchange(HAS_SHARER, SHARED, AcqRel, Acquire))
+        .is_err()
         {
             return Err(value);
         }
