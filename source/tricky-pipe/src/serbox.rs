@@ -18,6 +18,7 @@ use crate::loom::alloc::boxed::Box;
 #[cfg(any(test, feature = "alloc"))]
 use alloc::vec::Vec;
 
+#[must_use = "a Sharer does nothing if `share` or `try_share` are not called"]
 pub struct Sharer<T> {
     shared: NonNull<SerBox<T>>,
     drop_shared: unsafe fn(NonNull<SerBox<()>>),
@@ -61,6 +62,11 @@ impl<T> Sharer<T>
 where
     T: serde::Serialize + Send + Sync + 'static,
 {
+    #[cfg(any(test, feature = "alloc"))]
+    pub fn new() -> Self {
+        Box::new(SerBox::new()).sharer()
+    }
+
     pub fn try_share(&mut self, value: T) -> Result<Consumer, T> {
         unsafe { self.shared.as_ref() }.try_share(value)?;
 
@@ -105,6 +111,16 @@ impl<T> Drop for Sharer<T> {
                 (self.drop_shared)(self.shared.cast());
             }
         }
+    }
+}
+
+#[cfg(any(test, feature = "alloc"))]
+impl<T> Default for Sharer<T>
+where
+    T: serde::Serialize + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
