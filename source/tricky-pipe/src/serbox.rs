@@ -145,6 +145,9 @@ where
     /// still exists), this method returns an [`Err`]`(T)` with the shared
     /// value, so that it may be reused by the caller.
     ///
+    /// To instead wait asynchronously until a previously-created [`Consumer`]
+    /// has been dropped, use [`Sharer::share`] instead.
+    ///
     /// # Examples
     ///
     /// Sharing a value:
@@ -200,6 +203,12 @@ where
         })
     }
 
+    /// Share `value` as a type-erased serializable [`Consumer`].
+    ///
+    /// If a value is currently shared (i.e. a previously-created [`Consumer`]
+    /// still exists), this method will wait until that consumer has been
+    /// dropped before sharing the new value. To return an error when a previous
+    /// [`Consumer`] already exists, use [`Sharer::try_share`], instead.
     pub async fn share(&mut self, mut value: T) -> Consumer {
         loop {
             match self.try_share(value) {
@@ -241,7 +250,7 @@ impl<T> Drop for Sharer<T> {
             // if there's no consumer, but the `HAS_DATA` bit is still set, this
             // means someone is `mem::forget`ting `Consumer`s. make sure the
             // data gets dropped.
-            if test_dbg!(state & HAS_DATA == 0) {
+            if test_dbg!(state & HAS_DATA != 0) {
                 self.shared().data.with_mut(|data| unsafe {
                     // Safety: since there's no consumer, as indicated by the
                     // `HAS_CONSUMER` bit being unset, we have exclusive mutable
@@ -288,20 +297,37 @@ unsafe impl<T: Send + Sync> Sync for Sharer<T> {}
 // === impl Consumer ===
 
 impl Consumer {
+    /// Serialize the shared value to a [`postcard`]-encoded [`Vec`]`<u8>`.
+    ///
+    /// This method is only available if the "alloc" feature flag is enabled.
     #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec(&self) -> postcard::Result<Vec<u8>> {
         (self.vtable.to_vec)(self.shared)
     }
 
+    /// Serialize the shared value to a [`postcard`]-encoded, COBS-framed
+    /// [`Vec`]`<u8>`.
+    ///
+    /// This method is only available if the "alloc" feature flag is enabled.
     #[cfg(any(test, feature = "alloc"))]
     pub fn to_vec_framed(&self) -> postcard::Result<Vec<u8>> {
         (self.vtable.to_vec_framed)(self.shared)
     }
 
+    /// Serialize the shared value to the provided byte slice, using
+    /// [`postcard`].
+    ///
+    /// This method returns the sub-slice of `buf` that contains the serialized
+    /// representation of the value.
     pub fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
         (self.vtable.to_slice)(self.shared, buf)
     }
 
+    /// Serialize the shared value to the provided byte slice, as a
+    /// [`postcard`]-encoded COBS frame.
+    ///
+    /// This method returns the sub-slice of `buf` that contains the serialized
+    /// representation of the value.
     pub fn to_slice_framed<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
         (self.vtable.to_slice_framed)(self.shared, buf)
     }
@@ -358,6 +384,10 @@ impl<T> SerBox<T>
 where
     T: serde::Serialize + Send + Sync + 'static,
 {
+    /// Constructs a [`Sharer`]`<T>` from a heap-allocated `SerBox<T>`.
+    ///
+    /// This method always succeeds, because the `SerBox` is consumed by this
+    /// method, preventing a [`Sharer`] from being created a second time.
     #[cfg(any(test, feature = "alloc"))]
     pub fn sharer(self: Box<Self>) -> Sharer<T> {
         self.state
@@ -369,6 +399,12 @@ where
         }
     }
 
+    /// Attempts to construct a [`Sharer`]`<T>` from a `&'static SerBox<T>`.
+    ///
+    /// If the provided `static SerBox<T>` has already been used to construct a
+    /// [`Sharer`], this method returns [`None`]. If that [`Sharer`], and any
+    /// [`Consumer`]s it has created, are dropped,this method will return
+    /// [`Some`] with a new [`Sharer`].
     pub fn static_sharer(&'static self) -> Option<Sharer<T>> {
         self.state
             .compare_exchange(NEW, HAS_SHARER, AcqRel, Acquire)
@@ -380,8 +416,8 @@ where
         })
     }
 
+    /// Returns a new `SerBox<T>`.
     #[cfg(not(loom))]
-    #[must_use]
     pub const fn new() -> Self {
         Self {
             state: AtomicU8::new(NEW),
@@ -391,8 +427,8 @@ where
         }
     }
 
+    /// Returns a new `SerBox<T>`.
     #[cfg(loom)]
-    #[must_use]
     pub fn new() -> Self {
         Self {
             state: AtomicU8::new(NEW),
@@ -463,8 +499,9 @@ where
         drop(Box::from_raw(ptr))
     }
 
-    unsafe fn drop_static(_: NonNull<SerBox<()>>) {
-        // nop
+    unsafe fn drop_static(ptr: NonNull<SerBox<()>>) {
+        let shared = ptr.cast::<Self>().as_ref();
+        test_dbg!(shared.state.fetch_and(!HAS_SHARER, Release));
     }
 }
 
@@ -566,6 +603,47 @@ mod tests {
                 SERBOX
                     .static_sharer()
                     .expect("no static sharer has been claimed"),
+            );
+        })
+    }
+
+    #[test]
+    #[cfg(not(loom))]
+    fn static_is_reusable() {
+        static SERBOX: SerBox<SerStruct> = SerBox::new();
+        loom::model(|| {
+            let mut sharer = test_dbg!(SERBOX.static_sharer()).expect("no sharer exists");
+
+            assert!(
+                test_dbg!(SERBOX.static_sharer()).is_none(),
+                "new Sharer should not be created while Sharer exists"
+            );
+
+            let val1 = SerStruct {
+                a: 1,
+                b: 2,
+                c: 3,
+                d: "hello".into(),
+            };
+            let consumer = test_dbg!(sharer.try_share(val1))
+                .expect("try_share should succeed while no Consumer exists");
+
+            test_dbg!(drop(sharer));
+
+            assert!(
+                test_dbg!(SERBOX.static_sharer()).is_none(),
+                "new Sharer should not be created while Consumer exists"
+            );
+
+            test_dbg!(drop(consumer));
+
+            let _sharer = test_dbg!(SERBOX.static_sharer()).expect(
+                "new Sharer can be created now that both Sharer and Consumer have been dropped",
+            );
+
+            assert!(
+                test_dbg!(SERBOX.static_sharer()).is_none(),
+                "new Sharer should not be created while Sharer exists"
             );
         })
     }
