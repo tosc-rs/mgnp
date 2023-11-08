@@ -19,7 +19,7 @@ pub struct OutboundConnect {
     pub(crate) rsp: oneshot::Sender<Result<(), Nak>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum ConnectError {
     InterfaceDead,
     Nak(Nak),
