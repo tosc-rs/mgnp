@@ -1,11 +1,10 @@
 use crate::{
-    channel,
     connector::OutboundConnect,
-    message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
+    message::{Header, InboundFrame, Nak, OutboundFrame},
     registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
-use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot, serbox};
+use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -30,7 +29,7 @@ pub(crate) struct ConnTable<const CAPACITY: usize> {
 #[derive(Debug)]
 enum State {
     Open { remote_id: Id },
-    Connecting(oneshot::Sender<Result<channel::Ids, Nak>>),
+    Connecting(oneshot::Sender<Result<(), Nak>>),
 }
 
 #[derive(Debug)]
@@ -73,7 +72,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     }
 
     /// Returns the next outbound frame.
-    pub(crate) async fn next_outbound(&mut self) -> OutboundMessage<'_> {
+    pub(crate) async fn next_outbound(&mut self) -> OutboundFrame<'_> {
         // remove any dead socket that closed during the previous `next_outbound` call.
         self.cleanup_dead();
 
@@ -99,11 +98,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     // a local data frame is ready to send!
                     Poll::Ready(Some(data)) => {
                         let local_id = Id::from_index(idx);
-                        return Poll::Ready(OutboundMessage::Data {
-                            local_id,
-                            remote_id: *remote_id,
-                            data,
-                        });
+                        return Poll::Ready(OutboundFrame::data(*remote_id, local_id, data));
                     }
 
                     // the local stream has closed, so mark the socket as dead
@@ -111,7 +106,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     // closed.
                     Poll::Ready(None) => {
                         self.dead_index = Some(Id::from_index(idx));
-                        return Poll::Ready(OutboundMessage::reset(*remote_id));
+                        return Poll::Ready(OutboundFrame::reset(*remote_id));
                     }
 
                     // nothing to do, move on to the next socket.
@@ -140,33 +135,31 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     pub async fn process_inbound(
         &mut self,
         registry: &'_ impl registry::Registry,
-        msg: InboundMessage<'_>,
-    ) -> Option<OutboundMessage<'_>> {
-        let span = tracing::trace_span!("process_inbound", id = %msg.link_id());
+        frame: InboundFrame<'_>,
+    ) -> Option<OutboundFrame<'_>> {
+        let span = tracing::trace_span!("process_inbound", id = %frame.header.link_id());
         let _enter = span.enter();
-        match msg {
+        match frame.header {
             // Inbound data frame from remote.
-            InboundMessage::Data {
+            Header::Data {
                 local_id,
                 remote_id,
-                data,
             } => {
                 tracing::trace!(
                     id.remote = %local_id,
                     id.local = %remote_id,
-                    len = data.len(),
+                    len = frame.body.len(),
                     "process_inbound: data",
                 );
                 // the remote peer's remote ID is our local ID.
                 let id = remote_id;
                 let Some(socket) = self.conns.get_mut(id) else {
                     tracing::debug!("process_inbound: no socket for data frame, resetting...");
-                    return Some(OutboundMessage::reset(local_id));
+                    return Some(OutboundFrame::reset(local_id));
                 };
-
                 // try to reserve send capacity on this socket.
                 let error = match socket.reserve_send().await {
-                    Ok(permit) => match permit.send(data) {
+                    Ok(permit) => match permit.send_framed(frame.body) {
                         Ok(_) => return None,
                         Err(error) => {
                             tracing::debug!(%error, "process_inbound: failed to deserialize data");
@@ -182,42 +175,32 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // channel has closed locally.
                 tracing::trace!("process_inbound: local error: {error}; resetting...");
                 self.close(id);
-                Some(OutboundMessage::reset(local_id))
+                Some(OutboundFrame::reset(local_id))
             }
-            InboundMessage::Control(ControlMessage::Ack {
+            Header::Ack {
                 local_id,
                 remote_id,
-            }) => {
+            } => {
                 tracing::trace!(id.remote = %local_id, id.local = %remote_id, "process_inbound: ACK");
                 self.process_ack(remote_id, local_id)
             }
-            InboundMessage::Control(ControlMessage::Nak { remote_id, reason }) => {
+            Header::Nak { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
                 // TODO(eliza): send error to the initiator
                 self.close(remote_id);
                 None
             }
-            InboundMessage::Control(ControlMessage::Reset { remote_id }) => {
+            Header::Reset { remote_id } => {
                 tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
                 let _closed = self.close(remote_id);
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
                 None
             }
-            InboundMessage::Control(ControlMessage::Connect {
-                local_id,
-                identity,
-                hello,
-            }) => {
+            Header::Connect { local_id, identity } => {
                 tracing::trace!(id.remote = %local_id, ?identity, "process_inbound: CONNECT");
-                match registry.connect(identity, hello).await {
-                    Ok(channel) => {
-                        let rsp = self.accept(local_id, channel);
-                        Some(OutboundMessage::Control(rsp))
-                    }
-                    Err(reason) => Some(OutboundMessage::Control(ControlMessage::Nak {
-                        remote_id: local_id,
-                        reason,
-                    })),
+                match registry.connect(identity, frame.body).await {
+                    Ok(channel) => Some(self.accept(local_id, channel)),
+                    Err(reason) => Some(OutboundFrame::nak(local_id, reason)),
                 }
             }
         }
@@ -229,7 +212,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     pub(crate) fn start_connecting(
         &mut self,
         connect: OutboundConnect,
-    ) -> Option<ControlMessage<serbox::Consumer>> {
+    ) -> Option<OutboundFrame<'_>> {
         let OutboundConnect {
             hello,
             identity,
@@ -255,18 +238,14 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             },
         );
 
-        Some(ControlMessage::Connect {
-            local_id,
-            hello,
-            identity,
-        })
+        Some(OutboundFrame::connect(local_id, identity, hello))
     }
 
     /// Process an ack for a locally-initiated connecting socket with `local_id`.
-    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Option<OutboundMessage<'_>> {
+    fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Option<OutboundFrame<'static>> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
             tracing::debug!(id.local = %local_id, id.remote = %remote_id, "process_ack: no such socket");
-            return Some(OutboundMessage::reset(remote_id));
+            return Some(OutboundFrame::reset(remote_id));
         };
 
         match sock.state {
@@ -280,7 +259,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     id.actual_remote = %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Some(OutboundMessage::reset(remote_id))
+                Some(OutboundFrame::reset(remote_id))
             }
             ref mut state @ State::Connecting(_) => {
                 let State::Connecting(rsp) = mem::replace(state, State::Open { remote_id }) else {
@@ -290,20 +269,14 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 };
 
                 // tell the local connection initiator that they're okay
-                if rsp
-                    .send(Ok(channel::Ids {
-                        local_id,
-                        remote_id,
-                    }))
-                    .is_err()
-                {
+                if rsp.send(Ok(())).is_err() {
                     // local initiator is no longer there, reset!
                     tracing::debug!(
                         ?local_id,
                         ?remote_id,
                         "process_ack: local initiator is no longer there; resetting"
                     );
-                    return Some(OutboundMessage::reset(remote_id));
+                    return Some(OutboundFrame::reset(remote_id));
                 }
 
                 tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
@@ -314,7 +287,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> ControlMessage<serbox::Consumer> {
+    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> OutboundFrame<'_> {
         let sock = Socket {
             state: State::Open { remote_id },
             channel,
@@ -322,15 +295,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
         match self.insert(sock) {
             // Accepted, we got a local ID!
-            Some(local_id) => ControlMessage::Ack {
-                remote_id,
-                local_id,
-            },
+            Some(local_id) => OutboundFrame::ack(local_id, remote_id),
             // Conn table is full, can't accept this stream.
-            None => ControlMessage::Nak {
-                remote_id,
-                reason: Nak::ConnTableFull(CAPACITY),
-            },
+            None => OutboundFrame::nak(remote_id, Nak::ConnTableFull(CAPACITY)),
         }
     }
 
@@ -393,6 +360,11 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 // === impl Id ===
 
 impl Id {
+    #[cfg(test)]
+    pub(crate) fn new(n: u16) -> Self {
+        Self(NonZeroU16::new(n).expect("IDs must be non-zero"))
+    }
+
     #[cfg(not(debug_assertions))]
     #[must_use]
     fn from_index(idx: usize) -> Self {

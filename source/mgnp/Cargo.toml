@@ -9,6 +9,7 @@ edition = "2021"
 alloc = ["postcard/alloc", "tricky-pipe/alloc"]
 
 [dependencies]
+cobs = "0.2"
 heapless = "0.7.16"
 tracing = { version = "0.1.21", default-features = false }
 postcard = { version = "1.0.7", default-features = false }

@@ -11,30 +11,30 @@ use connector::OutboundConnect;
 use futures::FutureExt;
 use tricky_pipe::{mpsc, oneshot, serbox};
 
-pub mod channel;
+// pub mod channel;
 mod conn_table;
 pub mod connector;
 pub mod message;
 pub mod registry;
-use message::Nak;
-pub use message::{InboundMessage, OutboundMessage};
+pub use message::Frame;
+use message::{InboundFrame, Nak, OutboundFrame};
 pub use registry::Registry;
 pub use tricky_pipe;
 
-pub trait Frame {
-    fn as_bytes(&self) -> &[u8];
+// pub trait Frame {
+//     fn as_bytes(&self) -> &[u8];
 
-    fn decode(&self) -> postcard::Result<InboundMessage<'_>> {
-        postcard::from_bytes(self.as_bytes())
-    }
-}
+//     fn decode(&self) -> postcard::Result<InboundMessage<'_>> {
+//         postcard::from_bytes(self.as_bytes())
+//     }
+// }
 
 /// Represents a wire-level transport for MGNP [`Frame`]s.
 pub trait Wire {
-    type Frame: Frame;
-    type Error;
-    async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), Self::Error>;
-    async fn recv(&mut self) -> Result<Self::Frame, Self::Error>;
+    type Error: fmt::Display;
+    type Buffer: AsMut<[u8]>;
+    async fn send(&mut self, f: OutboundFrame<'_>) -> Result<(), Self::Error>;
+    async fn recv(&mut self) -> Result<Self::Buffer, Self::Error>;
 }
 
 /// A MGNP network interface state machine for a particular [`Wire`].
@@ -103,7 +103,7 @@ impl Interface {
     pub fn connector<S: registry::Service>(
         &self,
         hello_sharer: serbox::Sharer<S::Hello>,
-        rsp: oneshot::Receiver<Result<channel::Ids, Nak>>,
+        rsp: oneshot::Receiver<Result<(), Nak>>,
     ) -> connector::Connector<S> {
         connector::Connector {
             hello_sharer,
@@ -122,26 +122,32 @@ where
         use futures::future;
 
         let mut conns_remaining = true;
+        let Self {
+            conn_table,
+            registry,
+            wire,
+            conns_rx,
+        } = self;
         loop {
-            let mut in_frame = None;
+            let mut in_buf = None;
             let mut out_conn = None;
-
             // if the outbound connection stream has terminated, don't let it
             // wake us again.
             let next_conn = if conns_remaining {
-                future::Either::Left(self.conns_rx.recv())
+                future::Either::Left(conns_rx.recv())
             } else {
                 future::Either::Right(future::pending())
             };
 
             futures::select_biased! {
                 // inbound frame from the wire.
-                frame = self.wire.recv().fuse() => in_frame = Some(frame.map_err(InterfaceError::recv)?),
+                buf = wire.recv().fuse() => { in_buf = Some(buf.map_err(InterfaceError::recv)?); },
 
                 // either a connection needs to send data, or a connection has
                 // closed locally.
-                frame = self.conn_table.next_outbound().fuse() => {
-                    self.wire.send(frame).await.map_err(InterfaceError::send)?;
+                frame = conn_table.next_outbound().fuse() => {
+                    wire.send(frame).await.map_err(InterfaceError::send)?;
+                    continue;
                 },
 
                 // locally-initiated connect request
@@ -156,21 +162,36 @@ where
                 }
             };
 
-            if let Some(frame) = in_frame {
-                self.process_inbound(frame).await?;
-            }
+            if let Some(mut buf) = in_buf {
+                let frame = match InboundFrame::take_from_bytes(buf.as_mut()) {
+                    Ok((f, _)) => f,
+                    Err(e) => {
+                        tracing::warn!(?e, "failed to decode inbound frame");
+                        continue;
+                    }
+                };
+                let id = frame.header.link_id();
+                if id == LinkId::INTERFACE {
+                    todo!("eliza: handle interface frame");
+                    // return Ok(());
+                }
 
-            if let Some(out_conn) = out_conn {
-                tracing::debug!(identity = ?out_conn.identity, "initiating local connection...");
-                match self.conn_table.start_connecting(out_conn) {
+                // process the inbound message, possibly generating a new outbound frame
+                // to send.
+                if let Some(rsp) = conn_table.process_inbound(&*registry, frame).await {
+                    wire.send(rsp).await.map_err(|e| {
+                        InterfaceError::send(e)
+                            .with_context("while sending inbound frame response (ACK/NAK)")
+                    })?;
+                }
+            } else if let Some(conn) = out_conn {
+                tracing::debug!(identity = ?conn.identity, "initiating local connection...");
+                match conn_table.start_connecting(conn) {
                     Some(frame) => {
-                        self.wire
-                            .send(OutboundMessage::Control(frame))
-                            .await
-                            .map_err(|e| {
-                                InterfaceError::send(e)
-                                    .with_context("while sending local-initiated CONNECT")
-                            })?;
+                        wire.send(frame).await.map_err(|e| {
+                            InterfaceError::send(e)
+                                .with_context("while sending local-initiated CONNECT")
+                        })?;
                         tracing::debug!("local connect sent!")
                     }
                     None => {
@@ -179,37 +200,8 @@ where
                         // what hey want...
                     }
                 }
-            };
-        }
-    }
-
-    async fn process_inbound(&mut self, frame: Wi::Frame) -> Result<(), InterfaceError<Wi::Error>> {
-        let msg = match frame.decode() {
-            Ok(msg) => msg,
-            Err(error) => {
-                tracing::warn!(%error, "failed to decode inbound frame");
-                // return "Ok" here, even though there was an error, because we
-                // want the interface loop to keep running, instead of dying.
-                return Ok(());
             }
-        };
-
-        let id = msg.link_id();
-        if id == LinkId::INTERFACE {
-            todo!("eliza: handle interface frame");
-            // return Ok(());
         }
-
-        // process the inbound message, possibly generating a new outbound frame
-        // to send.
-        if let Some(rsp) = self.conn_table.process_inbound(&self.registry, msg).await {
-            self.wire.send(rsp).await.map_err(|e| {
-                InterfaceError::send(e)
-                    .with_context("while sending inbound frame response (ACK/NAK)")
-            })?;
-        }
-
-        Ok(())
     }
 }
 

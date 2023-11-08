@@ -1,11 +1,12 @@
+#![cfg(feature = "alloc")]
 use mgnp::{
-    message::{InboundMessage, Nak, OutboundMessage},
+    message::{Nak, OutboundFrame},
     registry,
     tricky_pipe::{
         bidi::{BiDi, SerBiDi},
         mpsc::TrickyPipe,
     },
-    Frame, Registry, Wire,
+    Registry, Wire,
 };
 use std::{
     collections::HashMap,
@@ -180,40 +181,18 @@ impl TestWire {
 }
 
 impl Wire for TestWire {
-    type Frame = TestFrame;
+    type Buffer = Vec<u8>;
     type Error = &'static str;
 
-    async fn recv(&mut self) -> Result<Self::Frame, &'static str> {
+    async fn recv(&mut self) -> Result<Self::Buffer, &'static str> {
         let frame = self.rx.recv().await;
         tracing::info!(frame = ?frame.as_ref().map(HexSlice::new), "RECV");
-        frame
-            .ok_or("the send end of this wire has been dropped")
-            .map(TestFrame)
+        frame.ok_or("the send end of this wire has been dropped")
     }
 
-    async fn send(&mut self, msg: OutboundMessage<'_>) -> Result<(), &'static str> {
-        // TODO(eliza): this is awkward, the trickypipe SerRecvRef API needs to
-        // suck less so we don't need to do it like this...
+    async fn send(&mut self, msg: OutboundFrame<'_>) -> Result<(), &'static str> {
         tracing::info!(?msg, "sending message");
-        let frame = match msg {
-            OutboundMessage::Control(ctrl) => {
-                todo!("eliza: serialize!");
-            }
-            OutboundMessage::Data {
-                local_id,
-                remote_id,
-                data,
-            } => {
-                let data = data.to_vec().unwrap();
-                postcard::to_allocvec(&InboundMessage::Data {
-                    local_id,
-                    remote_id,
-                    data: &data[..],
-                })
-                .unwrap()
-            }
-        };
-
+        let frame = msg.to_vec().expect("message should serialize");
         tracing::info!(frame = ?HexSlice::new(&frame), "SEND");
         self.tx
             .send(frame)
@@ -223,12 +202,6 @@ impl Wire for TestWire {
 }
 
 // === impl TestFrame ===
-
-impl Frame for TestFrame {
-    fn as_bytes(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
 
 struct HexSlice<'a>(&'a [u8]);
 

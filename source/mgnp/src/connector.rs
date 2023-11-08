@@ -1,9 +1,9 @@
-use crate::{channel, message::Nak, registry};
+use crate::{message::Nak, registry};
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
 pub struct Connector<S: registry::Service> {
     pub(super) hello_sharer: serbox::Sharer<S::Hello>,
-    pub(super) rsp: oneshot::Receiver<Result<channel::Ids, Nak>>,
+    pub(super) rsp: oneshot::Receiver<Result<(), Nak>>,
     pub(super) tx: mpsc::Sender<OutboundConnect>,
 }
 
@@ -16,7 +16,7 @@ pub struct OutboundConnect {
     /// The local bidirectional channel to bind to the remote service.
     pub(crate) channel: bidi::SerBiDi,
     /// Sender for the response from the remote service.
-    pub(crate) rsp: oneshot::Sender<Result<channel::Ids, Nak>>,
+    pub(crate) rsp: oneshot::Sender<Result<(), Nak>>,
 }
 
 #[derive(Debug)]
@@ -25,14 +25,16 @@ pub enum ConnectError {
     Nak(Nak),
 }
 
+pub type ClientChannel<S: registry::Service> = bidi::BiDi<S::ServerMsg, S::ClientMsg>;
+
 pub struct Channels<S: registry::Service> {
     srv_chan: bidi::SerBiDi,
-    client_chan: bidi::BiDi<S::ServerMsg, channel::DataFrame<S::ClientMsg>>,
+    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
 }
 
 pub struct StaticChannels<S: registry::Service, const CAPACITY: usize> {
     s2c: mpsc::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
-    c2s: mpsc::StaticTrickyPipe<channel::DataFrame<S::ClientMsg>, CAPACITY>,
+    c2s: mpsc::StaticTrickyPipe<S::ClientMsg, CAPACITY>,
 }
 
 impl<S: registry::Service> Channels<S> {
@@ -64,7 +66,7 @@ impl<S: registry::Service> Connector<S> {
             srv_chan,
             client_chan,
         }: Channels<S>,
-    ) -> Result<channel::ClientChannel<S>, ConnectError> {
+    ) -> Result<ClientChannel<S>, ConnectError> {
         let permit = self
             .tx
             .reserve()
@@ -82,7 +84,7 @@ impl<S: registry::Service> Connector<S> {
         match self.rsp.recv().await {
             Err(_) => Err(ConnectError::InterfaceDead),
             Ok(Err(nak)) => Err(ConnectError::Nak(nak)),
-            Ok(Ok(ids)) => Ok(channel::ClientChannel::new(ids, client_chan)),
+            Ok(Ok(_)) => Ok(client_chan),
         }
     }
 }

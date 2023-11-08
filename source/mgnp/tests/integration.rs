@@ -68,12 +68,13 @@ async fn basically_works() {
         .connect(hello_world_id(), (), mgnp::connector::Channels::new(8))
         .await
         .expect("connection should be established");
-    chan.send(HelloWorldRequest {
-        hello: "hello".to_string(),
-    })
-    .await
-    .expect("send request");
-    let rsp = chan.recv().await;
+    chan.tx()
+        .send(HelloWorldRequest {
+            hello: "hello".to_string(),
+        })
+        .await
+        .expect("send request");
+    let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
         Some(HelloWorldResponse {
