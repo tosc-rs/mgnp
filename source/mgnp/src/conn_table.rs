@@ -127,7 +127,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         // weird...
         if let Some(local_id) = self.dead_index.take() {
             tracing::debug!(id.local = %local_id, "removing closed stream from dead index");
-            self.close(local_id);
+            self.close(local_id, None);
         }
     }
 
@@ -174,7 +174,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // otherwise, we couldn't reserve a send permit because the
                 // channel has closed locally.
                 tracing::trace!("process_inbound: local error: {error}; resetting...");
-                self.close(id);
+                self.close(id, None);
                 Some(OutboundFrame::reset(local_id))
             }
             Header::Ack {
@@ -187,12 +187,12 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             Header::Nak { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
                 // TODO(eliza): send error to the initiator
-                self.close(remote_id);
+                self.close(remote_id, Some(reason));
                 None
             }
             Header::Reset { remote_id } => {
                 tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
-                let _closed = self.close(remote_id);
+                let _closed = self.close(remote_id, None);
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
                 None
             }
@@ -303,15 +303,31 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if
     /// no conn existed for that ID.
-    fn close(&mut self, local_id: Id) -> bool {
+    fn close(&mut self, local_id: Id, nak: Option<Nak>) -> bool {
         match self.conns.get_mut(local_id) {
             None => {
                 tracing::trace!(?local_id, "close: ID greater than max conns ({CAPACITY})");
                 false
             }
             Some(entry @ Entry::Occupied(_)) => {
-                tracing::trace!(?local_id, self.len, "close: closing connection");
-                *entry = Entry::Closed(self.next_id);
+                tracing::trace!(?local_id, self.len, ?nak, "close: closing connection");
+                let entry = mem::replace(entry, Entry::Closed(self.next_id));
+                if let Some(nak) = nak {
+                    match entry {
+                        Entry::Occupied(Socket {
+                            state: State::Connecting(rsp),
+                            ..
+                        }) => {
+                            let nacked = rsp.send(Err(nak)).is_ok();
+                            tracing::trace!(?local_id, ?nak, nacked, "close: sent nak");
+                        }
+                        Entry::Occupied(..) => {
+                            tracing::warn!(?local_id, ?nak, "close: tried to NAK an established connection. the remote *should* have sent a RESET instead");
+                        }
+                        _ => unreachable!("we just matched an occupied entry!"),
+                    }
+                }
+
                 self.next_id = local_id;
                 self.len -= 1;
                 true
