@@ -159,7 +159,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 };
                 // try to reserve send capacity on this socket.
                 let error = match socket.reserve_send().await {
-                    Ok(permit) => match permit.send_framed(frame.body) {
+                    Ok(permit) => match permit.send(frame.body) {
                         Ok(_) => return None,
                         Err(error) => {
                             tracing::debug!(%error, "process_inbound: failed to deserialize data");

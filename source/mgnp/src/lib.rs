@@ -29,12 +29,20 @@ pub use tricky_pipe;
 //     }
 // }
 
-/// Represents a wire-level transport for MGNP [`Frame`]s.
+/// Represents a wire-level transport for MGNP frames.
+///
+/// Implementations of `Wire` are responsible for implementing some form of
+/// message framing. Each [`Wire::RecvFrame`] returned by [`Wire::recv`] must be
+/// a single MGNP frame. The framing strategy (e.g. COBS, leading length delimiter,
+/// or some lower-level transport's native framing) is left up to the
+/// implementation of `Wire`.
 pub trait Wire {
     type Error: fmt::Display;
-    type Buffer: AsMut<[u8]>;
+    type RecvFrame: AsRef<[u8]>;
     async fn send(&mut self, f: OutboundFrame<'_>) -> Result<(), Self::Error>;
-    async fn recv(&mut self) -> Result<Self::Buffer, Self::Error>;
+
+    /// Receive a single frame from the wire, returning it.
+    async fn recv(&mut self) -> Result<Self::RecvFrame, Self::Error>;
 }
 
 /// A MGNP network interface state machine for a particular [`Wire`].
@@ -162,9 +170,9 @@ where
                 }
             };
 
-            if let Some(mut buf) = in_buf {
-                let frame = match InboundFrame::take_from_bytes(buf.as_mut()) {
-                    Ok((f, _)) => f,
+            if let Some(buf) = in_buf {
+                let frame = match InboundFrame::from_bytes(buf.as_ref()) {
+                    Ok(f) => f,
                     Err(e) => {
                         tracing::warn!(?e, "failed to decode inbound frame");
                         continue;

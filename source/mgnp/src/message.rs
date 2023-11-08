@@ -85,44 +85,45 @@ pub enum DecodeError {
     Header(postcard::Error),
     BodyFrame,
     Body(postcard::Error),
+    UnexpectedTrailingData,
 }
 
 pub type DecodeResult<T> = Result<T, DecodeError>;
 
 impl<'data> Frame<&'data [u8]> {
-    pub fn take_from_bytes(buf: &'data mut [u8]) -> DecodeResult<(Self, &'data mut [u8])> {
-        let (hdr, rem) = postcard::take_from_bytes::<Header>(buf).map_err(DecodeError::Header)?;
-        let buf = {
-            let off = buf.len() - rem.len();
-            &mut buf[off..]
-        };
+    pub fn from_bytes(frame: &'data [u8]) -> DecodeResult<Self> {
+        let (hdr, rem) = postcard::take_from_bytes::<Header>(frame).map_err(DecodeError::Header)?;
 
         // if the header indicates that this message doesn't have a body, return
         // it now.
         if !hdr.has_body() {
-            return Ok((
-                Frame {
-                    header: hdr,
-                    body: &[],
-                },
-                buf,
-            ));
+            // if there's no body, there should be no remaining trailing data in
+            // the frame.
+            if !rem.is_empty() {
+                return Err(DecodeError::UnexpectedTrailingData);
+            }
+
+            return Ok(Frame {
+                header: hdr,
+                body: &[],
+            });
         }
 
-        // otherwise, take the body...
-        let (body, buf) = {
-            let len = cobs::decode_in_place(buf).map_err(|_| DecodeError::BodyFrame)?;
-            buf.split_at_mut(len)
+        // otherwise, any trailing data is the body.
+        let body = {
+            let off = frame.len() - rem.len();
+            &frame[off..]
         };
-        Ok((Frame { header: hdr, body }, buf))
+
+        Ok(Frame { header: hdr, body })
     }
 }
 
 impl<'bytes, T: Deserialize<'bytes>> Frame<T> {
-    pub fn deserialize_from_bytes(buf: &'bytes mut [u8]) -> DecodeResult<(Self, &mut [u8])> {
-        let (Frame { header, body }, buf) = Frame::<&[u8]>::take_from_bytes(buf)?;
+    pub fn deserialize_from_bytes(buf: &'bytes mut [u8]) -> DecodeResult<Self> {
+        let Frame { header, body } = Frame::<&[u8]>::from_bytes(buf)?;
         let body = postcard::from_bytes(body).map_err(DecodeError::Body)?;
-        Ok((Frame { header, body }, buf))
+        Ok(Frame { header, body })
     }
 }
 
@@ -191,9 +192,9 @@ impl OutboundData<'_> {
     fn to_slice<'buf>(&self, buf: &'buf mut [u8]) -> postcard::Result<&'buf mut [u8]> {
         match self {
             Self::Empty => Ok(&mut []),
-            Self::Data(data) => data.to_slice_framed(buf),
-            Self::Rejected(consumer) => consumer.to_slice_framed(buf),
-            Self::Hello(consumer) => consumer.to_slice_framed(buf),
+            Self::Data(data) => data.to_slice(buf),
+            Self::Rejected(consumer) => consumer.to_slice(buf),
+            Self::Hello(consumer) => consumer.to_slice(buf),
         }
     }
 
@@ -201,9 +202,9 @@ impl OutboundData<'_> {
     fn to_vec(&self) -> postcard::Result<alloc::vec::Vec<u8>> {
         match self {
             Self::Empty => Ok(alloc::vec::Vec::new()),
-            Self::Data(data) => data.to_vec_framed(),
-            Self::Rejected(consumer) => consumer.to_vec_framed(),
-            Self::Hello(consumer) => consumer.to_vec_framed(),
+            Self::Data(data) => data.to_vec(),
+            Self::Rejected(consumer) => consumer.to_vec(),
+            Self::Hello(consumer) => consumer.to_vec(),
         }
     }
 }

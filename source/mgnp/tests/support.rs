@@ -360,10 +360,10 @@ impl TestWire {
 }
 
 impl Wire for TestWire {
-    type Buffer = Vec<u8>;
+    type RecvFrame = Vec<u8>;
     type Error = &'static str;
 
-    async fn recv(&mut self) -> Result<Self::Buffer, &'static str> {
+    async fn recv(&mut self) -> Result<Self::RecvFrame, &'static str> {
         let frame = self.rx.recv().await;
         tracing::info!(frame = ?frame.as_ref().map(HexSlice::new), "RECV");
         frame.ok_or("the send end of this wire has been dropped")
