@@ -138,7 +138,7 @@ where
 // === impl SerBiDi ===
 
 impl SerBiDi {
-    /// Constructs a new `SerBiDi` from a [`DesererSender`] and a [`SerReceiver`].
+    /// Constructs a new `SerBiDi` from a [`DeserSender`] and a [`SerReceiver`].
     pub fn from_pair(tx: DeserSender, rx: SerReceiver) -> Self {
         Self { tx, rx }
     }
