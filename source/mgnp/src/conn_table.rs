@@ -360,10 +360,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 // === impl Id ===
 
 impl Id {
-    #[cfg(test)]
-    pub(crate) fn new(n: u16) -> Self {
-        Self(NonZeroU16::new(n).expect("IDs must be non-zero"))
-    }
+    // #[cfg(test)]
+    // pub(crate) fn new(n: u16) -> Self {
+    //     Self(NonZeroU16::new(n).expect("IDs must be non-zero"))
+    // }
 
     #[cfg(not(debug_assertions))]
     #[must_use]

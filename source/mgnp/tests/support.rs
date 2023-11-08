@@ -6,14 +6,14 @@ use mgnp::{
         bidi::{BiDi, SerBiDi},
         mpsc::TrickyPipe,
     },
-    Registry, Wire,
+    Interface, Registry, Wire,
 };
 use std::{
     collections::HashMap,
     fmt,
     sync::{Arc, RwLock},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 pub use tracing::Instrument;
 use uuid::{uuid, Uuid};
 
@@ -33,6 +33,140 @@ impl registry::Service for HelloWorldService {
     type ServerMsg = HelloWorldResponse;
     type ConnectError = ();
     type Hello = ();
+    const UUID: Uuid = HELLO_WORLD_UUID;
+}
+
+pub const HELLO_WITH_HELLO_UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
+
+pub fn hello_with_hello_id() -> registry::Identity {
+    registry::Identity {
+        id: HELLO_WITH_HELLO_UUID,
+        kind: registry::IdentityKind::Name("hello-hello".into()),
+    }
+}
+
+pub struct HelloWithHelloService;
+
+pub struct Fixture<L, R> {
+    local: L,
+    remote: R,
+    test_done: Arc<Notify>,
+}
+
+impl Fixture<TestWire, TestWire> {
+    pub fn new() -> Self {
+        trace_init();
+        let (local, remote) = TestWire::new();
+        Self {
+            local,
+            remote,
+            test_done: Arc::new(Notify::new()),
+        }
+    }
+}
+
+type Running = (Interface, tokio::task::JoinHandle<()>);
+
+impl<R> Fixture<TestWire, R> {
+    pub fn spawn_local(self, registry: TestRegistry) -> Fixture<Running, R> {
+        let Fixture {
+            local,
+            remote,
+            test_done,
+        } = self;
+
+        let (iface, machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
+            local,
+            registry,
+            TrickyPipe::new(8),
+        );
+        Fixture {
+            local: (
+                iface,
+                tokio::spawn(interface("local", machine, test_done.clone())),
+            ),
+            remote,
+            test_done,
+        }
+    }
+}
+
+impl<L> Fixture<L, TestWire> {
+    pub fn spawn_remote(self, registry: TestRegistry) -> Fixture<L, Running> {
+        let Fixture {
+            local,
+            remote,
+            test_done,
+        } = self;
+
+        let (iface, machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
+            remote,
+            registry,
+            TrickyPipe::new(8),
+        );
+        Fixture {
+            local,
+            remote: (
+                iface,
+                tokio::spawn(interface("remote", machine, test_done.clone())),
+            ),
+            test_done,
+        }
+    }
+}
+
+impl<L> Fixture<L, Running> {
+    pub fn remote_iface(&self) -> Interface {
+        self.remote.0.clone()
+    }
+}
+
+impl<R> Fixture<Running, R> {
+    pub fn local_iface(&self) -> Interface {
+        self.local.0.clone()
+    }
+}
+
+impl Fixture<Running, Running> {
+    pub async fn finish_test(self) {
+        tracing::info!("shutting down test...");
+        // complete the test and wait for both the "local" and "remote" interface
+        // tasks to complete, so we can ensure they didn't panic.
+        self.test_done.notify_waiters();
+        self.local
+            .1
+            .await
+            .expect("local interface task should not panic");
+        self.remote
+            .1
+            .await
+            .expect("remote interface task should not panic");
+    }
+}
+
+#[tracing::instrument(level = tracing::Level::INFO, skip(machine, test_done))]
+async fn interface(
+    peer: &'static str,
+    mut machine: mgnp::Machine<TestWire, TestRegistry, { mgnp::DEFAULT_MAX_CONNS }>,
+    test_done: Arc<Notify>,
+) {
+    tokio::select! {
+        res = machine.run() => {
+            tracing::info!(?res, "local interface run loop terminated!");
+            // the remote may be terminated by an interface error, since
+            // the wire will be dropped.
+        },
+        _ = test_done.notified() => {
+            tracing::debug!("test done, local shutting down...");
+        },
+    }
+}
+
+impl registry::Service for HelloWithHelloService {
+    type ClientMsg = HelloWorldRequest;
+    type ServerMsg = HelloWorldResponse;
+    type ConnectError = ();
+    type Hello = HelloHello;
     const UUID: Uuid = HELLO_WORLD_UUID;
 }
 
@@ -96,6 +230,11 @@ pub struct HelloWorldRequest {
 }
 
 #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HelloHello {
+    pub hello: String,
+}
+
+#[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HelloWorldResponse {
     pub world: String,
 }
@@ -143,23 +282,7 @@ impl TestRegistry {
                     tracing::info!(?hello, "hello world service received connection");
                     let (their_chan, my_chan) =
                         make_bidis::<HelloWorldRequest, HelloWorldResponse>(8);
-                    tokio::spawn(
-                        async move {
-                            tracing::debug!("hello world worker running...");
-                            while let Some(req) = my_chan.rx().recv().await {
-                                tracing::info!(?req);
-                                assert_eq!(req.hello, "hello");
-                                my_chan
-                                    .tx()
-                                    .send(HelloWorldResponse {
-                                        world: "world".into(),
-                                    })
-                                    .await
-                                    .unwrap();
-                            }
-                        }
-                        .instrument(tracing::info_span!("hello_world_worker", worker)),
-                    );
+                    tokio::spawn(hello_worker(worker, my_chan));
                     worker += 1;
                     let sent = rsp.send(Ok(their_chan)).is_ok();
                     tracing::debug!(?sent);
@@ -167,6 +290,53 @@ impl TestRegistry {
             }
             .instrument(tracing::info_span!("hello_world_service")),
         );
+    }
+
+    pub fn spawn_hello_with_hello(&self) {
+        let mut chan = self.add_service(hello_with_hello_id());
+        tokio::spawn(
+            async move {
+                let mut worker = 1;
+                while let Some(req) = chan.recv().await {
+                    let InboundConnect { hello, rsp } = req;
+                    tracing::info!(?hello, "hellohello service received connection");
+                    let hello = postcard::from_bytes::<HelloHello>(&hello)
+                        .expect("hellohello message must deserialize!");
+                    let res = if hello.hello == "hello" {
+                        tracing::info!(?hello, "hellohello service received hello");
+                        let (their_chan, my_chan) =
+                            make_bidis::<HelloWorldRequest, HelloWorldResponse>(8);
+                        tokio::spawn(hello_worker(worker, my_chan));
+                        worker += 1;
+                        Ok(their_chan)
+                    } else {
+                        tracing::info!(
+                            ?hello,
+                            "hellohello service received valid non-matching hello!"
+                        );
+                        Err(Nak::Rejected)
+                    };
+                    let sent = rsp.send(res).is_ok();
+                    tracing::debug!(?sent);
+                }
+            }
+            .instrument(tracing::info_span!("hellohello_service")),
+        );
+    }
+}
+
+#[tracing::instrument(level = tracing::Level::INFO, skip(chan))]
+async fn hello_worker(worker: usize, chan: BiDi<HelloWorldRequest, HelloWorldResponse>) {
+    tracing::debug!("hello world worker {worker} running...");
+    while let Some(req) = chan.rx().recv().await {
+        tracing::info!(?req);
+        assert_eq!(req.hello, "hello");
+        chan.tx()
+            .send(HelloWorldResponse {
+                world: "world".into(),
+            })
+            .await
+            .unwrap();
     }
 }
 
