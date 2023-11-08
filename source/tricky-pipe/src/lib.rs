@@ -83,6 +83,7 @@ macro_rules! test_span {
 mod arc_impl;
 mod channel_core;
 pub mod error;
+pub mod serbox;
 #[cfg(not(loom))]
 mod static_impl;
 #[cfg(test)]
