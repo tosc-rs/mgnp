@@ -1,4 +1,5 @@
 use crate::{registry::Identity, Id, LinkId};
+use tricky_pipe::mpsc;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum InboundMessage<'data> {
@@ -16,7 +17,7 @@ pub enum OutboundMessage<'data> {
     Data {
         local_id: Id,
         remote_id: Id,
-        data: tricky_pipe::SerRecvRef<'data>,
+        data: mpsc::SerRecvRef<'data>,
     },
 }
 

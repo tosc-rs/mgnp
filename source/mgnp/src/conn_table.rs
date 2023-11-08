@@ -3,7 +3,7 @@ use crate::{
     registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
-use tricky_pipe::{bidi::SerBiDi, SerPermit};
+use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
