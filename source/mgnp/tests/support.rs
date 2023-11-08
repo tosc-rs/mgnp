@@ -242,10 +242,14 @@ pub struct HelloWorldResponse {
 // === impl TestRegistry ===
 
 impl Registry for TestRegistry {
+    #[tracing::instrument(level = tracing::Level::INFO, name = "Registry::connect", skip(self, hello),)]
     async fn connect(&self, identity: registry::Identity, hello: &[u8]) -> Result<SerBiDi, Nak> {
         let Some(svc) = self.svcs.read().unwrap().get(&identity).cloned() else {
+            tracing::info!("REGISTRY: service not found!");
             return Err(Nak::NotFound);
         };
+
+        tracing::info!("REGISTRY: service found");
 
         let (rsp, rx) = oneshot::channel();
         if svc
@@ -256,6 +260,7 @@ impl Registry for TestRegistry {
             .await
             .is_err()
         {
+            tracing::info!("REGISTRY: service dead!");
             // receiver dropped, svc is dead.
             self.svcs.write().unwrap().remove(&identity);
             return Err(Nak::NotFound);
@@ -266,13 +271,15 @@ impl Registry for TestRegistry {
 }
 
 impl TestRegistry {
+    #[tracing::instrument(level = tracing::Level::INFO, name = "Registry::add_service", skip(self),)]
     pub fn add_service(&self, identity: registry::Identity) -> mpsc::Receiver<InboundConnect> {
         let (tx, rx) = mpsc::channel(1);
         self.svcs.write().unwrap().insert(identity, tx);
+        tracing::info!("REGISTRY: service added");
         rx
     }
 
-    pub fn spawn_hello_world(&self) {
+    pub fn spawn_hello_world(&self) -> &Self {
         let mut chan = self.add_service(hello_world_id());
         tokio::spawn(
             async move {
@@ -290,9 +297,10 @@ impl TestRegistry {
             }
             .instrument(tracing::info_span!("hello_world_service")),
         );
+        self
     }
 
-    pub fn spawn_hello_with_hello(&self) {
+    pub fn spawn_hello_with_hello(&self) -> &Self {
         let mut chan = self.add_service(hello_with_hello_id());
         tokio::spawn(
             async move {
@@ -322,6 +330,7 @@ impl TestRegistry {
             }
             .instrument(tracing::info_span!("hellohello_service")),
         );
+        self
     }
 }
 
