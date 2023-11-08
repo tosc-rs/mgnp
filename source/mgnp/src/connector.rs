@@ -31,8 +31,8 @@ pub struct Channels<S: registry::Service> {
 }
 
 pub struct StaticChannels<S: registry::Service, const CAPACITY: usize> {
-    s2c: tricky_pipe::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
-    c2s: tricky_pipe::StaticTrickyPipe<channel::DataFrame<S::ClientMsg>, CAPACITY>,
+    s2c: mpsc::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
+    c2s: mpsc::StaticTrickyPipe<channel::DataFrame<S::ClientMsg>, CAPACITY>,
 }
 
 impl<S: registry::Service> Channels<S> {
@@ -44,9 +44,8 @@ impl<S: registry::Service> Channels<S> {
 
     #[cfg(any(test, feature = "alloc"))]
     pub fn new(capacity: u8) -> Self {
-        use tricky_pipe::TrickyPipe;
-        let s2c = TrickyPipe::new(capacity);
-        let c2s = TrickyPipe::new(capacity);
+        let s2c = mpsc::TrickyPipe::new(capacity);
+        let c2s = mpsc::TrickyPipe::new(capacity);
         let srv_chan = bidi::SerBiDi::from_pair(c2s.deser_sender(), s2c.ser_receiver().unwrap());
         let client_chan = bidi::BiDi::from_pair(s2c.sender(), c2s.receiver().unwrap());
         Self {

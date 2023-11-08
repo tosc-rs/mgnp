@@ -9,7 +9,7 @@ use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use connector::OutboundConnect;
 use futures::{FutureExt, Stream, StreamExt};
-use tricky_pipe::{bidi::SerBiDi, oneshot, serbox};
+use tricky_pipe::{bidi::SerBiDi, mpsc, oneshot, serbox};
 
 pub mod channel;
 mod conn_table;
@@ -50,11 +50,11 @@ where
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
     registry: R,
-    conns_rx: tricky_pipe::Receiver<OutboundConnect>,
+    conns_rx: mpsc::Receiver<OutboundConnect>,
 }
 
 #[derive(Clone)]
-pub struct Interface(tricky_pipe::Sender<OutboundConnect>);
+pub struct Interface(mpsc::Sender<OutboundConnect>);
 
 /// Errors returned by [`Interface::run`].
 #[derive(Debug)]
@@ -82,7 +82,7 @@ impl Interface {
     pub fn new<Wi, R, const MAX_CONNS: usize>(
         wire: Wi,
         registry: R,
-        conns: tricky_pipe::TrickyPipe<OutboundConnect>,
+        conns: mpsc::TrickyPipe<OutboundConnect>,
     ) -> (Self, Machine<Wi, R, MAX_CONNS>)
     where
         Wi: Wire,

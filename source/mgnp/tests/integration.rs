@@ -4,7 +4,7 @@ use mgnp::Interface;
 use support::*;
 
 use std::sync::Arc;
-use tricky_pipe::{oneshot, serbox};
+use tricky_pipe::{mpsc, oneshot, serbox};
 
 #[tokio::test]
 async fn basically_works() {
@@ -21,7 +21,7 @@ async fn basically_works() {
             let (_, mut machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
                 wire1,
                 registry1,
-                tricky_pipe::TrickyPipe::new(8),
+                mpsc::TrickyPipe::new(8),
             );
 
             tokio::select! {
@@ -32,7 +32,7 @@ async fn basically_works() {
                 },
                 _ = test_done.notified() => {
                     tracing::debug!("test done, remote shutting down...");
-                    
+
                 },
             }
         }
@@ -42,7 +42,7 @@ async fn basically_works() {
     let (iface, mut machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
         wire2,
         TestRegistry::default(),
-        tricky_pipe::TrickyPipe::new(8),
+        mpsc::TrickyPipe::new(8),
     );
     let local = tokio::spawn({
         let test_done = test_done.clone();

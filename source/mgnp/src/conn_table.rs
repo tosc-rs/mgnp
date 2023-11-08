@@ -1,5 +1,6 @@
 use crate::{
     channel,
+    connector::OutboundConnect,
     message::{ControlMessage, InboundMessage, Nak, OutboundMessage},
     registry,
 };
