@@ -8,8 +8,8 @@ use core::fmt;
 use conn_table::ConnTable;
 pub use conn_table::{Id, LinkId};
 use connector::OutboundConnect;
-use futures::{FutureExt, Stream, StreamExt};
-use tricky_pipe::{bidi::SerBiDi, mpsc, oneshot, serbox};
+use futures::FutureExt;
+use tricky_pipe::{mpsc, oneshot, serbox};
 
 pub mod channel;
 mod conn_table;
