@@ -1,7 +1,10 @@
 use mgnp::{
     message::{InboundMessage, Nak, OutboundMessage},
     registry,
-    tricky_pipe::bidi::{BiDi, SerBiDi},
+    tricky_pipe::{
+        bidi::{BiDi, SerBiDi},
+        mpsc::TrickyPipe,
+    },
     Frame, Registry, Wire,
 };
 use std::{
@@ -42,13 +45,13 @@ where
     Out: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
 {
     let (in_tx, in_rx) = {
-        let pipe = tricky_pipe::TrickyPipe::new(cap);
+        let pipe = TrickyPipe::new(cap);
         let rx = pipe.receiver().unwrap();
         let tx = pipe.deser_sender();
         (tx, rx)
     };
     let (out_tx, out_rx) = {
-        let pipe = tricky_pipe::TrickyPipe::new(cap);
+        let pipe = TrickyPipe::new(cap);
         let rx = pipe.ser_receiver().unwrap();
         let tx = pipe.sender();
         (tx, rx)

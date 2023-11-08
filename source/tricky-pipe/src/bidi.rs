@@ -4,7 +4,8 @@
 //! [`Sender`] and [`Receiver`] or a [`DeserSender`] and [`SerReceiver`]
 //! (respectively) into a single bidirectional channel which can both send and
 //! receive messages to/from a remote peer.
-use super::*;
+use crate::mpsc::*;
+use core::fmt;
 use futures::FutureExt;
 
 /// A bidirectional typed channel.
@@ -137,7 +138,7 @@ where
 // === impl SerBiDi ===
 
 impl SerBiDi {
-    /// Constructs a new `SerBiDi` from a [`DesererSender`] and a [`SerReceiver`].
+    /// Constructs a new `SerBiDi` from a [`DeserSender`] and a [`SerReceiver`].
     pub fn from_pair(tx: DeserSender, rx: SerReceiver) -> Self {
         Self { tx, rx }
     }
