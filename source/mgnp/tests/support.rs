@@ -384,8 +384,6 @@ impl Wire for TestWire {
     }
 }
 
-// === impl TestFrame ===
-
 struct HexSlice<'a>(&'a [u8]);
 
 impl<'a> HexSlice<'a> {
@@ -410,5 +408,50 @@ impl fmt::Debug for HexSlice<'_> {
         }
 
         f.write_str("]")
+    }
+}
+
+#[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
+pub async fn connect_should_nak<S: registry::Service>(
+    connector: &mut mgnp::Connector<S>,
+    name: &'static str,
+    hello: S::Hello,
+    nak: mgnp::message::Nak,
+) {
+    tracing::info!("connecting to {name} (should NAK)...");
+    let res = connector
+        .connect(name, hello, mgnp::connector::Channels::new(8))
+        .await;
+    tracing::info!(?res, "connect result");
+    match res {
+        Err(mgnp::connector::ConnectError::Nak(actual)) => assert_eq!(
+            actual, nak,
+            "expected connection to {name} to be NAK'd with {nak:?}, but it was NAK'd with {actual:?}!"
+        ),
+        Err(error) => panic!(
+            "expected connection to {name} to be NAK'd with {nak:?}, but it failed with {error:?}!"
+        ),
+        Ok(_) => {
+            panic!("expected connection to {name} to be NAK'd with {nak:?}, but it succeeded!")
+        }
+    }
+}
+
+#[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
+pub async fn connect<S: registry::Service>(
+    connector: &mut mgnp::Connector<S>,
+    name: &'static str,
+    hello: S::Hello,
+) -> mgnp::connector::ClientChannel<S> {
+    tracing::info!("connecting to {name} (should SUCCEED)...");
+    let res = connector
+        .connect(name, hello, mgnp::connector::Channels::new(8))
+        .await;
+    tracing::info!(?res, "connect result");
+    match res {
+        Ok(ch) => ch,
+        Err(error) => {
+            panic!("expected connection to {name} to succeed, but it failed with {error:?}")
+        }
     }
 }

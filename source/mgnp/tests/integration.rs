@@ -22,10 +22,7 @@ async fn basically_works() {
         .local_iface()
         .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
 
-    let chan = connector
-        .connect("hello-world", (), connector::Channels::new(8))
-        .await
-        .expect("connection should be established");
+    let chan = connect(&mut connector, "hello-world", ()).await;
     chan.tx()
         .send(HelloWorldRequest {
             hello: "hello".to_string(),
@@ -56,16 +53,14 @@ async fn hellos_work() {
         .local_iface()
         .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
 
-    let chan = connector
-        .connect(
-            "hello-hello",
-            svcs::HelloHello {
-                hello: "hello".into(),
-            },
-            connector::Channels::new(8),
-        )
-        .await
-        .expect("connection should be established");
+    let chan = connect(
+        &mut connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "hello".into(),
+        },
+    )
+    .await;
 
     chan.tx()
         .send(HelloWorldRequest {
@@ -98,29 +93,25 @@ async fn nak_bad_hello() {
         .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     // establish a good connection with a valid hello
-    let chan = connector
-        .connect(
-            "hello-hello",
-            svcs::HelloHello {
-                hello: "hello".into(),
-            },
-            connector::Channels::new(8),
-        )
-        .await
-        .expect("connection should be established");
+    let chan = connect(
+        &mut connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "hello".into(),
+        },
+    )
+    .await;
 
     // now try to connect again with an invalid hello
-    let err = connector
-        .connect(
-            "hello-hello",
-            svcs::HelloHello {
-                hello: "goodbye".into(),
-            },
-            connector::Channels::new(8),
-        )
-        .await
-        .expect_err("connection with wrong hello message should be NAK'd");
-    assert_eq!(err, ConnectError::Nak(Nak::Rejected));
+    connect_should_nak(
+        &mut connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "goodbye".into(),
+        },
+        Nak::Rejected,
+    )
+    .await;
 
     // the good connection should stil lwork
     chan.tx()
@@ -153,15 +144,9 @@ async fn mux_single_service() {
         .local_iface()
         .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
 
-    let chan1 = connector
-        .connect("hello-world", (), connector::Channels::new(8))
-        .await
-        .expect("connection should be established");
+    let chan1 = connect(&mut connector, "hello-world", ()).await;
 
-    let chan2 = connector
-        .connect("hello-world", (), connector::Channels::new(8))
-        .await
-        .expect("connection should be established");
+    let chan2 = connect(&mut connector, "hello-world", ()).await;
 
     tokio::try_join! {
         chan1.tx().send(HelloWorldRequest {
@@ -194,6 +179,7 @@ async fn mux_single_service() {
     fixture.finish_test().await;
 }
 
+/// Tests routing to services of different types (UUIDs).
 #[tokio::test]
 async fn service_type_routing() {
     // remote comes up with NO services present...
@@ -213,51 +199,33 @@ async fn service_type_routing() {
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
-    let err = dbg!(
-        helloworld_connector
-            .connect("hello-world", (), connector::Channels::new(8))
-            .await
+    connect_should_nak(&mut helloworld_connector, "hello-world", (), Nak::NotFound).await;
+    connect_should_nak(
+        &mut hellohello_connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "hello".into(),
+        },
+        Nak::NotFound,
     )
-    .expect_err("HelloWorld connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
-
-    let err = dbg!(
-        hellohello_connector
-            .connect(
-                "hello-hello",
-                svcs::HelloHello {
-                    hello: "hello".into()
-                },
-                connector::Channels::new(8)
-            )
-            .await
-    )
-    .expect_err("HelloHello connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
+    .await;
 
     // add a service
     remote_registry.spawn_hello_world();
 
     // connecting to HelloHello should still fail
-    let err = dbg!(
-        hellohello_connector
-            .connect(
-                "hello-hello",
-                svcs::HelloHello {
-                    hello: "hello".into()
-                },
-                connector::Channels::new(8)
-            )
-            .await
+    connect_should_nak(
+        &mut hellohello_connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "hello".into(),
+        },
+        Nak::NotFound,
     )
-    .expect_err("HelloHello connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
+    .await;
 
     // ... but connecting to HelloWorld should succeed
-    let helloworld_chan = helloworld_connector
-        .connect("hello-world", (), connector::Channels::new(8))
-        .await
-        .expect("HelloWorld connection should be established");
+    let helloworld_chan = connect(&mut helloworld_connector, "hello-world", ()).await;
 
     helloworld_chan
         .tx()
@@ -277,18 +245,14 @@ async fn service_type_routing() {
     // add the other service
     remote_registry.spawn_hello_with_hello();
 
-    let hellohello_chan = dbg!(
-        hellohello_connector
-            .connect(
-                "hello-hello",
-                svcs::HelloHello {
-                    hello: "hello".into()
-                },
-                connector::Channels::new(8)
-            )
-            .await
+    let hellohello_chan = connect(
+        &mut hellohello_connector,
+        "hello-hello",
+        svcs::HelloHello {
+            hello: "hello".into(),
+        },
     )
-    .expect("HelloHello connection should succeed");
+    .await;
 
     hellohello_chan
         .tx()
@@ -323,6 +287,8 @@ async fn service_type_routing() {
     );
 }
 
+/// Tests routing to multiple service instances of the same service *interface*,
+/// based on their identity.
 #[tokio::test]
 async fn service_identity_routing() {
     // remote comes up with NO services present...
@@ -338,50 +304,20 @@ async fn service_identity_routing() {
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
-    let err = dbg!(
-        connector
-            .connect("hello-world", (), connector::Channels::new(8))
-            .await
-    )
-    .expect_err("service 'hello-world' connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
-
-    let err = dbg!(
-        connector
-            .connect("hello-sf", (), connector::Channels::new(8))
-            .await
-    )
-    .expect_err("service 'hello-sf' connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
-
-    let err = dbg!(
-        connector
-            .connect("hello-universe", (), connector::Channels::new(8))
-            .await
-    )
-    .expect_err("service 'hello-universe' connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
+    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-sf", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-universe", (), Nak::NotFound).await;
 
     // add the 'hello-sf' service
     let conns = remote_registry.add_service(Identity::from_name::<svcs::HelloWorld>("hello-sf"));
     tokio::spawn(svcs::serve_hello("hello sf", "san francisco", conns));
 
-    // connecting to hello-world should still fail
-    let err = dbg!(
-        connector
-            .connect("hello-world", (), connector::Channels::new(8))
-            .await
-    )
-    .expect_err("service 'hello-world' connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
+    // connecting to hello-world and hello-universe should still fail...
+    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-universe", (), Nak::NotFound).await;
 
     // ... but connecting to 'hello-sf' should succeed
-    let sf_conn = dbg!(
-        connector
-            .connect("hello-sf", (), connector::Channels::new(8))
-            .await
-    )
-    .expect("service 'hello-sf' connection should be established");
+    let sf_conn = connect(&mut connector, "hello-sf", ()).await;
 
     sf_conn
         .tx()
@@ -403,20 +339,11 @@ async fn service_identity_routing() {
         remote_registry.add_service(Identity::from_name::<svcs::HelloWorld>("hello-universe"));
     tokio::spawn(svcs::serve_hello("hello universe", "universe", conns));
 
-    let err = dbg!(
-        connector
-            .connect("hello-world", (), connector::Channels::new(8))
-            .await
-    )
-    .expect_err("service 'hello-world' connection should be NAKed when service is not present");
-    assert_eq!(err, ConnectError::Nak(Nak::NotFound));
+    // connecting to hello-world should still fail
+    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
 
-    let uni_conn = dbg!(
-        connector
-            .connect("hello-universe", (), connector::Channels::new(8))
-            .await
-    )
-    .expect("service 'hello-universe' connection should be established");
+    // ... but connecting to 'hello-sf' should succeed
+    let uni_conn = connect(&mut connector, "hello-universe", ()).await;
 
     let uni_req = uni_conn.tx().send(HelloWorldRequest {
         hello: "hello universe".to_string(),
