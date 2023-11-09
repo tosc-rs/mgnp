@@ -22,17 +22,20 @@
 //!
 //! ## Heap and Static Storage
 //!
-//! In order to construct a [`Sender`] or [`DeserSender`], the [`Receiver`] side
-//! of the channel must be able to share state with the sender side. This means
-//! that the [`Receiver`] must be owned by storage with the `'static` lifetime.
-//! Two options for ensuring this are available:
+//! In order to construct a one-shot channel, storage must exist for the
+//! state that is shared between the [`Receiver`] and any [`Sender`]
+//! or [`DeserSender`]s that the [`Receiver`] creates. This shared state is
+//! represented by the [`Oneshot`] type.
+//!
+//! The storage must be valid for the
+//! `'static` lifetime. Shared state may be stored either on the heap using an
+//! [`Arc`], if the "alloc" feature flag is enabled, or in a `static`.
 //!
 //! ### `static` Storage
 //!
-//! The [`Receiver`] may be stored in a `static` binding, ensuring it is never
-//! deallocated. This allows creating a [`Sender`] using
-//! [`Receiver::static_sender`], or a [`DeserSender`] using
-//! [`Receiver::deser_static_sender`].
+//! The [`Oneshot`] may be stored in a `static` binding, ensuring it is never
+//! deallocated. This allows creating a [`Receiver`] for the channel using
+//! [`Oneshot::static_receiver`].
 //!
 //! Because no heap allocations are used, this storage mechanism is available
 //! for use on embedded systems which lack a heap or dynamic allocation.
@@ -42,25 +45,27 @@
 //! ```
 //! use tricky_pipe::oneshot;
 //!
-//! static RX: oneshot::Receiver<usize> = oneshot::Receiver::new();
+//! static CHAN: oneshot::Oneshot<usize> = oneshot::Oneshot::new();
 //! # #[tokio::main(flavor = "current_thread")] async fn main() {
 //!
-//! // because the `Receiver` is stored in a `static`, we can create a
-//! // `Sender` using the `static_sender` method:
-//! let tx = RX.static_sender().await.unwrap();
+//! // because the `Oneshot` is stored in a `static`, we can create a
+//! // `Receiver` using the `static_receiver` method:
+//! let rx = CHAN.static_receiver().unwrap();
+//! // now that the receiver exists, we can create a sender:
+//! let tx = rx.sender().await.unwrap();
 //!
 //! tx.send(1).unwrap();
-//! assert_eq!(RX.recv().await, Ok(1));
+//! assert_eq!(rx.recv().await, Ok(1));
 //! # }
 //! ```
 //!
 //! ### [`Arc`] Storage
 //!
-//! To allow dynamic allocation of one-shot channels, the [`Receiver`] may
+//! To allow dynamic allocation of one-shot channels, the [`Oneshot`] may
 //! instead be stored in an [`Arc`]. This allows sharing a clone of that [`Arc`]
-//! with the sender side of the channel. [`Sender`]s and [`DeserSender`]s may be
-//! created using the [`Receiver::sender`] and [`Receiver::deser_sender`]
-//! methods, respectively.
+//! with the sender side of the channel. A [`Receiver`] can be created using the
+//! [`Oneshot::arc_receiver`] method. Alternatively, an [`Arc`]-based
+//! [`Receiver`] can also be constructed using [`Receiver::new`].
 //!
 //! This storage approach requires `liballoc`, and these methods are only
 //! available when the "alloc" crate feature flag is enabled.
@@ -72,17 +77,33 @@
 //! use std::sync::Arc;
 //!
 //! # #[tokio::main(flavor = "current_thread")] async fn main() {
-//! let rx = Arc::new(oneshot::Receiver::new());
+//! let chan = Arc::new(oneshot::Oneshot::new());
 //!
-//! // because the `Receiver` is stored in an `Arc`, we can create a
-//! // `Sender` using the `sender` method:
+//! // because the `Oneshot` is stored in an `Arc`, we can create a
+//! // `Receiver` using the `arc_receiver` method:
+//! let rx = chan.arc_receiver().unwrap();
+//! // now that the receiver exists, we can create a sender:
 //! let tx = rx.sender().await.unwrap();
 //!
 //! tx.send(1).unwrap();
 //! assert_eq!(rx.recv().await, Ok(1));
 //! # }
 //! ```
-
+//!
+//! Alternatively, [`Receiver::new`] can be used to avoid explicitly
+//! constructing an [`Arc`]`<`[`Oneshot`]`<T>>`:
+//!
+//! ```
+//! use tricky_pipe::oneshot;
+//!
+//! # #[tokio::main(flavor = "current_thread")] async fn main() {
+//! let rx = oneshot::Receiver::new();
+//! // now that the receiver exists, we can create a sender:
+//! let tx = rx.sender().await.unwrap();
+//!
+//! tx.send(1).unwrap();
+//! assert_eq!(rx.recv().await, Ok(1));
+//! # }
 #![warn(missing_debug_implementations)]
 use crate::{
     loom::{
@@ -235,6 +256,7 @@ pub enum DeserSendError {
     Closed,
 }
 
+/// Shared storage used by both ends of a oneshot channel.
 #[repr(C)]
 pub struct Oneshot<T> {
     head: Header,
@@ -266,6 +288,7 @@ const SENT: u8 = 1 << 3;
 const CLOSED: u8 = 1 << 4;
 
 impl<T> Oneshot<T> {
+    /// Returns a new `Oneshot`.
     #[cfg(not(loom))]
     pub const fn new() -> Self {
         Self {
@@ -277,6 +300,30 @@ impl<T> Oneshot<T> {
         }
     }
 
+    /// Constructs a [`Receiver`] for this `Oneshot` channel, using a `static`
+    /// to store the shared state between the [`Receiver`] and any [`Sender`]s.
+    ///
+    /// If a [`Receiver`] has already been created for this channel, this method
+    /// returns [`None`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tricky_pipe::oneshot;
+    ///
+    /// static CHAN: oneshot::Oneshot<usize> = oneshot::Oneshot::new();
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    ///
+    /// // because the `Oneshot` is stored in a `static`, we can create a
+    /// // `Receiver` using the `static_receiver` method:
+    /// let rx = CHAN.static_receiver().unwrap();
+    /// // now that the receiver exists, we can create a sender:
+    /// let tx = rx.sender().await.unwrap();
+    ///
+    /// tx.send(1).unwrap();
+    /// assert_eq!(rx.recv().await, Ok(1));
+    /// # }
+    /// ```
     pub fn static_receiver(&'static self) -> Option<Receiver<T>> {
         self.head
             .state
@@ -290,6 +337,36 @@ impl<T> Oneshot<T> {
         })
     }
 
+    /// Constructs a [`Receiver`] for this `Oneshot` channel, using an [`Arc`]
+    /// to store the shared state between the [`Receiver`] and any [`Sender`]s.
+    ///
+    /// If a [`Receiver`] has already been created for this channel, this method
+    /// returns [`None`].
+    ///
+    /// This method requires the "alloc" feature flag to be enabled. When using
+    /// `Arc`s to store the shared state, the [`Receiver::new`] function may be
+    /// used to avoid constructing the  [`Oneshot`] separately from the
+    /// [`Receiver`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tricky_pipe::oneshot;
+    /// use std::sync::Arc;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let chan = Arc::new(oneshot::Oneshot::new());
+    ///
+    /// // because the `Oneshot` is stored in an `Arc`, we can create a
+    /// // `Receiver` using the `arc_receiver` method:
+    /// let rx = chan.arc_receiver().unwrap();
+    /// // now that the receiver exists, we can create a sender:
+    /// let tx = rx.sender().await.unwrap();
+    ///
+    /// tx.send(1).unwrap();
+    /// assert_eq!(rx.recv().await, Ok(1));
+    /// # }
+    /// ```
     #[cfg(any(test, feature = "alloc"))]
     pub fn arc_receiver(self: Arc<Self>) -> Option<Receiver<T>> {
         self.head
@@ -300,10 +377,40 @@ impl<T> Oneshot<T> {
     }
 }
 
+impl<T> fmt::Debug for Oneshot<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Oneshot")
+            .field("head", &self.head)
+            .field(
+                "cell",
+                &format_args!("UnsafeCell<{}>", core::any::type_name::<T>()),
+            )
+            .finish()
+    }
+}
+
+unsafe impl<T: Send> Send for Oneshot<T> {}
+unsafe impl<T: Send> Sync for Oneshot<T> {}
+
+// === impl Receiver ===
+
 impl<T> Receiver<T> {
     /// Returns a new one-shot channel receiver, wrapped in an `Arc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tricky_pipe::oneshot;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let rx = oneshot::Receiver::new();
+    /// // now that the receiver exists, we can create a sender:
+    /// let tx = rx.sender().await.unwrap();
+    ///
+    /// tx.send(1).unwrap();
+    /// assert_eq!(rx.recv().await, Ok(1));
+    /// # }
     #[cfg(any(test, feature = "alloc"))]
-    #[must_use]
     pub fn new() -> Self {
         Self::from_arc(Arc::new(Oneshot {
             head: Header {
@@ -441,14 +548,6 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> fmt::Debug for Receiver<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("oneshot::Receiver")
-            .field("chan", &format_args!("{:p}", self.chan))
-            .finish()
-    }
-}
-
 impl<T> Receiver<T>
 where
     T: DeserializeOwned + Send + 'static,
@@ -510,6 +609,21 @@ where
             vtable: &Self::VTABLE,
             sent: false,
         })
+    }
+}
+
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("oneshot::Receiver")
+            .field("chan", &format_args!("{:p}", self.chan))
+            .finish()
+    }
+}
+
+#[cfg(any(test, feature = "alloc"))]
+impl<T> Default for Receiver<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
