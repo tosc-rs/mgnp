@@ -621,6 +621,16 @@ impl<T> Default for Receiver<T> {
     }
 }
 
+impl<T> Drop for Receiver<T> {
+    fn drop(&mut self) {
+        unsafe {
+            // decrement the ref count, if this sender was constructed from an
+            // `Arc<Oneshot>`.
+            (self.drop)(self.chan)
+        }
+    }
+}
+
 unsafe impl<T: Send> Send for Receiver<T> {}
 unsafe impl<T: Send> Sync for Receiver<T> {}
 
