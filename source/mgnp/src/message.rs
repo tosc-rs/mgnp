@@ -67,16 +67,16 @@ impl Header {
         }
     }
 
+    /// Returns `true` if this `Header` describes a request with a body.
     fn has_body(&self) -> bool {
-        match self {
+        matches!(
+            self,
             Self::Nak {
                 reason: Nak::Rejected,
                 ..
-            } => true,
-            Self::Connect { .. } => true,
-            Self::Data { .. } => true,
-            _ => false,
-        }
+            } | Self::Connect { .. }
+                | Self::Data { .. }
+        )
     }
 }
 

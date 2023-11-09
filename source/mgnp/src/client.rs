@@ -25,7 +25,8 @@ pub enum ConnectError {
     Nak(Nak),
 }
 
-pub type ClientChannel<S: registry::Service> = bidi::BiDi<S::ServerMsg, S::ClientMsg>;
+pub type ClientChannel<S> =
+    bidi::BiDi<<S as registry::Service>::ServerMsg, <S as registry::Service>::ClientMsg>;
 
 pub struct Channels<S: registry::Service> {
     srv_chan: bidi::SerBiDi,

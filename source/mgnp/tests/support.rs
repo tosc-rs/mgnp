@@ -112,6 +112,12 @@ pub struct Fixture<L, R> {
 
 impl Fixture<TestWire, TestWire> {
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Default for Fixture<TestWire, TestWire> {
+    fn default() -> Self {
         trace_init();
         let (local, remote) = TestWire::new();
         Self {
@@ -173,6 +179,7 @@ impl<L> Fixture<L, TestWire> {
 }
 
 impl<L> Fixture<L, Running> {
+    #[allow(dead_code)]
     pub fn remote_iface(&self) -> Interface {
         self.remote.0.clone()
     }
