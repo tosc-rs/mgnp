@@ -135,9 +135,8 @@ use alloc::sync::Arc;
 /// producers can be live at any given time
 ///
 /// A [`Receiver`]`<T>` can be used to hand out single-use [`Sender`] or
-/// [`DeserSender`] handles, using the [`Receiver::sender`],
-/// [`Receiver::deser_sender`], [`Receiver::static_sender`] and
-/// [`Receiver::deser_static_sender`] methods. Each sender handle can be used
+/// [`DeserSender`] handles, using the [`Receiver::sender`] and
+/// [`Receiver::deser_sender`] methods. Each sender handle can be used once
 /// to send a single message to the receiver.
 ///
 /// See the [module-level documentation](../#reusing-a-one-shot-channel) for
@@ -160,8 +159,7 @@ pub struct Receiver<T> {
 /// be created. Dropping this [`Sender`] releases the reservation on the
 /// channel, allowing a new [`Sender`] or [`DeserSender`] to be created.
 ///
-/// [`Sender`]s are constructed using the [`Receiver::sender`] and
-/// [`Receiver::static_sender`] methods.
+/// [`Sender`]s are constructed using the [`Receiver::sender`]  method.
 #[must_use = "a `Sender` does nothing unless used to send a message"]
 pub struct Sender<T> {
     chan: *const Oneshot<T>,
@@ -182,8 +180,8 @@ pub struct Sender<T> {
 /// may be created. Dropping this [`DeserSender`] releases the reservation on the
 /// channel, allowing a new [`Sender`] or [`DeserSender`] to be created.
 ///
-/// [`DeserSender`]s are constructed using the [`Receiver::deser_sender`] and
-/// [`Receiver::deser_static_sender`] methods.
+/// [`DeserSender`]s are constructed using the [`Receiver::deser_sender`]
+/// method.
 #[must_use = "a `DeserSender` does nothing unless used to receive a message"]
 pub struct DeserSender {
     chan: *const Oneshot<()>,
@@ -210,26 +208,22 @@ pub enum RecvError {
     Closed,
 }
 
-/// Errors returned by [`Receiver::sender`], [`Receiver::deser_sender`],
-/// [`Receiver::static_sender`], and [`Receiver::deser_static_sender`].
+/// Errors returned by [`Receiver::sender`] and [`Receiver::deser_sender`].
 #[derive(Debug, Eq, PartialEq)]
 pub enum SenderError {
     /// A [`Sender`] or [`DeserSender`] already exists, so a new one may not be
     /// created at this time.
     ///
     /// When the currently active [`Sender`] or [`DeserSender`] is dropped, the
-    /// next call to one of the [`Receiver::sender`],
-    /// [`Receiver::deser_sender`], [`Receiver::static_sender`], or
-    /// [`Receiver::deser_static_sender`] methods on this [`Receiver`] will
-    /// succeed.
+    /// next call to the [`Receiver::sender`] or [`Receiver::deser_sender`]
+    /// methods on this [`Receiver`] will succeed.
     SenderAlreadyActive,
     /// The [`Receiver`] has closed the channel using the
     /// [`close`](Receiver::close) method, so no senders can be created.
     ///
-    /// If this error is returned, the [`Receiver::sender`],
-    /// [`Receiver::deser_sender`], [`Receiver::static_sender`], and
-    /// [`Receiver::deser_static_sender`] methods on this [`Receiver`] will
-    /// *never* return [`Ok`] again.
+    /// If this error is returned, the [`Receiver::sender`] and
+    /// [`Receiver::deser_sender`] methods on this [`Receiver`] will *never*
+    /// return [`Ok`] again.
     Closed,
 }
 
