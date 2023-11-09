@@ -20,10 +20,7 @@ use uuid::{uuid, Uuid};
 pub const HELLO_WORLD_UUID: Uuid = uuid!("6c5361c3-cb70-4651-9c6e-8dd3e3625910");
 
 pub fn hello_world_id() -> registry::Identity {
-    registry::Identity {
-        id: HELLO_WORLD_UUID,
-        kind: registry::IdentityKind::Name("helloworld".into()),
-    }
+    registry::Identity::from_name::<HelloWorldService>("hello-world")
 }
 
 pub struct HelloWorldService;
@@ -39,10 +36,7 @@ impl registry::Service for HelloWorldService {
 pub const HELLO_WITH_HELLO_UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
 
 pub fn hello_with_hello_id() -> registry::Identity {
-    registry::Identity {
-        id: HELLO_WITH_HELLO_UUID,
-        kind: registry::IdentityKind::Name("hello-hello".into()),
-    }
+    registry::Identity::from_name::<HelloWithHelloService>("hello-hello")
 }
 
 pub struct HelloWithHelloService;
