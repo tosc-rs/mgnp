@@ -5,20 +5,20 @@
 extern crate alloc;
 use core::fmt;
 
-use conn_table::ConnTable;
-pub use conn_table::{Id, LinkId};
-use connector::OutboundConnect;
-use futures::FutureExt;
-use tricky_pipe::{mpsc, oneshot, serbox};
-
 mod conn_table;
 pub mod connector;
 pub mod message;
 pub mod registry;
+use conn_table::ConnTable;
+pub use conn_table::{Id, LinkId};
+pub use connector::Connector;
+use connector::OutboundConnect;
+use futures::FutureExt;
 pub use message::Frame;
 use message::{InboundFrame, Nak, OutboundFrame};
 pub use registry::Registry;
 pub use tricky_pipe;
+use tricky_pipe::{mpsc, oneshot, serbox};
 
 /// Represents a wire-level transport for MGNP frames.
 ///
