@@ -420,11 +420,11 @@ pub async fn connect_should_nak<S: registry::Service>(
 ) {
     tracing::info!("connecting to {name} (should NAK)...");
     let res = connector
-        .connect(name, hello, mgnp::connector::Channels::new(8))
+        .connect(name, hello, mgnp::client::Channels::new(8))
         .await;
     tracing::info!(?res, "connect result");
     match res {
-        Err(mgnp::connector::ConnectError::Nak(actual)) => assert_eq!(
+        Err(mgnp::client::ConnectError::Nak(actual)) => assert_eq!(
             actual, nak,
             "expected connection to {name} to be NAK'd with {nak:?}, but it was NAK'd with {actual:?}!"
         ),
@@ -442,10 +442,10 @@ pub async fn connect<S: registry::Service>(
     connector: &mut mgnp::Connector<S>,
     name: &'static str,
     hello: S::Hello,
-) -> mgnp::connector::ClientChannel<S> {
+) -> mgnp::client::ClientChannel<S> {
     tracing::info!("connecting to {name} (should SUCCEED)...");
     let res = connector
-        .connect(name, hello, mgnp::connector::Channels::new(8))
+        .connect(name, hello, mgnp::client::Channels::new(8))
         .await;
     tracing::info!(?res, "connect result");
     match res {

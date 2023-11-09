@@ -5,19 +5,21 @@
 extern crate alloc;
 use core::fmt;
 
+pub mod client;
 mod conn_table;
-pub mod connector;
 pub mod message;
 pub mod registry;
-use conn_table::ConnTable;
+
+pub use client::Connector;
 pub use conn_table::{Id, LinkId};
-pub use connector::Connector;
-use connector::OutboundConnect;
-use futures::FutureExt;
 pub use message::Frame;
-use message::{InboundFrame, Nak, OutboundFrame};
 pub use registry::Registry;
 pub use tricky_pipe;
+
+use client::OutboundConnect;
+use conn_table::ConnTable;
+use futures::FutureExt;
+use message::{InboundFrame, Nak, OutboundFrame};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
 /// Represents a wire-level transport for MGNP frames.
@@ -41,11 +43,7 @@ pub trait Wire {
 /// This type implements the connection-management state machine for connections
 /// over the provided `Wi`-typed [`Wire`] implementation. Local services are discovered using
 /// the `R`-typed [`Registry`] implementation.
-pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
-where
-    // Remote wire type
-    Wi: Wire,
-{
+pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }> {
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
     registry: R,
@@ -103,8 +101,8 @@ impl Interface {
         &self,
         hello_sharer: serbox::Sharer<S::Hello>,
         rsp: oneshot::Receiver<Result<(), Nak>>,
-    ) -> connector::Connector<S> {
-        connector::Connector {
+    ) -> client::Connector<S> {
+        client::Connector {
             hello_sharer,
             rsp,
             tx: self.0.clone(),

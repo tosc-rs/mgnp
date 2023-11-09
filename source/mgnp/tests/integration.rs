@@ -1,7 +1,7 @@
 #![cfg(feature = "alloc")]
 mod support;
 use mgnp::{
-    connector::{self, ConnectError},
+    client::{self, ConnectError},
     message::Nak,
     registry::Identity,
     tricky_pipe::{oneshot, serbox},

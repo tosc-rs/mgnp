@@ -1,5 +1,5 @@
 use crate::{
-    connector::OutboundConnect,
+    client::OutboundConnect,
     message::{Header, InboundFrame, Nak, OutboundFrame},
     registry,
 };
