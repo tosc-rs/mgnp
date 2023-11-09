@@ -11,7 +11,6 @@ use connector::OutboundConnect;
 use futures::FutureExt;
 use tricky_pipe::{mpsc, oneshot, serbox};
 
-// pub mod channel;
 mod conn_table;
 pub mod connector;
 pub mod message;
@@ -20,14 +19,6 @@ pub use message::Frame;
 use message::{InboundFrame, Nak, OutboundFrame};
 pub use registry::Registry;
 pub use tricky_pipe;
-
-// pub trait Frame {
-//     fn as_bytes(&self) -> &[u8];
-
-//     fn decode(&self) -> postcard::Result<InboundMessage<'_>> {
-//         postcard::from_bytes(self.as_bytes())
-//     }
-// }
 
 /// Represents a wire-level transport for MGNP frames.
 ///
