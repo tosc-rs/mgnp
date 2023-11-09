@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 pub use tracing::Instrument;
 
 pub mod svcs {
+    use super::*;
     use mgnp::registry;
     use uuid::{uuid, Uuid};
 
@@ -61,6 +62,45 @@ pub mod svcs {
 
     pub fn hello_world_id() -> registry::Identity {
         registry::Identity::from_name::<HelloWorld>("hello-world")
+    }
+
+    #[tracing::instrument(level = tracing::Level::INFO, skip(conns))]
+    pub async fn serve_hello(
+        req_msg: &'static str,
+        rsp_msg: &'static str,
+        mut conns: mpsc::Receiver<InboundConnect>,
+    ) {
+        let mut worker = 1;
+        while let Some(req) = conns.recv().await {
+            let InboundConnect { hello, rsp } = req;
+            tracing::info!(?hello, "hello world service received connection");
+            let (their_chan, my_chan) =
+                make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
+            tokio::spawn(hello_worker(worker, req_msg, rsp_msg, my_chan));
+            worker += 1;
+            let sent = rsp.send(Ok(their_chan)).is_ok();
+            tracing::debug!(?sent);
+        }
+    }
+
+    #[tracing::instrument(level = tracing::Level::INFO, skip(chan))]
+    pub(super) async fn hello_worker(
+        worker: usize,
+        req_msg: &'static str,
+        rsp_msg: &'static str,
+        chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse>,
+    ) {
+        tracing::debug!("hello world worker {worker} running...");
+        while let Some(req) = chan.rx().recv().await {
+            tracing::info!(?req);
+            assert_eq!(req.hello, req_msg);
+            chan.tx()
+                .send(svcs::HelloWorldResponse {
+                    world: rsp_msg.into(),
+                })
+                .await
+                .unwrap();
+        }
     }
 }
 
@@ -273,24 +313,9 @@ impl TestRegistry {
         rx
     }
 
-    pub fn spawn_hello(&self, response: &'static str) -> &Self {
-        let mut chan = self.add_service(svcs::hello_world_id());
-        tokio::spawn(
-            async move {
-                let mut worker = 1;
-                while let Some(req) = chan.recv().await {
-                    let InboundConnect { hello, rsp } = req;
-                    tracing::info!(?hello, "hello world service received connection");
-                    let (their_chan, my_chan) =
-                        make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
-                    tokio::spawn(hello_worker(worker, response, my_chan));
-                    worker += 1;
-                    let sent = rsp.send(Ok(their_chan)).is_ok();
-                    tracing::debug!(?sent);
-                }
-            }
-            .instrument(tracing::info_span!("hello_world_service")),
-        );
+    pub fn spawn_hello_world(&self) -> &Self {
+        let conns = self.add_service(svcs::hello_world_id());
+        tokio::spawn(svcs::serve_hello("hello", "world", conns));
         self
     }
 
@@ -308,7 +333,7 @@ impl TestRegistry {
                         tracing::info!(?hello, "hellohello service received hello");
                         let (their_chan, my_chan) =
                             make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
-                        tokio::spawn(hello_worker(worker, "world", my_chan));
+                        tokio::spawn(svcs::hello_worker(worker, "hello", "world", my_chan));
                         worker += 1;
                         Ok(their_chan)
                     } else {
@@ -325,25 +350,6 @@ impl TestRegistry {
             .instrument(tracing::info_span!("hellohello_service")),
         );
         self
-    }
-}
-
-#[tracing::instrument(level = tracing::Level::INFO, skip(chan))]
-async fn hello_worker(
-    worker: usize,
-    message: &'static str,
-    chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse>,
-) {
-    tracing::debug!("hello world worker {worker} running...");
-    while let Some(req) = chan.rx().recv().await {
-        tracing::info!(?req);
-        assert_eq!(req.hello, "hello");
-        chan.tx()
-            .send(svcs::HelloWorldResponse {
-                world: message.into(),
-            })
-            .await
-            .unwrap();
     }
 }
 
