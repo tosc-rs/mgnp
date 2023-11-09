@@ -73,3 +73,15 @@ impl Identity {
         &self.kind
     }
 }
+
+impl From<&'_ str> for IdentityKind {
+    fn from(s: &str) -> Self {
+        IdentityKind::Name(s.into())
+    }
+}
+
+impl From<heapless::String<32>> for IdentityKind {
+    fn from(s: heapless::String<32>) -> Self {
+        IdentityKind::Name(s)
+    }
+}

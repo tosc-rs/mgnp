@@ -1,12 +1,12 @@
 #![cfg(feature = "alloc")]
 use mgnp::{
     message::{Nak, OutboundFrame},
-    registry,
+    registry::{self, Registry},
     tricky_pipe::{
         bidi::{BiDi, SerBiDi},
         mpsc::TrickyPipe,
     },
-    Interface, Registry, Wire,
+    Interface, Wire,
 };
 use std::{
     collections::HashMap,
@@ -15,31 +15,54 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, Notify};
 pub use tracing::Instrument;
-use uuid::{uuid, Uuid};
 
-pub const HELLO_WORLD_UUID: Uuid = uuid!("6c5361c3-cb70-4651-9c6e-8dd3e3625910");
+pub mod svcs {
+    use mgnp::registry;
+    use uuid::{uuid, Uuid};
 
-pub fn hello_world_id() -> registry::Identity {
-    registry::Identity::from_name::<HelloWorldService>("hello-world")
+    pub struct HelloWorld;
+
+    #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct HelloWorldRequest {
+        pub hello: String,
+    }
+
+    #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct HelloHello {
+        pub hello: String,
+    }
+
+    #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct HelloWorldResponse {
+        pub world: String,
+    }
+
+    impl registry::Service for HelloWorld {
+        type ClientMsg = HelloWorldRequest;
+        type ServerMsg = HelloWorldResponse;
+        type ConnectError = ();
+        type Hello = ();
+        const UUID: Uuid = uuid!("6c5361c3-cb70-4651-9c6e-8dd3e3625910");
+    }
+
+    pub struct HelloWithHello;
+
+    impl registry::Service for HelloWithHello {
+        type ClientMsg = HelloWorldRequest;
+        type ServerMsg = HelloWorldResponse;
+        type ConnectError = ();
+        type Hello = HelloHello;
+        const UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
+    }
+
+    pub fn hello_with_hello_id() -> registry::Identity {
+        registry::Identity::from_name::<HelloWithHello>("hello-hello")
+    }
+
+    pub fn hello_world_id() -> registry::Identity {
+        registry::Identity::from_name::<HelloWorld>("hello-world")
+    }
 }
-
-pub struct HelloWorldService;
-
-impl registry::Service for HelloWorldService {
-    type ClientMsg = HelloWorldRequest;
-    type ServerMsg = HelloWorldResponse;
-    type ConnectError = ();
-    type Hello = ();
-    const UUID: Uuid = HELLO_WORLD_UUID;
-}
-
-pub const HELLO_WITH_HELLO_UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
-
-pub fn hello_with_hello_id() -> registry::Identity {
-    registry::Identity::from_name::<HelloWithHelloService>("hello-hello")
-}
-
-pub struct HelloWithHelloService;
 
 pub struct Fixture<L, R> {
     local: L,
@@ -156,14 +179,6 @@ async fn interface(
     }
 }
 
-impl registry::Service for HelloWithHelloService {
-    type ClientMsg = HelloWorldRequest;
-    type ServerMsg = HelloWorldResponse;
-    type ConnectError = ();
-    type Hello = HelloHello;
-    const UUID: Uuid = HELLO_WORLD_UUID;
-}
-
 pub fn trace_init() {
     let filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(tracing::Level::TRACE.into())
@@ -218,21 +233,6 @@ pub struct InboundConnect {
     pub rsp: oneshot::Sender<Result<SerBiDi, Nak>>,
 }
 
-#[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct HelloWorldRequest {
-    pub hello: String,
-}
-
-#[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct HelloHello {
-    pub hello: String,
-}
-
-#[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct HelloWorldResponse {
-    pub world: String,
-}
-
 // === impl TestRegistry ===
 
 impl Registry for TestRegistry {
@@ -273,8 +273,8 @@ impl TestRegistry {
         rx
     }
 
-    pub fn spawn_hello_world(&self) -> &Self {
-        let mut chan = self.add_service(hello_world_id());
+    pub fn spawn_hello(&self, response: &'static str) -> &Self {
+        let mut chan = self.add_service(svcs::hello_world_id());
         tokio::spawn(
             async move {
                 let mut worker = 1;
@@ -282,8 +282,8 @@ impl TestRegistry {
                     let InboundConnect { hello, rsp } = req;
                     tracing::info!(?hello, "hello world service received connection");
                     let (their_chan, my_chan) =
-                        make_bidis::<HelloWorldRequest, HelloWorldResponse>(8);
-                    tokio::spawn(hello_worker(worker, my_chan));
+                        make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
+                    tokio::spawn(hello_worker(worker, response, my_chan));
                     worker += 1;
                     let sent = rsp.send(Ok(their_chan)).is_ok();
                     tracing::debug!(?sent);
@@ -295,20 +295,20 @@ impl TestRegistry {
     }
 
     pub fn spawn_hello_with_hello(&self) -> &Self {
-        let mut chan = self.add_service(hello_with_hello_id());
+        let mut chan = self.add_service(svcs::hello_with_hello_id());
         tokio::spawn(
             async move {
                 let mut worker = 1;
                 while let Some(req) = chan.recv().await {
                     let InboundConnect { hello, rsp } = req;
                     tracing::info!(?hello, "hellohello service received connection");
-                    let hello = postcard::from_bytes::<HelloHello>(&hello)
+                    let hello = postcard::from_bytes::<svcs::HelloHello>(&hello)
                         .expect("hellohello message must deserialize!");
                     let res = if hello.hello == "hello" {
                         tracing::info!(?hello, "hellohello service received hello");
                         let (their_chan, my_chan) =
-                            make_bidis::<HelloWorldRequest, HelloWorldResponse>(8);
-                        tokio::spawn(hello_worker(worker, my_chan));
+                            make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
+                        tokio::spawn(hello_worker(worker, "world", my_chan));
                         worker += 1;
                         Ok(their_chan)
                     } else {
@@ -329,14 +329,18 @@ impl TestRegistry {
 }
 
 #[tracing::instrument(level = tracing::Level::INFO, skip(chan))]
-async fn hello_worker(worker: usize, chan: BiDi<HelloWorldRequest, HelloWorldResponse>) {
+async fn hello_worker(
+    worker: usize,
+    message: &'static str,
+    chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse>,
+) {
     tracing::debug!("hello world worker {worker} running...");
     while let Some(req) = chan.rx().recv().await {
         tracing::info!(?req);
         assert_eq!(req.hello, "hello");
         chan.tx()
-            .send(HelloWorldResponse {
-                world: "world".into(),
+            .send(svcs::HelloWorldResponse {
+                world: message.into(),
             })
             .await
             .unwrap();

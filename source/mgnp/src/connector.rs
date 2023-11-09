@@ -60,7 +60,7 @@ impl<S: registry::Service> Channels<S> {
 impl<S: registry::Service> Connector<S> {
     pub async fn connect(
         &mut self,
-        identity: registry::Identity,
+        identity: impl Into<registry::IdentityKind>,
         hello: S::Hello,
         Channels {
             srv_chan,
@@ -75,7 +75,7 @@ impl<S: registry::Service> Connector<S> {
         let hello = self.hello_sharer.share(hello).await;
         let rsp = self.rsp.sender().await.unwrap();
         let connect = OutboundConnect {
-            identity,
+            identity: registry::Identity::new::<S>(identity.into()),
             hello,
             channel: srv_chan,
             rsp,

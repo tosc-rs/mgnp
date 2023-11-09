@@ -6,11 +6,12 @@ use mgnp::{
     tricky_pipe::{oneshot, serbox},
 };
 use support::*;
+use svcs::{HelloWorldRequest, HelloWorldResponse};
 
 #[tokio::test]
 async fn basically_works() {
     let remote_registry: TestRegistry = TestRegistry::default();
-    remote_registry.spawn_hello_world();
+    remote_registry.spawn_hello("world");
 
     let fixture = Fixture::new()
         .spawn_local(Default::default())
@@ -18,10 +19,10 @@ async fn basically_works() {
 
     let mut connector = fixture
         .local_iface()
-        .connector::<HelloWorldService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     let chan = connector
-        .connect(hello_world_id(), (), connector::Channels::new(8))
+        .connect(svcs::hello_world_id(), (), connector::Channels::new(8))
         .await
         .expect("connection should be established");
     chan.tx()
@@ -52,12 +53,12 @@ async fn hellos_work() {
 
     let mut connector = fixture
         .local_iface()
-        .connector::<HelloWithHelloService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     let chan = connector
         .connect(
-            hello_with_hello_id(),
-            HelloHello {
+            svcs::hello_with_hello_id(),
+            svcs::HelloHello {
                 hello: "hello".into(),
             },
             connector::Channels::new(8),
@@ -93,13 +94,13 @@ async fn nak_bad_hello() {
 
     let mut connector = fixture
         .local_iface()
-        .connector::<HelloWithHelloService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     // establish a good connection with a valid hello
     let chan = connector
         .connect(
-            hello_with_hello_id(),
-            HelloHello {
+            svcs::hello_with_hello_id(),
+            svcs::HelloHello {
                 hello: "hello".into(),
             },
             connector::Channels::new(8),
@@ -110,8 +111,8 @@ async fn nak_bad_hello() {
     // now try to connect again with an invalid hello
     let err = connector
         .connect(
-            hello_with_hello_id(),
-            HelloHello {
+            svcs::hello_with_hello_id(),
+            svcs::HelloHello {
                 hello: "goodbye".into(),
             },
             connector::Channels::new(8),
@@ -141,7 +142,7 @@ async fn nak_bad_hello() {
 #[tokio::test]
 async fn mux_single_service() {
     let remote_registry: TestRegistry = TestRegistry::default();
-    remote_registry.spawn_hello_world();
+    remote_registry.spawn_hello("world");
 
     let fixture = Fixture::new()
         .spawn_local(Default::default())
@@ -149,15 +150,15 @@ async fn mux_single_service() {
 
     let mut connector = fixture
         .local_iface()
-        .connector::<HelloWorldService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     let chan1 = connector
-        .connect(hello_world_id(), (), connector::Channels::new(8))
+        .connect(svcs::hello_world_id(), (), connector::Channels::new(8))
         .await
         .expect("connection should be established");
 
     let chan2 = connector
-        .connect(hello_world_id(), (), connector::Channels::new(8))
+        .connect(svcs::hello_world_id(), (), connector::Channels::new(8))
         .await
         .expect("connection should be established");
 
@@ -205,15 +206,15 @@ async fn routing() {
 
     // create connectors for both services
     let mut helloworld_connector =
-        iface.connector::<HelloWorldService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        iface.connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
     let mut hellohello_connector =
-        iface.connector::<HelloWithHelloService>(serbox::Sharer::new(), oneshot::Receiver::new());
+        iface.connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
     let err = dbg!(
         helloworld_connector
-            .connect(hello_world_id(), (), connector::Channels::new(8))
+            .connect(svcs::hello_world_id(), (), connector::Channels::new(8))
             .await
     )
     .expect_err("HelloWorld connection should be NAKed when service is not present");
@@ -222,8 +223,8 @@ async fn routing() {
     let err = dbg!(
         hellohello_connector
             .connect(
-                hello_with_hello_id(),
-                HelloHello {
+                svcs::hello_with_hello_id(),
+                svcs::HelloHello {
                     hello: "hello".into()
                 },
                 connector::Channels::new(8)
@@ -234,14 +235,14 @@ async fn routing() {
     assert_eq!(err, ConnectError::Nak(Nak::NotFound));
 
     // add a service
-    remote_registry.spawn_hello_world();
+    remote_registry.spawn_hello("world");
 
     // connecting to HelloHello should still fail
     let err = dbg!(
         hellohello_connector
             .connect(
-                hello_with_hello_id(),
-                HelloHello {
+                svcs::hello_with_hello_id(),
+                svcs::HelloHello {
                     hello: "hello".into()
                 },
                 connector::Channels::new(8)
@@ -253,7 +254,7 @@ async fn routing() {
 
     // ... but connecting to HelloWorld should succeed
     let helloworld_chan = helloworld_connector
-        .connect(hello_world_id(), (), connector::Channels::new(8))
+        .connect(svcs::hello_world_id(), (), connector::Channels::new(8))
         .await
         .expect("HelloWorld connection should be established");
 
@@ -278,8 +279,8 @@ async fn routing() {
     let hellohello_chan = dbg!(
         hellohello_connector
             .connect(
-                hello_with_hello_id(),
-                HelloHello {
+                svcs::hello_with_hello_id(),
+                svcs::HelloHello {
                     hello: "hello".into()
                 },
                 connector::Channels::new(8)
