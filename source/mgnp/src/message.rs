@@ -2,25 +2,108 @@ use crate::{registry::Identity, Id, LinkId};
 use serde::{Deserialize, Serialize};
 use tricky_pipe::{mpsc::SerRecvRef, serbox};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum Header {
-    Ack { local_id: Id, remote_id: Id },
-    Nak { remote_id: Id, reason: Nak },
-    Connect { local_id: Id, identity: Identity },
-    Reset { remote_id: Id },
-    Data { local_id: Id, remote_id: Id },
-}
-
+/// A MGNP frame consists of a [message header](Header), followed by a message
+/// body of zero or more bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame<T> {
     pub(crate) header: Header,
     pub(crate) body: T,
 }
 
+/// A `Header` describes the type of message contained by a [`Frame`], as well
+/// as the link ID(s) of the connection that frame is associated with.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum Header {
+    /// Sent to acknowledge that a remote-initiated connection has been
+    /// accepted by the server.
+    ///
+    /// An `ACK` frame is sent in response to a received
+    /// [`CONNECT`](Self::Connect) frame once the service has accepted the new
+    /// connection. Once the peer that initiated the connection has received the
+    /// `ACK`, it may begin to send [`DATA`](Self::Data) frames on that connection.
+    ///
+    /// An `ACK` frame does not contain a body.
+    Ack {
+        /// The connection ID assigned to the new connection by the server.
+        local_id: Id,
+        /// The connection ID sent by the remote peer in its
+        /// [`CONNECT`](Self::Connect) frame.
+        remote_id: Id,
+    },
+
+    /// Sent to indicate that a remote-initiated connection could *not* be
+    /// accepted by the server.
+    ///
+    /// An `NAK` frame is sent in response to a received
+    /// [`CONNECT`](Self::Connect) frame, and indicates that the server could
+    /// not accept the connection request. A future connection to the same
+    /// service identity may be accepted by the server.
+    ///
+    /// If a `NAK` is received in response to a [`CONNECT`](Self::Connect)
+    /// frame, a connection was not established, and the initiating peer should
+    /// NOT attempt to send [`DATA``](Self::DATA) frames on that connection. The
+    /// server MAY ignore any [`DATA`] frames with the `NAK`ed `remote_id`, or
+    /// it MAY respond with [`RESET`](Self::Reset) frames.
+    ///
+    /// The initiating peer MAY reuse the ID of a `NAK`ed connection in a
+    /// subsequent [`CONNECT`](Self::Connect) request to establish a new
+    /// connection.
+    ///
+    /// The `NAK` frame contains a [`Nak`] value which indicates why the
+    /// connection could not be successfully established. If the [`Nak`] value
+    /// is [`Nak::Rejected`], the frame MAY contain a body containing a
+    /// service-specific error value indicating why the connection was rejected
+    /// by the service.
+    Nak {
+        /// The connection ID sent by the remote peer in its
+        /// [`CONNECT`](Self::Connect) frame.
+        remote_id: Id,
+        /// Describes why the connection was not accepted.
+        reason: Nak,
+    },
+    /// Sent to initiate a connection to a remote service.
+    ///
+    /// If the connection request
+    Connect {
+        local_id: Id,
+        identity: Identity,
+    },
+    Reset {
+        remote_id: Id,
+    },
+    Data {
+        local_id: Id,
+        remote_id: Id,
+    },
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Nak {
+    /// The connection was not accepted because the server cannot support any
+    /// additional connections.
+    ///
+    /// If the initiating peer closes existing connections that it has initiated
+    /// previously, the server MAY accept a new [`CONNECT`](Header::Connect)
+    /// request from that peer. The connection limit is global to the server
+    /// peer, and is not specific to the requested service [`Identity`].
     ConnTableFull(usize),
+    /// No service matching the [`Identity`] provided in the
+    /// [`CONNECT`](Header::Connect) frame exists on the server.
+    ///
+    /// This may indicate that the [`Service`](registry::Service) UUID does not
+    /// match any service running on the server, or that no instance of that
+    /// service with the provided identity does not exist.
+    ///
+    /// This does not indicate that no service with the provided identity will
+    /// NEVER exist on the server. A subsequent [`CONNECT`](Header::Connect)
+    /// with the same [`Identity`] may succeed, if a service with the requested
+    /// identity is later started.
     NotFound,
+    /// The connection was rejected by the [`Service`].
+    ///
+    /// The body of this [`NAK`](Header::Nak) frame may contain additional bytes
+    /// which can be interpreted as a [service-specific `ConnectError`
+    /// value](registry::Service::ConnectError).
     Rejected,
 }
 

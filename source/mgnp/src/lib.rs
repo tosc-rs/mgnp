@@ -13,7 +13,7 @@ pub mod registry;
 pub use client::Connector;
 pub use conn_table::{Id, LinkId};
 pub use message::Frame;
-pub use registry::Registry;
+pub use registry::{Registry, Service};
 pub use tricky_pipe;
 
 use client::OutboundConnect;
@@ -22,7 +22,7 @@ use futures::FutureExt;
 use message::{InboundFrame, Nak, OutboundFrame};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
-/// Represents a wire-level transport for MGNP frames.
+/// Represents a wire-level transport for [MGNP frames](Frame).
 ///
 /// Implementations of `Wire` are responsible for implementing some form of
 /// message framing. Each [`Wire::RecvFrame`] returned by [`Wire::recv`] must be
@@ -30,8 +30,13 @@ use tricky_pipe::{mpsc, oneshot, serbox};
 /// or some lower-level transport's native framing) is left up to the
 /// implementation of `Wire`.
 pub trait Wire {
+    /// Wire-level errors.
     type Error: fmt::Display;
+
+    /// A buffer containing the raw bytes of a single [MGNP frame](Frame)
+    /// received on this `Wire`. This is returned by the [`Wire::recv`] method.
     type RecvFrame: AsRef<[u8]>;
+
     async fn send(&mut self, f: OutboundFrame<'_>) -> Result<(), Self::Error>;
 
     /// Receive a single frame from the wire, returning it.
@@ -50,6 +55,9 @@ pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }> {
     conns_rx: mpsc::Receiver<OutboundConnect>,
 }
 
+/// A handle to a running MGNP network interface.
+///
+/// This handle can be used to initiate new outbound connections.
 #[derive(Clone)]
 pub struct Interface(mpsc::Sender<OutboundConnect>);
 
@@ -95,9 +103,28 @@ impl Interface {
         (iface, worker)
     }
 
-    /// Returns a `Connector` that initiates connections for a particular
+    /// Returns a [`Connector`] that initiates connections for a particular
     /// service type.
-    pub fn connector<S: registry::Service>(
+    ///
+    /// This method will automatically allocate on the heap for data
+    /// storage required by the connector, and therefore requires the "alloc"
+    /// crate feature flag. To construct a connector with a provided
+    /// [`serbox::Sharer`] and [`oneshot::Receiver`], which may be heap- or
+    /// statically-allocated, use the [`Interface::connector_with`] method
+    /// instead.
+    #[cfg(feature = "alloc")]
+    pub fn connector<S: Service>(&self) -> client::Connector<S> {
+        self.connector_with(serbox::Sharer::new(), oneshot::Receiver::new())
+    }
+
+    /// Returns a `[Connector`] that initiates connections for a particular
+    /// service type, using the provided [`serbox::Sharer`] and
+    /// [`oneshot::Receiver`] allocations.
+    ///
+    /// When the "alloc" crate feature flag is enabled, the
+    /// [`Interface::connector`] method may be used to automatically allocate
+    /// these values on the heap.
+    pub fn connector_with<S: registry::Service>(
         &self,
         hello_sharer: serbox::Sharer<S::Hello>,
         rsp: oneshot::Receiver<Result<(), Nak>>,
@@ -115,6 +142,16 @@ where
     Wi: Wire,
     R: Registry,
 {
+    /// Runs the MGNP network state machine on this interface.
+    ///
+    /// This method will run in a loop indefinitely, processing any messages
+    /// sent or received on the interface described by the provided [`Wire`]
+    /// type.
+    ///
+    /// If a wire-level error occurs, this method returns an [`InterfaceError`].
+    /// Depending on the wire error, it may be possible to continue running the
+    /// interface state machine on this [`Wire`], and calling `Machine::run`
+    /// again will resume running the interface.
     pub async fn run(&mut self) -> Result<(), InterfaceError<Wi::Error>> {
         use futures::future;
 
@@ -201,8 +238,6 @@ where
         }
     }
 }
-
-// === impl OutboundConnect ===
 
 // === impl InterfaceError ===
 

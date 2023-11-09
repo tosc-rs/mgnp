@@ -17,9 +17,7 @@ async fn basically_works() {
         .spawn_local(Default::default())
         .spawn_remote(remote_registry);
 
-    let mut connector = fixture
-        .local_iface()
-        .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWorld>();
 
     let chan = connect(&mut connector, "hello-world", ()).await;
     chan.tx()
@@ -48,9 +46,7 @@ async fn hellos_work() {
         .spawn_local(Default::default())
         .spawn_remote(remote_registry);
 
-    let mut connector = fixture
-        .local_iface()
-        .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWithHello>();
 
     let chan = connect(
         &mut connector,
@@ -87,9 +83,7 @@ async fn nak_bad_hello() {
         .spawn_local(Default::default())
         .spawn_remote(remote_registry);
 
-    let mut connector = fixture
-        .local_iface()
-        .connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWithHello>();
 
     // establish a good connection with a valid hello
     let chan = connect(
@@ -139,9 +133,7 @@ async fn mux_single_service() {
         .spawn_local(Default::default())
         .spawn_remote(remote_registry);
 
-    let mut connector = fixture
-        .local_iface()
-        .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWorld>();
 
     let chan1 = connect(&mut connector, "hello-world", ()).await;
 
@@ -191,10 +183,8 @@ async fn service_type_routing() {
     let iface = fixture.local_iface();
 
     // create connectors for both services
-    let mut helloworld_connector =
-        iface.connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
-    let mut hellohello_connector =
-        iface.connector::<svcs::HelloWithHello>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut helloworld_connector = iface.connector::<svcs::HelloWorld>();
+    let mut hellohello_connector = iface.connector::<svcs::HelloWithHello>();
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
@@ -297,9 +287,7 @@ async fn service_identity_routing() {
         .spawn_local(Default::default())
         .spawn_remote(remote_registry.clone());
 
-    let mut connector = fixture
-        .local_iface()
-        .connector::<svcs::HelloWorld>(serbox::Sharer::new(), oneshot::Receiver::new());
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWorld>();
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
