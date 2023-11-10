@@ -49,26 +49,30 @@ pub enum Header {
     /// Sent to indicate that a remote-initiated connection could *not* be
     /// accepted by the server.
     ///
-    /// A `REJECT` frame is sent in response to a received
-    /// [`CONNECT`](Self::Connect) frame, and indicates that the server could
-    /// not accept the connection request. A future connection to the same
-    /// service identity may be accepted by the server.
+    /// A `REJECT` frame is sent in response to a received  [`CONNECT`] frame,
+    /// and indicates that the server could not accept the connection request.
+    /// A future connection to the same service identity may be accepted by the
+    /// server.
     ///
-    /// If a `REJECT` is received in response to a [`CONNECT`](Self::Connect)
-    /// frame, a connection was not established, and the initiating peer should
-    /// NOT attempt to send [`DATA``](Self::DATA) frames on that connection. The
-    /// server MAY ignore any [`DATA`] frames with the `REJECT`ed `remote_id`, or
-    /// it MAY respond with [`RESET`](Self::Reset) frames.
+    /// If a `REJECT` is received in response to a [`CONNECT`] frame, a
+    /// connection was not established, and the initiating peer should
+    /// NOT attempt to send [`DATA`] frames on that connection. The server MAY
+    /// ignore any [`DATA`] frames with the `REJECT`ed `remote_id`, or it MAY
+    /// respond with [`RESET`] frames.
     ///
-    /// The initiating peer MAY reuse the ID of a `NAK`ed connection in a
-    /// subsequent [`CONNECT`](Self::Connect) request to establish a new
-    /// connection.
+    /// The initiating peer MAY reuse the ID of a `REJECT`ed connection in a
+    /// subsequent [`CONNECT`]request to establish a new connection.
     ///
     /// The `REJECT` frame contains a [`Rejection`] value which indicates why the
     /// connection could not be successfully established. If the [`Rejection`] value
-    /// is [`Rejection::Rejected`], the frame MAY contain a body containing a
-    /// service-specific error value indicating why the connection was rejected
-    /// by the service.
+    /// is [`Rejection::ServiceRejected`], the frame MAY contain a body
+    /// containing a [service-specific error value] indicating why the
+    /// connection was rejected by the service.
+    ///
+    /// [`CONNECT`]: Self::Connect
+    /// [`DATA`]: Self::Data
+    /// [`RESET`]: Self::Reset
+    /// [service-specific error value]: crate::Service::ConnectError
     Reject {
         /// The connection ID sent by the remote peer in its
         /// [`CONNECT`](Self::Connect) frame.
