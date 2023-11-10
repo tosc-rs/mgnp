@@ -236,7 +236,7 @@ impl<'data> Frame<&'data [u8]> {
         if !hdr.has_body() {
             // if there's no body, there should be no remaining trailing data in
             // the frame.
-            if !frame.is_empty() {
+            if !rem.is_empty() {
                 return Err(DecodeError::UnexpectedTrailingData);
             }
 
