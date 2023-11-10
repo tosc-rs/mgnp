@@ -61,7 +61,7 @@ pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }> {
 #[derive(Clone)]
 pub struct Interface(mpsc::Sender<OutboundConnect>);
 
-/// Errors returned by [`Interface::run`].
+/// Errors returned by [`Machine::run`].
 #[derive(Debug)]
 pub struct InterfaceError<E> {
     kind: InterfaceErrorKind<E>,
