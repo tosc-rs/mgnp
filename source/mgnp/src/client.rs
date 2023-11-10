@@ -1,9 +1,9 @@
-use crate::{message::Nak, registry};
+use crate::{message::Rejection, registry};
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
 pub struct Connector<S: registry::Service> {
     pub(super) hello_sharer: serbox::Sharer<S::Hello>,
-    pub(super) rsp: oneshot::Receiver<Result<(), Nak>>,
+    pub(super) rsp: oneshot::Receiver<Result<(), Rejection>>,
     pub(super) tx: mpsc::Sender<OutboundConnect>,
 }
 
@@ -16,13 +16,13 @@ pub struct OutboundConnect {
     /// The local bidirectional channel to bind to the remote service.
     pub(crate) channel: bidi::SerBiDi,
     /// Sender for the response from the remote service.
-    pub(crate) rsp: oneshot::Sender<Result<(), Nak>>,
+    pub(crate) rsp: oneshot::Sender<Result<(), Rejection>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ConnectError {
     InterfaceDead,
-    Nak(Nak),
+    Nak(Rejection),
 }
 
 pub type ClientChannel<S> =

@@ -19,7 +19,7 @@ pub use tricky_pipe;
 use client::OutboundConnect;
 use conn_table::ConnTable;
 use futures::FutureExt;
-use message::{InboundFrame, Nak, OutboundFrame};
+use message::{InboundFrame, OutboundFrame, Rejection};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
 /// A wire-level transport for [MGNP frames](Frame).
@@ -45,6 +45,9 @@ use tricky_pipe::{mpsc, oneshot, serbox};
 /// representation of that message when written to the remote peer.
 ///
 /// ## Reliable Delivery
+///
+/// A `Wire` implementation is responsible for handling any link-level errors
+/// that may result in data loss.
 pub trait Wire {
     /// Wire-level errors.
     type Error: fmt::Display;
@@ -145,7 +148,7 @@ impl Interface {
     pub fn connector_with<S: registry::Service>(
         &self,
         hello_sharer: serbox::Sharer<S::Hello>,
-        rsp: oneshot::Receiver<Result<(), Nak>>,
+        rsp: oneshot::Receiver<Result<(), Rejection>>,
     ) -> client::Connector<S> {
         client::Connector {
             hello_sharer,
@@ -217,8 +220,8 @@ where
             if let Some(buf) = in_buf {
                 let frame = match InboundFrame::from_bytes(buf.as_ref()) {
                     Ok(f) => f,
-                    Err(e) => {
-                        tracing::warn!(?e, "failed to decode inbound frame");
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to decode inbound frame");
                         continue;
                     }
                 };

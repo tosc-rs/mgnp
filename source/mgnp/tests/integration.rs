@@ -1,7 +1,7 @@
 #![cfg(feature = "alloc")]
 mod support;
 use mgnp::{
-    message::Nak,
+    message::Rejection,
     registry::Identity,
     tricky_pipe::{oneshot, serbox},
 };
@@ -102,7 +102,7 @@ async fn nak_bad_hello() {
         svcs::HelloHello {
             hello: "goodbye".into(),
         },
-        Nak::Rejected,
+        Rejection::ServiceRejected,
     )
     .await;
 
@@ -188,14 +188,20 @@ async fn service_type_routing() {
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
-    connect_should_nak(&mut helloworld_connector, "hello-world", (), Nak::NotFound).await;
+    connect_should_nak(
+        &mut helloworld_connector,
+        "hello-world",
+        (),
+        Rejection::NotFound,
+    )
+    .await;
     connect_should_nak(
         &mut hellohello_connector,
         "hello-hello",
         svcs::HelloHello {
             hello: "hello".into(),
         },
-        Nak::NotFound,
+        Rejection::NotFound,
     )
     .await;
 
@@ -209,7 +215,7 @@ async fn service_type_routing() {
         svcs::HelloHello {
             hello: "hello".into(),
         },
-        Nak::NotFound,
+        Rejection::NotFound,
     )
     .await;
 
@@ -291,17 +297,17 @@ async fn service_identity_routing() {
 
     // attempts to initiate connections should fail when the remote services
     // don't exist
-    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
-    connect_should_nak(&mut connector, "hello-sf", (), Nak::NotFound).await;
-    connect_should_nak(&mut connector, "hello-universe", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-world", (), Rejection::NotFound).await;
+    connect_should_nak(&mut connector, "hello-sf", (), Rejection::NotFound).await;
+    connect_should_nak(&mut connector, "hello-universe", (), Rejection::NotFound).await;
 
     // add the 'hello-sf' service
     let conns = remote_registry.add_service(Identity::from_name::<svcs::HelloWorld>("hello-sf"));
     tokio::spawn(svcs::serve_hello("hello sf", "san francisco", conns));
 
     // connecting to hello-world and hello-universe should still fail...
-    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
-    connect_should_nak(&mut connector, "hello-universe", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-world", (), Rejection::NotFound).await;
+    connect_should_nak(&mut connector, "hello-universe", (), Rejection::NotFound).await;
 
     // ... but connecting to 'hello-sf' should succeed
     let sf_conn = connect(&mut connector, "hello-sf", ()).await;
@@ -327,7 +333,7 @@ async fn service_identity_routing() {
     tokio::spawn(svcs::serve_hello("hello universe", "universe", conns));
 
     // connecting to hello-world should still fail
-    connect_should_nak(&mut connector, "hello-world", (), Nak::NotFound).await;
+    connect_should_nak(&mut connector, "hello-world", (), Rejection::NotFound).await;
 
     // ... but connecting to 'hello-sf' should succeed
     let uni_conn = connect(&mut connector, "hello-universe", ()).await;

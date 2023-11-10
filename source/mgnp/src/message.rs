@@ -1,4 +1,5 @@
 use crate::{registry::Identity, Id, LinkId};
+use core::fmt;
 use serde::{Deserialize, Serialize};
 use tricky_pipe::{mpsc::SerRecvRef, serbox};
 
@@ -14,6 +15,20 @@ pub struct Frame<T> {
 /// as the link ID(s) of the connection that frame is associated with.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Header {
+    /// Sent to initiate a connection to a remote service.
+    ///
+    /// If the connection request
+    Connect {
+        local_id: Id,
+        identity: Identity,
+    },
+
+    /// A data frame on an established connection.
+    Data {
+        local_id: Id,
+        remote_id: Id,
+    },
+
     /// Sent to acknowledge that a remote-initiated connection has been
     /// accepted by the server.
     ///
@@ -34,51 +49,48 @@ pub enum Header {
     /// Sent to indicate that a remote-initiated connection could *not* be
     /// accepted by the server.
     ///
-    /// An `NAK` frame is sent in response to a received
+    /// A `REJECT` frame is sent in response to a received
     /// [`CONNECT`](Self::Connect) frame, and indicates that the server could
     /// not accept the connection request. A future connection to the same
     /// service identity may be accepted by the server.
     ///
-    /// If a `NAK` is received in response to a [`CONNECT`](Self::Connect)
+    /// If a `REJECT` is received in response to a [`CONNECT`](Self::Connect)
     /// frame, a connection was not established, and the initiating peer should
     /// NOT attempt to send [`DATA``](Self::DATA) frames on that connection. The
-    /// server MAY ignore any [`DATA`] frames with the `NAK`ed `remote_id`, or
+    /// server MAY ignore any [`DATA`] frames with the `REJECT`ed `remote_id`, or
     /// it MAY respond with [`RESET`](Self::Reset) frames.
     ///
     /// The initiating peer MAY reuse the ID of a `NAK`ed connection in a
     /// subsequent [`CONNECT`](Self::Connect) request to establish a new
     /// connection.
     ///
-    /// The `NAK` frame contains a [`Nak`] value which indicates why the
-    /// connection could not be successfully established. If the [`Nak`] value
-    /// is [`Nak::Rejected`], the frame MAY contain a body containing a
+    /// The `REJECT` frame contains a [`Rejection`] value which indicates why the
+    /// connection could not be successfully established. If the [`Rejection`] value
+    /// is [`NakConnect::Rejected`], the frame MAY contain a body containing a
     /// service-specific error value indicating why the connection was rejected
     /// by the service.
-    Nak {
+    Reject {
         /// The connection ID sent by the remote peer in its
         /// [`CONNECT`](Self::Connect) frame.
         remote_id: Id,
         /// Describes why the connection was not accepted.
+        reason: Rejection,
+    },
+
+    /// A frame (other than `CONNECT`) was not acknowledged.
+    Nak {
+        /// The remote ID of the NAKed frame.
+        remote_id: Id,
         reason: Nak,
     },
-    /// Sent to initiate a connection to a remote service.
-    ///
-    /// If the connection request
-    Connect {
-        local_id: Id,
-        identity: Identity,
-    },
+
     Reset {
-        remote_id: Id,
-    },
-    Data {
-        local_id: Id,
         remote_id: Id,
     },
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Nak {
+pub enum Rejection {
     /// The connection was not accepted because the server cannot support any
     /// additional connections.
     ///
@@ -104,7 +116,19 @@ pub enum Nak {
     /// The body of this [`NAK`](Header::Nak) frame may contain additional bytes
     /// which can be interpreted as a [service-specific `ConnectError`
     /// value](crate::registry::Service::ConnectError).]
-    Rejected,
+    ServiceRejected,
+    /// The connection was rejected because data could not be decoded.
+    DecodeError(DecodeError),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Nak {
+    /// A frame was rejected because it could not be decoded successfully.
+    DecodeError(DecodeError),
+    /// The local ID sent by the remote does not exist.
+    UnknownLocalId(Id),
+    /// The remote ID sent by the remote does not correspond to an existing stream.
+    UnknownRemoteId(Id),
 }
 
 pub type InboundFrame<'data> = Frame<&'data [u8]>;
@@ -118,6 +142,42 @@ pub enum OutboundData<'recv> {
     Hello(serbox::Consumer),
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum DecodeError {
+    Header(DecodeErrorKind),
+    Body(DecodeErrorKind),
+    UnexpectedTrailingData,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum DecodeErrorKind {
+    /// Hit the end of buffer, expected more data
+    UnexpectedEnd,
+    /// Found a varint that didn't terminate. Is the usize too big for this platform?
+    BadVarint,
+    /// Found a bool that wasn't 0 or 1
+    BadBool,
+    /// Found an invalid unicode char
+    BadChar,
+    /// Tried to parse invalid utf-8
+    BadUtf8,
+    /// Found an Option discriminant that wasn't 0 or 1
+    BadOption,
+    /// Found an enum discriminant that was > u32::max_value()
+    BadEnum,
+    /// The original data was not well encoded
+    BadEncoding,
+    /// Bad CRC while deserializing
+    BadCrc,
+    /// Serde Deserialization Error
+    SerdeDeCustom,
+    /// Unknown errors.
+    Unknown,
+}
+
+pub type DecodeResult<T> = Result<T, DecodeError>;
+
 impl Header {
     pub fn link_id(&self) -> LinkId {
         match *self {
@@ -129,6 +189,10 @@ impl Header {
                 remote: Some(remote_id),
             },
             Self::Nak { remote_id, .. } => LinkId {
+                local: None,
+                remote: Some(remote_id),
+            },
+            Self::Reject { remote_id, .. } => LinkId {
                 local: None,
                 remote: Some(remote_id),
             },
@@ -154,8 +218,8 @@ impl Header {
     fn has_body(&self) -> bool {
         matches!(
             self,
-            Self::Nak {
-                reason: Nak::Rejected,
+            Self::Reject {
+                reason: Rejection::ServiceRejected,
                 ..
             } | Self::Connect { .. }
                 | Self::Data { .. }
@@ -163,26 +227,16 @@ impl Header {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum DecodeError {
-    Header(postcard::Error),
-    BodyFrame,
-    Body(postcard::Error),
-    UnexpectedTrailingData,
-}
-
-pub type DecodeResult<T> = Result<T, DecodeError>;
-
 impl<'data> Frame<&'data [u8]> {
     pub fn from_bytes(frame: &'data [u8]) -> DecodeResult<Self> {
-        let (hdr, rem) = postcard::take_from_bytes::<Header>(frame).map_err(DecodeError::Header)?;
+        let (hdr, rem) = postcard::take_from_bytes::<Header>(frame).map_err(DecodeError::header)?;
 
         // if the header indicates that this message doesn't have a body, return
         // it now.
         if !hdr.has_body() {
             // if there's no body, there should be no remaining trailing data in
             // the frame.
-            if !rem.is_empty() {
+            if !frame.is_empty() {
                 return Err(DecodeError::UnexpectedTrailingData);
             }
 
@@ -205,7 +259,7 @@ impl<'data> Frame<&'data [u8]> {
 impl<'bytes, T: Deserialize<'bytes>> Frame<T> {
     pub fn deserialize_from_bytes(buf: &'bytes mut [u8]) -> DecodeResult<Self> {
         let Frame { header, body } = Frame::<&[u8]>::from_bytes(buf)?;
-        let body = postcard::from_bytes(body).map_err(DecodeError::Body)?;
+        let body = postcard::from_bytes(body).map_err(DecodeError::body)?;
         Ok(Frame { header, body })
     }
 }
@@ -231,9 +285,9 @@ impl<'data> Frame<OutboundData<'data>> {
         }
     }
 
-    pub fn nak(remote_id: Id, reason: Nak) -> Self {
+    pub fn nak(remote_id: Id, reason: Rejection) -> Self {
         Self {
-            header: Header::Nak { remote_id, reason },
+            header: Header::Reject { remote_id, reason },
             body: OutboundData::Empty, // todo
         }
     }
@@ -292,57 +346,66 @@ impl OutboundData<'_> {
     }
 }
 
-// impl ControlMessage<serbox::Consumer> {
-//     fn unpack(self) -> (ControlMessage<()>, Option<serbox::Consumer>) {
-//         match self {
-//             Self::Ack {
-//                 local_id,
-//                 remote_id,
-//             } => (
-//                 ControlMessage::Ack {
-//                     local_id,
-//                     remote_id,
-//                 },
-//                 None,
-//             ),
-//             Self::Nak { remote_id, reason } => (ControlMessage::Nak { remote_id, reason }, None),
-//             Self::Connect {
-//                 local_id,
-//                 identity,
-//                 hello,
-//             } => (
-//                 ControlMessage::Connect {
-//                     local_id,
-//                     identity,
-//                     hello: (),
-//                 },
-//                 Some(hello),
-//             ),
-//             Self::Reset { remote_id } => (ControlMessage::Reset { remote_id }, None),
-//         }
-//     }
+// === impl DecodeError ===
 
-//     pub fn to_bytes(self, buf: &mut [u8]) -> postcard::Result<&mut [u8]> {
-//         let (hdr, hello) = self.unpack();
-//         let mut used = postcard::to_slice(&hdr, buf)?.len();
+impl DecodeError {
+    fn body(error: postcard::Error) -> Self {
+        Self::Body(DecodeErrorKind::from_postcard(error))
+    }
 
-//         if let Some(hello) = hello {
-//             let buf = &mut buf[used..];
-//             used += hello.to_slice(buf)?.len();
-//         }
+    fn header(error: postcard::Error) -> Self {
+        Self::Header(DecodeErrorKind::from_postcard(error))
+    }
+}
 
-//         Ok(&mut buf[..used])
-//     }
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Body(err) => write!(f, "error decoding frame body: {err}"),
+            Self::Header(err) => write!(f, "error decoding frame header: {err}"),
+            Self::UnexpectedTrailingData => {
+                f.write_str("unexpected trailing body data in a frame type without a body")
+            }
+        }
+    }
+}
 
-//     #[cfg(any(test, feature = "alloc"))]
-//     pub fn to_vec(self) -> postcard::Result<alloc::vec::Vec<u8>> {
-//         let (hdr, hello) = self.unpack();
-//         let mut buf = postcard::to_allocvec(&hdr)?;
-//         if let Some(hello) = hello {
-//             // XXX(eliza): this suuuuucks
-//             buf.append(&mut hello.to_vec()?);
-//         }
+// === impl DecodeErrorKind ===
 
-//         Ok(buf)
-//     }
-// }
+impl DecodeErrorKind {
+    fn from_postcard(error: postcard::Error) -> Self {
+        match error {
+            postcard::Error::DeserializeUnexpectedEnd => Self::UnexpectedEnd,
+            postcard::Error::DeserializeBadVarint => Self::BadVarint,
+            postcard::Error::DeserializeBadBool => Self::BadBool,
+            postcard::Error::DeserializeBadChar => Self::BadChar,
+            postcard::Error::DeserializeBadUtf8 => Self::BadUtf8,
+            postcard::Error::DeserializeBadOption => Self::BadOption,
+            postcard::Error::DeserializeBadEnum => Self::BadEnum,
+            postcard::Error::DeserializeBadEncoding => Self::BadEncoding,
+            postcard::Error::DeserializeBadCrc => Self::BadCrc,
+            postcard::Error::SerdeDeCustom => Self::SerdeDeCustom,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl fmt::Display for DecodeErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::UnexpectedEnd => "hit the end of the buffer, but expected more data",
+            Self::BadVarint => {
+                "found a varint that didn't terminate, is the usize too big for this platform?"
+            }
+            Self::BadBool => "found a bool that wasn't 0 or 1",
+            Self::BadChar => "found an invalid unicode character",
+            Self::BadUtf8 => "tried to parse invalid UTF-8",
+            Self::BadOption => "found an Option discriminant that wasn't 0 or 1",
+            Self::BadEnum => "found an enum discriminant that was > u32::max_value()",
+            Self::BadEncoding => "the original data was not well encoded",
+            Self::BadCrc => "bad CRC while deserializing",
+            Self::SerdeDeCustom => "Serde deserializer error",
+            Self::Unknown => "unknown error",
+        })
+    }
+}

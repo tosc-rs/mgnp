@@ -1,4 +1,4 @@
-use super::Nak;
+use super::Rejection;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tricky_pipe::bidi::SerBiDi;
 use uuid::Uuid;
@@ -16,7 +16,7 @@ pub enum IdentityKind {
 
 /// Represents a mechanism for discovering services on the local node.
 pub trait Registry {
-    async fn connect(&self, identity: Identity, hello: &[u8]) -> Result<SerBiDi, Nak>;
+    async fn connect(&self, identity: Identity, hello: &[u8]) -> Result<SerBiDi, Rejection>;
 }
 
 /// A service definition.

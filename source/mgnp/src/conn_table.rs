@@ -1,6 +1,6 @@
 use crate::{
     client::OutboundConnect,
-    message::{Header, InboundFrame, Nak, OutboundFrame},
+    message::{Header, InboundFrame, OutboundFrame, Rejection},
     registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
@@ -29,7 +29,7 @@ pub(crate) struct ConnTable<const CAPACITY: usize> {
 #[derive(Debug)]
 enum State {
     Open { remote_id: Id },
-    Connecting(oneshot::Sender<Result<(), Nak>>),
+    Connecting(oneshot::Sender<Result<(), Rejection>>),
 }
 
 #[derive(Debug)]
@@ -184,10 +184,15 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 tracing::trace!(id.remote = %local_id, id.local = %remote_id, "process_inbound: ACK");
                 self.process_ack(remote_id, local_id)
             }
-            Header::Nak { remote_id, reason } => {
-                tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: NAK");
-                // TODO(eliza): send error to the initiator
+            Header::Reject { remote_id, reason } => {
+                tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: REJECT");
                 self.close(remote_id, Some(reason));
+                None
+            }
+            Header::Nak { remote_id, reason } => {
+                tracing::warn!(id.local = %remote_id, ?reason, "process_inbound: NAK");
+                // TODO(eliza): if applicable, tell the local peer that sent the
+                // frame that it was bad...
                 None
             }
             Header::Reset { remote_id } => {
@@ -225,7 +230,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             None => {
                 // if the local initiator dropped the response channel, that's
                 // fine, we're bailing anyway!
-                let _ = rsp.send(Err(Nak::ConnTableFull(CAPACITY)));
+                let _ = rsp.send(Err(Rejection::ConnTableFull(CAPACITY)));
                 return None;
             }
         };
@@ -297,13 +302,13 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             // Accepted, we got a local ID!
             Some(local_id) => OutboundFrame::ack(local_id, remote_id),
             // Conn table is full, can't accept this stream.
-            None => OutboundFrame::nak(remote_id, Nak::ConnTableFull(CAPACITY)),
+            None => OutboundFrame::nak(remote_id, Rejection::ConnTableFull(CAPACITY)),
         }
     }
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if
     /// no conn existed for that ID.
-    fn close(&mut self, local_id: Id, nak: Option<Nak>) -> bool {
+    fn close(&mut self, local_id: Id, nak: Option<Rejection>) -> bool {
         match self.conns.get_mut(local_id) {
             None => {
                 tracing::trace!(?local_id, "close: ID greater than max conns ({CAPACITY})");

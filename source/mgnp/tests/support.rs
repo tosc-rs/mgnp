@@ -1,6 +1,6 @@
 #![cfg(feature = "alloc")]
 use mgnp::{
-    message::{Nak, OutboundFrame},
+    message::{OutboundFrame, Rejection},
     registry::{self, Registry},
     tricky_pipe::{
         bidi::{BiDi, SerBiDi},
@@ -277,17 +277,21 @@ pub struct TestFrame(Vec<u8>);
 
 pub struct InboundConnect {
     pub hello: Vec<u8>,
-    pub rsp: oneshot::Sender<Result<SerBiDi, Nak>>,
+    pub rsp: oneshot::Sender<Result<SerBiDi, Rejection>>,
 }
 
 // === impl TestRegistry ===
 
 impl Registry for TestRegistry {
     #[tracing::instrument(level = tracing::Level::INFO, name = "Registry::connect", skip(self, hello),)]
-    async fn connect(&self, identity: registry::Identity, hello: &[u8]) -> Result<SerBiDi, Nak> {
+    async fn connect(
+        &self,
+        identity: registry::Identity,
+        hello: &[u8],
+    ) -> Result<SerBiDi, Rejection> {
         let Some(svc) = self.svcs.read().unwrap().get(&identity).cloned() else {
             tracing::info!("REGISTRY: service not found!");
-            return Err(Nak::NotFound);
+            return Err(Rejection::NotFound);
         };
 
         tracing::info!("REGISTRY: service found");
@@ -304,10 +308,10 @@ impl Registry for TestRegistry {
             tracing::info!("REGISTRY: service dead!");
             // receiver dropped, svc is dead.
             self.svcs.write().unwrap().remove(&identity);
-            return Err(Nak::NotFound);
+            return Err(Rejection::NotFound);
         }
 
-        rx.await.map_err(|_| Nak::NotFound)?
+        rx.await.map_err(|_| Rejection::NotFound)?
     }
 }
 
@@ -348,7 +352,7 @@ impl TestRegistry {
                             ?hello,
                             "hellohello service received valid non-matching hello!"
                         );
-                        Err(Nak::Rejected)
+                        Err(Rejection::ServiceRejected)
                     };
                     let sent = rsp.send(res).is_ok();
                     tracing::debug!(?sent);
@@ -423,7 +427,7 @@ pub async fn connect_should_nak<S: registry::Service>(
     connector: &mut mgnp::Connector<S>,
     name: &'static str,
     hello: S::Hello,
-    nak: mgnp::message::Nak,
+    nak: mgnp::message::Rejection,
 ) {
     tracing::info!("connecting to {name} (should NAK)...");
     let res = connector
