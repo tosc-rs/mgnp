@@ -5,62 +5,84 @@
 extern crate alloc;
 use core::fmt;
 
-use conn_table::ConnTable;
-pub use conn_table::{Id, LinkId};
-use futures::{FutureExt, Stream, StreamExt};
-use tricky_pipe::bidi::SerBiDi;
-
+pub mod client;
 mod conn_table;
 pub mod message;
 pub mod registry;
-use message::Nak;
-pub use message::{InboundMessage, OutboundMessage};
-pub use registry::Registry;
+
+pub use client::Connector;
+pub use conn_table::{Id, LinkId};
+pub use message::Frame;
+pub use registry::{Registry, Service};
 pub use tricky_pipe;
 
-pub trait Frame {
-    fn as_bytes(&self) -> &[u8];
+use client::OutboundConnect;
+use conn_table::ConnTable;
+use futures::FutureExt;
+use message::{InboundFrame, OutboundFrame, Rejection};
+use tricky_pipe::{mpsc, oneshot, serbox};
 
-    fn decode(&self) -> postcard::Result<InboundMessage<'_>> {
-        postcard::from_bytes(self.as_bytes())
-    }
-}
-
-/// Represents a wire-level transport for MGNP [`Frame`]s.
+/// A wire-level transport for [MGNP frames](Frame).
+///
+/// A `Wire` represents a point-to-point link between a local MGNP [`Interface`]
+/// and a remote MGNP interface. A [link state machine](Machine) is constructed
+/// with an implementation of the `Wire` trait for the link on which that
+/// interface executes.
+///
+/// # Responsibilities of the Wire
+///
+/// A `Wire` provides two primary services to the MGNP layer: _framing_ and
+/// _reliable delivery_.
+///
+/// ## Framing
+///
+/// Implementations of `Wire` are responsible for implementing some form of
+/// message framing. Each [`Wire::RecvFrame`] returned by [`Wire::recv`] must be
+/// a single MGNP frame. The framing strategy (e.g. COBS, leading length delimiter,
+/// or some lower-level transport's native framing) is left up to the
+/// implementation of `Wire`. Similarly, when [`Wire::send`] is called with an
+/// [`OutboundFrame`], the `Wire` is responsible for framing the binary
+/// representation of that message when written to the remote peer.
+///
+/// ## Reliable Delivery
+///
+/// A `Wire` implementation is responsible for handling any link-level errors
+/// that may result in data loss.
 pub trait Wire {
-    type Frame: Frame;
-    type Error;
-    async fn send(&mut self, f: OutboundMessage<'_>) -> Result<(), Self::Error>;
-    async fn recv(&mut self) -> Result<Self::Frame, Self::Error>;
+    /// Wire-level errors.
+    type Error: fmt::Display;
+
+    /// A buffer containing the raw bytes of a single [MGNP frame](Frame)
+    /// received on this `Wire`. This is returned by the [`Wire::recv`] method.
+    type RecvFrame: AsRef<[u8]>;
+
+    /// Send the framed binary representation of the provided [`OutboundFrame`]
+    /// to the remote peer.
+    async fn send(&mut self, f: OutboundFrame<'_>) -> Result<(), Self::Error>;
+
+    /// Receive a single frame from the wire, returning it.
+    async fn recv(&mut self) -> Result<Self::RecvFrame, Self::Error>;
 }
 
-/// An outbound connect request.
-pub struct OutboundConnect<'data> {
-    /// The identity of the remote service to connect to.
-    identity: registry::Identity,
-    /// The "hello" message to send to the remote service.
-    hello: &'data [u8],
-    /// The local bidirectional channel to bind to the remote service.
-    channel: SerBiDi,
-    // TODO(eliza): add a oneshot for "connect success/connect failed"...
-}
-
-/// A MGNP network interface for a particular [`Wire`].
+/// A MGNP network interface state machine for a particular [`Wire`].
 ///
 /// This type implements the connection-management state machine for connections
 /// over the provided `Wi`-typed [`Wire`] implementation. Local services are discovered using
 /// the `R`-typed [`Registry`] implementation.
-pub struct Interface<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }>
-where
-    // Remote wire type
-    Wi: Wire,
-{
+pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }> {
     wire: Wi,
     conn_table: ConnTable<MAX_CONNS>,
     registry: R,
+    conns_rx: mpsc::Receiver<OutboundConnect>,
 }
 
-/// Errors returned by [`Interface::run`].
+/// A handle to a running MGNP network interface.
+///
+/// This handle can be used to initiate new outbound connections.
+#[derive(Clone)]
+pub struct Interface(mpsc::Sender<OutboundConnect>);
+
+/// Errors returned by [`Machine::run`].
 #[derive(Debug)]
 pub struct InterfaceError<E> {
     kind: InterfaceErrorKind<E>,
@@ -81,71 +103,150 @@ pub enum InterfaceErrorKind<E> {
 
 pub const DEFAULT_MAX_CONNS: usize = 512;
 
-impl<Wi, R, const MAX_CONNS: usize> Interface<Wi, R, MAX_CONNS>
+impl Interface {
+    #[must_use]
+    pub fn new<Wi, R, const MAX_CONNS: usize>(
+        wire: Wi,
+        registry: R,
+        conns: mpsc::TrickyPipe<OutboundConnect>,
+    ) -> (Self, Machine<Wi, R, MAX_CONNS>)
+    where
+        Wi: Wire,
+        R: Registry,
+    {
+        let iface = Self(conns.sender());
+        let worker = Machine {
+            wire,
+            conn_table: ConnTable::new(),
+            registry,
+            conns_rx: conns.receiver().unwrap(),
+        };
+        (iface, worker)
+    }
+
+    /// Returns a [`Connector`] that initiates connections for a particular
+    /// service type.
+    ///
+    /// This method will automatically allocate on the heap for data
+    /// storage required by the connector, and therefore requires the "alloc"
+    /// crate feature flag. To construct a connector with a provided
+    /// [`serbox::Sharer`] and [`oneshot::Receiver`], which may be heap- or
+    /// statically-allocated, use the [`Interface::connector_with`] method
+    /// instead.
+    #[cfg(feature = "alloc")]
+    pub fn connector<S: Service>(&self) -> client::Connector<S> {
+        self.connector_with(serbox::Sharer::new(), oneshot::Receiver::new())
+    }
+
+    /// Returns a `[Connector`] that initiates connections for a particular
+    /// service type, using the provided [`serbox::Sharer`] and
+    /// [`oneshot::Receiver`] allocations.
+    ///
+    /// When the "alloc" crate feature flag is enabled, the
+    /// [`Interface::connector`] method may be used to automatically allocate
+    /// these values on the heap.
+    pub fn connector_with<S: registry::Service>(
+        &self,
+        hello_sharer: serbox::Sharer<S::Hello>,
+        rsp: oneshot::Receiver<Result<(), Rejection>>,
+    ) -> client::Connector<S> {
+        client::Connector {
+            hello_sharer,
+            rsp,
+            tx: self.0.clone(),
+        }
+    }
+}
+
+impl<Wi, R, const MAX_CONNS: usize> Machine<Wi, R, MAX_CONNS>
 where
     Wi: Wire,
     R: Registry,
 {
-    #[must_use]
-    pub fn new(wire: Wi, registry: R) -> Self {
-        Self {
-            wire,
-            conn_table: ConnTable::new(),
-            registry,
-        }
-    }
+    /// Runs the MGNP network state machine on this interface.
+    ///
+    /// This method will run in a loop indefinitely, processing any messages
+    /// sent or received on the interface described by the provided [`Wire`]
+    /// type.
+    ///
+    /// If a wire-level error occurs, this method returns an [`InterfaceError`].
+    /// Depending on the wire error, it may be possible to continue running the
+    /// interface state machine on this [`Wire`], and calling `Machine::run`
+    /// again will resume running the interface.
+    pub async fn run(&mut self) -> Result<(), InterfaceError<Wi::Error>> {
+        use futures::future;
 
-    pub async fn run(
-        &mut self,
-        conns: impl Stream<Item = OutboundConnect<'_>>,
-    ) -> Result<(), InterfaceError<Wi::Error>> {
-        futures::pin_mut!(conns);
+        let mut conns_remaining = true;
+        let Self {
+            conn_table,
+            registry,
+            wire,
+            conns_rx,
+        } = self;
         loop {
-            let mut in_frame = None;
+            let mut in_buf = None;
             let mut out_conn = None;
+            // if the outbound connection stream has terminated, don't let it
+            // wake us again.
+            let next_conn = if conns_remaining {
+                future::Either::Left(conns_rx.recv())
+            } else {
+                future::Either::Right(future::pending())
+            };
+
             futures::select_biased! {
                 // inbound frame from the wire.
-                frame = self.wire.recv().fuse() => in_frame = Some(frame.map_err(InterfaceError::recv)?),
+                buf = wire.recv().fuse() => { in_buf = Some(buf.map_err(InterfaceError::recv)?); },
 
                 // either a connection needs to send data, or a connection has
                 // closed locally.
-                frame = self.conn_table.next_outbound().fuse() => {
-                    self.wire.send(frame).await.map_err(InterfaceError::send)?;
+                frame = conn_table.next_outbound().fuse() => {
+                    wire.send(frame).await.map_err(InterfaceError::send)?;
+                    continue;
                 },
 
                 // locally-initiated connect request
-                conn = conns.next().fuse() => {
-                    let Some(conn) = conn else {
+                conn = next_conn.fuse() => {
+                    if let Some(conn) = conn {
+                        out_conn = Some(conn);
+                    } else {
                         tracing::info!("connection stream has terminated");
-                        // TODO(eliza): should the run loop die here instead?
-                        continue;
+                        conns_remaining = false;
                     };
 
-                    out_conn = Some(conn);
                 }
             };
 
-            if let Some(frame) = in_frame {
-                self.process_inbound(frame).await?;
-            }
+            if let Some(buf) = in_buf {
+                let frame = match InboundFrame::from_bytes(buf.as_ref()) {
+                    Ok(f) => f,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to decode inbound frame");
+                        continue;
+                    }
+                };
+                let id = frame.header.link_id();
+                if id == LinkId::INTERFACE {
+                    todo!("eliza: handle interface frame");
+                    // return Ok(());
+                }
 
-            if let Some(OutboundConnect {
-                identity,
-                hello,
-                channel,
-                ..
-            }) = out_conn
-            {
-                tracing::debug!(?identity, "initiating local connection...");
-                match self.conn_table.start_connecting(identity, hello, channel) {
+                // process the inbound message, possibly generating a new outbound frame
+                // to send.
+                if let Some(rsp) = conn_table.process_inbound(&*registry, frame).await {
+                    wire.send(rsp).await.map_err(|e| {
+                        InterfaceError::send(e)
+                            .with_context("while sending inbound frame response (ACK/NAK)")
+                    })?;
+                }
+            } else if let Some(conn) = out_conn {
+                tracing::debug!(identity = ?conn.identity, "initiating local connection...");
+                match conn_table.start_connecting(conn) {
                     Some(frame) => {
-                        self.wire
-                            .send(OutboundMessage::Control(frame))
-                            .await
-                            .map_err(|e| {
-                                InterfaceError::send(e)
-                                    .with_context("while sending local-initiated CONNECT")
-                            })?;
+                        wire.send(frame).await.map_err(|e| {
+                            InterfaceError::send(e)
+                                .with_context("while sending local-initiated CONNECT")
+                        })?;
                         tracing::debug!("local connect sent!")
                     }
                     None => {
@@ -154,49 +255,7 @@ where
                         // what hey want...
                     }
                 }
-            };
-        }
-    }
-
-    async fn process_inbound(&mut self, frame: Wi::Frame) -> Result<(), InterfaceError<Wi::Error>> {
-        let msg = match frame.decode() {
-            Ok(msg) => msg,
-            Err(error) => {
-                tracing::warn!(%error, "failed to decode inbound frame");
-                // return "Ok" here, even though there was an error, because we
-                // want the interface loop to keep running, instead of dying.
-                return Ok(());
             }
-        };
-
-        let id = msg.link_id();
-        if id == LinkId::INTERFACE {
-            todo!("eliza: handle interface frame");
-            // return Ok(());
-        }
-
-        // process the inbound message, possibly generating a new outbound frame
-        // to send.
-        if let Some(rsp) = self.conn_table.process_inbound(&self.registry, msg).await {
-            self.wire.send(rsp).await.map_err(|e| {
-                InterfaceError::send(e)
-                    .with_context("while sending inbound frame response (ACK/NAK)")
-            })?;
-        }
-
-        Ok(())
-    }
-}
-
-// === impl OutboundConnect ===
-
-impl<'data> OutboundConnect<'data> {
-    #[must_use]
-    pub fn new(identity: registry::Identity, hello: &'data [u8], channel: SerBiDi) -> Self {
-        Self {
-            identity,
-            hello,
-            channel,
         }
     }
 }

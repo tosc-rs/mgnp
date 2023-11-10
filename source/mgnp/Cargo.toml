@@ -6,9 +6,10 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-alloc = []
+alloc = ["postcard/alloc", "tricky-pipe/alloc"]
 
 [dependencies]
+cobs = "0.2"
 heapless = "0.7.16"
 tracing = { version = "0.1.21", default-features = false }
 postcard = { version = "1.0.7", default-features = false }
@@ -44,6 +45,7 @@ proptest = "1.3.1"
 proptest-derive = "0.4"
 tokio = { version = "1.31.0", features = ["macros", "rt", "sync", "io-util"] }
 tokio-stream = "0.1.14"
+tracing = { version = "0.1.21", features = ["attributes", "std"] }
 tracing-subscriber = { version = "0.3.17", default-features = false, features = ["fmt", "ansi", "env-filter"] }
 tricky-pipe = { path = "../tricky-pipe", features = ["alloc"] }
 
