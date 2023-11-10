@@ -22,13 +22,29 @@ use futures::FutureExt;
 use message::{InboundFrame, Nak, OutboundFrame};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
-/// Represents a wire-level transport for [MGNP frames](Frame).
+/// A wire-level transport for [MGNP frames](Frame).
+///
+/// A `Wire` represents a point-to-point link between a local MGNP [`Interface`]
+/// and a remote MGNP interface. A [link state machine](Machine) is constructed
+/// with an implementation of the `Wire` trait for the link on which that
+/// interface executes.
+///
+/// # Responsibilities of the Wire
+///
+/// A `Wire` provides two primary services to the MGNP layer: _framing_ and
+/// _reliable delivery_.
+///
+/// ## Framing
 ///
 /// Implementations of `Wire` are responsible for implementing some form of
 /// message framing. Each [`Wire::RecvFrame`] returned by [`Wire::recv`] must be
 /// a single MGNP frame. The framing strategy (e.g. COBS, leading length delimiter,
 /// or some lower-level transport's native framing) is left up to the
-/// implementation of `Wire`.
+/// implementation of `Wire`. Similarly, when [`Wire::send`] is called with an
+/// [`OutboundFrame`], the `Wire` is responsible for framing the binary
+/// representation of that message when written to the remote peer.
+///
+/// ## Reliable Delivery
 pub trait Wire {
     /// Wire-level errors.
     type Error: fmt::Display;
@@ -37,6 +53,8 @@ pub trait Wire {
     /// received on this `Wire`. This is returned by the [`Wire::recv`] method.
     type RecvFrame: AsRef<[u8]>;
 
+    /// Send the framed binary representation of the provided [`OutboundFrame`]
+    /// to the remote peer.
     async fn send(&mut self, f: OutboundFrame<'_>) -> Result<(), Self::Error>;
 
     /// Receive a single frame from the wire, returning it.
