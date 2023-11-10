@@ -1,10 +1,6 @@
 #![cfg(feature = "alloc")]
 mod support;
-use mgnp::{
-    message::Rejection,
-    registry::Identity,
-    tricky_pipe::{oneshot, serbox},
-};
+use mgnp::{message::Rejection, registry::Identity};
 use support::*;
 use svcs::{HelloWorldRequest, HelloWorldResponse};
 
