@@ -66,7 +66,7 @@ pub enum Header {
     ///
     /// The `REJECT` frame contains a [`Rejection`] value which indicates why the
     /// connection could not be successfully established. If the [`Rejection`] value
-    /// is [`NakConnect::Rejected`], the frame MAY contain a body containing a
+    /// is [`Rejection::Rejected`], the frame MAY contain a body containing a
     /// service-specific error value indicating why the connection was rejected
     /// by the service.
     Reject {
