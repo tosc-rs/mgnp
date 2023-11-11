@@ -209,12 +209,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 self.close(remote_id, Some(reason));
                 None
             }
-            Header::Nak { remote_id, reason } => {
-                tracing::warn!(id.local = %remote_id, ?reason, "process_inbound: NAK");
-                // TODO(eliza): if applicable, tell the local peer that sent the
-                // frame that it was bad...
-                None
-            }
             Header::Reset { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, %reason, "process_inbound: RESET");
                 let _closed = self.close(remote_id, None);
@@ -284,7 +278,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     id.actual_remote = %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Some(OutboundFrame::reset(remote_id, Reset::ConnAlreadyExists))
+                Some(OutboundFrame::reset(remote_id, Reset::YesSuchConn))
             }
             ref mut state @ State::Connecting(_) => {
                 let State::Connecting(rsp) = mem::replace(state, State::Open { remote_id }) else {

@@ -81,13 +81,6 @@ pub enum Header {
         reason: Rejection,
     },
 
-    /// A frame (other than `CONNECT`) was not acknowledged.
-    Nak {
-        /// The remote ID of the NAKed frame.
-        remote_id: Id,
-        reason: Nak,
-    },
-
     Reset {
         remote_id: Id,
         reason: Reset,
@@ -129,19 +122,35 @@ pub enum Rejection {
 /// Describes why a connection was reset.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Reset {
-    /// The connection was reset because the peer could not decode a received
-    /// frame.
-    BadFrame(DecodeError),
-    /// A `DATA` frame or `ACK` was recieved on a connection that did not exist.
+    /// The peer "just wanted to" reset the connection.
+    ///
+    /// This may because of an application-layer protocol error, or because the
+    /// connection simply was no longer needed.
+    BecauseISaidSo,
+    /// The connection was reset because this peer could not decode a [`DATA`]
+    /// frame received from the remote peer.
+    ///
+    /// Cyber police have been alerted.
+    ///
+    /// [`DATA`]: Header::Data
+    YouDoneGoofed(DecodeError),
+    /// A [`DATA`] frame or [`ACK`] was recieved on a connection that did not
+    /// exist.
+    ///
+    /// [`DATA`]: Header::Data
+    /// [`ACK`]: Header::Ack
     NoSuchConn,
-    /// A `CONNECT` or `ACK` frame was recieved on a connection that was already
+    /// A [`CONNECT`] or [`ACK`] frame was recieved on a connection that was already
     /// established.
-    ConnAlreadyExists,
+    ///
+    /// [`CONNECT`]: Header::Connect
+    /// [`ACK`]: Header::Ack
+    YesSuchConn,
     /// The connection was reset because the peer is shutting down its MGNP
     /// interface on this wire.
-    ShuttingDown,
-    /// The peer "just wanted to" reset the connection.
-    BecauseISaidSo,
+    ///
+    /// No further connections will be accepted, and you should go away forever.
+    GoAway,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -211,10 +220,7 @@ impl Header {
                 local: Some(local_id),
                 remote: Some(remote_id),
             },
-            Self::Nak { remote_id, .. } => LinkId {
-                local: None,
-                remote: Some(remote_id),
-            },
+
             Self::Reject { remote_id, .. } => LinkId {
                 local: None,
                 remote: Some(remote_id),
@@ -373,17 +379,17 @@ impl OutboundData<'_> {
 
 impl Reset {
     pub(crate) fn bad_frame(error: postcard::Error) -> Self {
-        Self::BadFrame(DecodeError::body(error))
+        Self::YouDoneGoofed(DecodeError::body(error))
     }
 }
 
 impl fmt::Display for Reset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BadFrame(err) => write!(f, "received a bad frame: {err}"),
+            Self::YouDoneGoofed(err) => write!(f, "you done goofed! received a bad frame: {err}"),
             Self::NoSuchConn => f.write_str("no such connection exists"),
-            Self::ConnAlreadyExists => f.write_str("connection already exists"),
-            Self::ShuttingDown => f.write_str("the peer is shutting down this interface"),
+            Self::YesSuchConn => f.write_str("connection already exists"),
+            Self::GoAway => f.write_str("the peer is shutting down this interface, go away!"),
             Self::BecauseISaidSo => f.write_str("because i said so"),
         }
     }
