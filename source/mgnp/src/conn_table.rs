@@ -130,7 +130,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         // weird...
         if let Some(local_id) = self.dead_index.take() {
             tracing::debug!(id.local = %local_id, "removing closed stream from dead index");
-            self.close(local_id, None);
+            self.remove(local_id);
         }
     }
 
@@ -193,7 +193,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     reason = %reset,
                     "process_inbound(DATA): connection reset",
                 );
-                self.close(id, None);
+                self.remove(id);
                 Some(OutboundFrame::reset(local_id, reset))
             }
             Header::Ack {
@@ -205,12 +205,12 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             }
             Header::Reject { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, ?reason, "process_inbound: REJECT");
-                self.close(remote_id, Some(reason));
+                self.reject(remote_id, reason);
                 None
             }
             Header::Reset { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, %reason, "process_inbound: RESET");
-                let _closed = self.close(remote_id, None);
+                let _closed = self.reset(remote_id, reason).await;
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound(RESET): connection closed");
                 None
             }
@@ -323,40 +323,112 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
+    fn reject(&mut self, local_id: Id, rejection: Rejection) -> bool {
+        match self.remove(local_id) {
+            Some(Socket {
+                state: State::Open { .. },
+                ..
+            }) => {
+                tracing::warn!(
+                    iid.local = %local_id,
+                    ?rejection,
+                    "reject: tried to REJECT an established connection. the remote *should* have sent a RESET instead",
+                );
+                false
+            }
+            Some(Socket {
+                state: State::Connecting(rsp),
+                ..
+            }) => rsp.send(Err(rejection)).is_ok(),
+            None => {
+                tracing::warn!(
+                    id.local = %local_id,
+                    ?rejection,
+                    "reject: tried to REJECT a non-existent connection",
+                );
+                false
+            }
+        }
+    }
+
+    async fn reset(&mut self, local_id: Id, reset: Reset) -> bool {
+        match self.remove(local_id) {
+            Some(Socket {
+                state: State::Open { .. },
+                channel,
+            }) => {
+                let mut bytes = [0; 32];
+                match postcard::to_slice(&reset, &mut bytes) {
+                    Err(error) => {
+                        debug_assert!(false, "failed to serialize RESET, what the fuck! this should not happen! {error:?}");
+                        tracing::error!(
+                            ?error,
+                            "failed to serialize RESET, what the fuck! this should not happen!"
+                        );
+                        false
+                    }
+                    Ok(bytes) => channel.tx().send(bytes).await.is_ok(),
+                }
+            }
+            Some(Socket {
+                state: State::Connecting(_rsp),
+                ..
+            }) => {
+                tracing::warn!(
+                    id.local = %local_id,
+                    ?reset,
+                    "reset: tried to RESET an establishing connection. the remote *should* have sent a REJECT instead",
+                );
+                // TODO(eliza): send some kinda rejection?
+                false
+            }
+            None => {
+                tracing::warn!(
+                    id.local = %local_id,
+                    ?reset,
+                    "reset: tried to RESET a non-existent connection",
+                );
+                false
+            }
+        }
+    }
+
     /// Returns `true` if a connection with the provided ID was closed, `false` if
     /// no conn existed for that ID.
-    fn close(&mut self, local_id: Id, nak: Option<Rejection>) -> bool {
+    fn remove(&mut self, local_id: Id) -> Option<Socket> {
         match self.conns.get_mut(local_id) {
             None => {
                 tracing::trace!(?local_id, "close: ID greater than max conns ({CAPACITY})");
-                false
+                None
             }
             Some(entry @ Entry::Occupied(_)) => {
-                tracing::trace!(?local_id, self.len, ?nak, "close: closing connection");
-                let entry = mem::replace(entry, Entry::Closed(self.next_id));
-                if let Some(nak) = nak {
-                    match entry {
-                        Entry::Occupied(Socket {
-                            state: State::Connecting(rsp),
-                            ..
-                        }) => {
-                            let nacked = rsp.send(Err(nak)).is_ok();
-                            tracing::trace!(?local_id, ?nak, nacked, "close: sent nak");
-                        }
-                        Entry::Occupied(..) => {
-                            tracing::warn!(?local_id, ?nak, "close: tried to NAK an established connection. the remote *should* have sent a RESET instead");
-                        }
-                        _ => unreachable!("we just matched an occupied entry!"),
-                    }
-                }
+                tracing::trace!(?local_id, self.len, "close: closing connection");
+                let Entry::Occupied(sock) = mem::replace(entry, Entry::Closed(self.next_id)) else {
+                    unreachable!("what the fuck, we just matched this as an occupied entry!");
+                };
+                // if let Some(nak) = nak {
+                //     match entry {
+                //         Entry::Occupied(Socket {
+                //             state: State::Connecting(rsp),
+                //             ..
+                //         }) => {
+                //             let nacked = rsp.send(Err(nak)).is_ok();
+                //             tracing::trace!(?local_id, ?nak, nacked, "close: sent nak");
+                //         }
+                //         Entry::Occupied(..) => {
+                //
+                //         }
+                //         _ => unreachable!("we just matched an occupied entry!"),
+                //     }
+                // }
 
                 self.next_id = local_id;
                 self.len -= 1;
-                true
+                Some(sock)
             }
             Some(_) => {
                 tracing::trace!(?local_id, "close: no connection for ID");
-                false
+                None
             }
         }
     }
