@@ -153,16 +153,6 @@ pub enum Reset {
     GoAway,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum Nak {
-    /// A frame was rejected because it could not be decoded successfully.
-    DecodeError(DecodeError),
-    /// The local ID sent by the remote does not exist.
-    UnknownLocalId(Id),
-    /// The remote ID sent by the remote does not correspond to an existing stream.
-    UnknownRemoteId(Id),
-}
-
 pub type InboundFrame<'data> = Frame<&'data [u8]>;
 pub type OutboundFrame<'data> = Frame<OutboundData<'data>>;
 

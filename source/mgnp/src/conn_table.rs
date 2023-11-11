@@ -173,7 +173,9 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                             // TODO(eliza): possibly it would be better if we
                             // just sent the deserialize error to the local peer
                             // and let it decide whether this should kill the
-                            // connection or not? but that's annoying...
+                            // connection or not? maybe by turning the server's
+                            // client-to-server stream into `Result<ClientMsg,
+                            // DecodeError>`s?
                             tracing::debug!(
                                 id.remote = %local_id,
                                 id.local = %id,
