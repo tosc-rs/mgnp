@@ -25,9 +25,9 @@ async fn basically_works() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     fixture.finish_test().await;
@@ -62,9 +62,9 @@ async fn hellos_work() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     fixture.finish_test().await;
@@ -112,9 +112,9 @@ async fn nak_bad_hello() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     fixture.finish_test().await;
@@ -152,15 +152,15 @@ async fn mux_single_service() {
 
     assert_eq!(
         rsp1,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
     assert_eq!(
         rsp2,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     fixture.finish_test().await;
@@ -228,9 +228,9 @@ async fn service_type_routing() {
     let rsp = helloworld_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     // add the other service
@@ -264,17 +264,17 @@ async fn service_type_routing() {
     let rsp = helloworld_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 
     let rsp = hellohello_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "world".to_string()
-        }))
+        })
     );
 }
 
@@ -318,9 +318,9 @@ async fn service_identity_routing() {
     let rsp = sf_conn.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "san francisco".to_string()
-        }))
+        })
     );
 
     // add the 'hello-universe' service
@@ -346,14 +346,14 @@ async fn service_identity_routing() {
     let (sf_rsp, uni_rsp) = tokio::join! { sf_conn.rx().recv(), uni_conn.rx().recv() };
     assert_eq!(
         sf_rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "san francisco".to_string()
-        }))
+        })
     );
     assert_eq!(
         uni_rsp,
-        Some(Ok(HelloWorldResponse {
+        Some(HelloWorldResponse {
             world: "universe".to_string()
-        }))
+        })
     );
 }

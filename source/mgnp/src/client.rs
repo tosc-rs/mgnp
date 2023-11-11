@@ -1,7 +1,4 @@
-use crate::{
-    message::{Rejection, Reset},
-    registry,
-};
+use crate::{message::Rejection, registry};
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
 pub struct Connector<S: registry::Service> {
@@ -28,17 +25,16 @@ pub enum ConnectError {
     Nak(Rejection),
 }
 
-pub type ClientChannel<S> = bidi::BiDi<ServerResult<S>, <S as registry::Service>::ClientMsg>;
-
-type ServerResult<S> = Result<<S as registry::Service>::ServerMsg, Reset>;
+pub type ClientChannel<S> =
+    bidi::BiDi<<S as registry::Service>::ServerMsg, <S as registry::Service>::ClientMsg>;
 
 pub struct Channels<S: registry::Service> {
     srv_chan: bidi::SerBiDi,
-    client_chan: bidi::BiDi<ServerResult<S>, S::ClientMsg>,
+    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
 }
 
 pub struct StaticChannels<S: registry::Service, const CAPACITY: usize> {
-    s2c: mpsc::StaticTrickyPipe<ServerResult<S>, CAPACITY>,
+    s2c: mpsc::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
     c2s: mpsc::StaticTrickyPipe<S::ClientMsg, CAPACITY>,
 }
 
