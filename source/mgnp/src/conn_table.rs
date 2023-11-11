@@ -152,15 +152,15 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     id.remote = %local_id,
                     id.local = %remote_id,
                     len = frame.body.len(),
-                    "process_inbound: data",
+                    "process_inbound: DATA",
                 );
                 // the remote peer's remote ID is our local ID.
                 let id = remote_id;
                 let Some(socket) = self.conns.get_mut(id) else {
                     tracing::debug!(
                         id.remote = %local_id,
-                        id.local = %remote_id,
-                        "process_inbound: recieved a DATA frame on a connection that does not exist, resetting...",
+                        id.local = %id,
+                        "process_inbound(DATA): connection does not exist, resetting...",
                     );
                     return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
                 };
@@ -170,30 +170,27 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     Ok(permit) => match permit.send(frame.body) {
                         Ok(_) => return None,
                         Err(error) => {
+                            // TODO(eliza): possibly it would be better if we
+                            // just sent the deserialize error to the local peer
+                            // and let it decide whether this should kill the
+                            // connection or not? but that's annoying...
                             tracing::debug!(
-                                    id.remote = %local_id,
-                                    id.local = %remote_id,
-                                    %error,
-                                "process_inbound: failed to deserialize DATA frame; resetting...",
+                                id.remote = %local_id,
+                                id.local = %id,
+                                %error,
+                                "process_inbound(DATA): failed to deserialize; resetting...",
                             );
                             Reset::bad_frame(error)
                         }
                     },
-                    Err(InboundError::ChannelClosed) => {
-                        // the channel has closed locally
-                        tracing::trace!("process_inbound: recieved a DATA frame on a connection closed locally; resetting...");
-                        Reset::BecauseISaidSo
-                    }
-                    Err(InboundError::NoSocket) => {
-                        tracing::debug!(
-                            id.remote = %local_id,
-                            id.local = %remote_id,
-                            "process_inbound: recieved a DATA frame on a connection that does not exist, resetting...",
-                        );
-                        Reset::NoSuchConn
-                    }
+                    Err(reset) => reset,
                 };
-
+                tracing::trace!(
+                    id.remote = %local_id,
+                    id.local = %id,
+                    reason = %reset,
+                    "process_inbound(DATA): connection reset",
+                );
                 self.close(id, None);
                 Some(OutboundFrame::reset(local_id, reset))
             }
@@ -212,7 +209,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             Header::Reset { remote_id, reason } => {
                 tracing::trace!(id.local = %remote_id, %reason, "process_inbound: RESET");
                 let _closed = self.close(remote_id, None);
-                tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
+                tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound(RESET): connection closed");
                 None
             }
             Header::Connect { local_id, identity } => {
@@ -514,13 +511,13 @@ impl<const CAPACITY: usize> Entries<CAPACITY> {
 // === impl Entry ===
 
 impl Entry {
-    async fn reserve_send(&self) -> Result<SerPermit<'_>, InboundError> {
+    async fn reserve_send(&self) -> Result<SerPermit<'_>, Reset> {
         self.channel()
-            .ok_or(InboundError::NoSocket)?
+            .ok_or(Reset::NoSuchConn)?
             .tx()
             .reserve()
             .await
-            .map_err(|_| InboundError::ChannelClosed)
+            .map_err(|_| Reset::BecauseISaidSo)
     }
 
     fn socket(&self) -> Option<&Socket> {
