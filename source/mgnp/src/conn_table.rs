@@ -1,6 +1,6 @@
 use crate::{
     client::OutboundConnect,
-    message::{Header, InboundFrame, OutboundFrame, Rejection},
+    message::{Header, InboundFrame, OutboundFrame, Rejection, Reset},
     registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
@@ -106,7 +106,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     // closed.
                     Poll::Ready(None) => {
                         self.dead_index = Some(Id::from_index(idx));
-                        return Poll::Ready(OutboundFrame::reset(*remote_id));
+                        return Poll::Ready(OutboundFrame::reset(
+                            *remote_id,
+                            Reset::BecauseISaidSo,
+                        ));
                     }
 
                     // nothing to do, move on to the next socket.
@@ -154,28 +157,45 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // the remote peer's remote ID is our local ID.
                 let id = remote_id;
                 let Some(socket) = self.conns.get_mut(id) else {
-                    tracing::debug!("process_inbound: no socket for data frame, resetting...");
-                    return Some(OutboundFrame::reset(local_id));
+                    tracing::debug!(
+                        id.remote = %local_id,
+                        id.local = %remote_id,
+                        "process_inbound: recieved a DATA frame on a connection that does not exist, resetting...",
+                    );
+                    return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
                 };
+
                 // try to reserve send capacity on this socket.
-                let error = match socket.reserve_send().await {
+                let reset = match socket.reserve_send().await {
                     Ok(permit) => match permit.send(frame.body) {
                         Ok(_) => return None,
                         Err(error) => {
-                            tracing::debug!(%error, "process_inbound: failed to deserialize data");
-                            // TODO(eliza): we should probably tell the peer
-                            // that they sent us something bad...
-                            return None;
+                            tracing::debug!(
+                                    id.remote = %local_id,
+                                    id.local = %remote_id,
+                                    %error,
+                                "process_inbound: failed to deserialize DATA frame; resetting...",
+                            );
+                            Reset::bad_frame(error)
                         }
                     },
-                    Err(error) => error,
+                    Err(InboundError::ChannelClosed) => {
+                        // the channel has closed locally
+                        tracing::trace!("process_inbound: recieved a DATA frame on a connection closed locally; resetting...");
+                        Reset::BecauseISaidSo
+                    }
+                    Err(InboundError::NoSocket) => {
+                        tracing::debug!(
+                            id.remote = %local_id,
+                            id.local = %remote_id,
+                            "process_inbound: recieved a DATA frame on a connection that does not exist, resetting...",
+                        );
+                        Reset::NoSuchConn
+                    }
                 };
 
-                // otherwise, we couldn't reserve a send permit because the
-                // channel has closed locally.
-                tracing::trace!("process_inbound: local error: {error}; resetting...");
                 self.close(id, None);
-                Some(OutboundFrame::reset(local_id))
+                Some(OutboundFrame::reset(local_id, reset))
             }
             Header::Ack {
                 local_id,
@@ -195,8 +215,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // frame that it was bad...
                 None
             }
-            Header::Reset { remote_id } => {
-                tracing::trace!(id.local = %remote_id, "process_inbound: RESET");
+            Header::Reset { remote_id, reason } => {
+                tracing::trace!(id.local = %remote_id, %reason, "process_inbound: RESET");
                 let _closed = self.close(remote_id, None);
                 tracing::trace!(id.local = %remote_id, closed = _closed, "process_inbound: RESET ->");
                 None
@@ -250,7 +270,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     fn process_ack(&mut self, local_id: Id, remote_id: Id) -> Option<OutboundFrame<'static>> {
         let Some(Entry::Occupied(ref mut sock)) = self.conns.get_mut(local_id) else {
             tracing::debug!(id.local = %local_id, id.remote = %remote_id, "process_ack: no such socket");
-            return Some(OutboundFrame::reset(remote_id));
+            return Some(OutboundFrame::reset(remote_id, Reset::NoSuchConn));
         };
 
         match sock.state {
@@ -264,7 +284,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     id.actual_remote = %real_remote_id,
                     "process_ack: socket is not connecting"
                 );
-                Some(OutboundFrame::reset(remote_id))
+                Some(OutboundFrame::reset(remote_id, Reset::ConnAlreadyExists))
             }
             ref mut state @ State::Connecting(_) => {
                 let State::Connecting(rsp) = mem::replace(state, State::Open { remote_id }) else {
@@ -277,14 +297,18 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 if rsp.send(Ok(())).is_err() {
                     // local initiator is no longer there, reset!
                     tracing::debug!(
-                        ?local_id,
-                        ?remote_id,
+                        id.remote = %local_id,
+                        id.local = %remote_id,
                         "process_ack: local initiator is no longer there; resetting"
                     );
-                    return Some(OutboundFrame::reset(remote_id));
+                    return Some(OutboundFrame::reset(remote_id, Reset::BecauseISaidSo));
                 }
 
-                tracing::trace!(?local_id, ?remote_id, "process_ack: connection established");
+                tracing::trace!(
+                    id.remote = %local_id,
+                    id.local = %remote_id,
+                    "process_ack: connection established",
+                );
                 None
             }
         }

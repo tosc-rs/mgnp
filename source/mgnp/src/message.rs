@@ -90,6 +90,7 @@ pub enum Header {
 
     Reset {
         remote_id: Id,
+        reason: Reset,
     },
 }
 
@@ -123,6 +124,24 @@ pub enum Rejection {
     ServiceRejected,
     /// The connection was rejected because data could not be decoded.
     DecodeError(DecodeError),
+}
+
+/// Describes why a connection was reset.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Reset {
+    /// The connection was reset because the peer could not decode a received
+    /// frame.
+    BadFrame(DecodeError),
+    /// A `DATA` frame or `ACK` was recieved on a connection that did not exist.
+    NoSuchConn,
+    /// A `CONNECT` or `ACK` frame was recieved on a connection that was already
+    /// established.
+    ConnAlreadyExists,
+    /// The connection was reset because the peer is shutting down its MGNP
+    /// interface on this wire.
+    ShuttingDown,
+    /// The peer "just wanted to" reset the connection.
+    BecauseISaidSo,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -204,7 +223,7 @@ impl Header {
                 local: Some(local_id),
                 remote: None,
             },
-            Self::Reset { remote_id } => LinkId {
+            Self::Reset { remote_id, .. } => LinkId {
                 remote: Some(remote_id),
                 local: None,
             },
@@ -296,9 +315,9 @@ impl<'data> Frame<OutboundData<'data>> {
         }
     }
 
-    pub fn reset(remote_id: Id) -> Self {
+    pub fn reset(remote_id: Id, reason: Reset) -> Self {
         Self {
-            header: Header::Reset { remote_id },
+            header: Header::Reset { remote_id, reason },
             body: OutboundData::Empty,
         }
     }
@@ -346,6 +365,26 @@ impl OutboundData<'_> {
             Self::Data(data) => data.to_vec(),
             Self::Rejected(consumer) => consumer.to_vec(),
             Self::Hello(consumer) => consumer.to_vec(),
+        }
+    }
+}
+
+// === impl Reset ===
+
+impl Reset {
+    pub(crate) fn bad_frame(error: postcard::Error) -> Self {
+        Self::BadFrame(DecodeError::body(error))
+    }
+}
+
+impl fmt::Display for Reset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadFrame(err) => write!(f, "received a bad frame: {err}"),
+            Self::NoSuchConn => f.write_str("no such connection exists"),
+            Self::ConnAlreadyExists => f.write_str("connection already exists"),
+            Self::ShuttingDown => f.write_str("the peer is shutting down this interface"),
+            Self::BecauseISaidSo => f.write_str("because i said so"),
         }
     }
 }
