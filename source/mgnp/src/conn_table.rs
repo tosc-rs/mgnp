@@ -46,6 +46,7 @@ enum InboundError {
 struct Socket {
     state: State,
     channel: SerBiDi,
+    reset: oneshot::Sender<Reset>,
 }
 
 enum Entry {
@@ -87,6 +88,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 let Some(Socket {
                     state: State::Open { remote_id },
                     channel,
+                    ..
                 }) = entry.socket()
                 else {
                     continue;
@@ -236,6 +238,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             identity,
             channel,
             rsp,
+            reset,
         } = connect;
 
         let local_id = match self.reserve_id() {
@@ -253,6 +256,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             Socket {
                 state: State::Connecting(rsp),
                 channel,
+                reset,
             },
         );
 
@@ -313,6 +317,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         let sock = Socket {
             state: State::Open { remote_id },
             channel,
+            ..
         };
 
         match self.insert(sock) {
@@ -351,46 +356,28 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         }
     }
 
-    async fn reset(&mut self, local_id: Id, reset: Reset) -> bool {
-        match self.remove(local_id) {
-            Some(Socket {
-                state: State::Open { .. },
-                channel,
-            }) => {
-                let mut bytes = [0; 32];
-                match postcard::to_slice(&reset, &mut bytes) {
-                    Err(error) => {
-                        debug_assert!(false, "failed to serialize RESET, what the fuck! this should not happen! {error:?}");
-                        tracing::error!(
-                            ?error,
-                            "failed to serialize RESET, what the fuck! this should not happen!"
-                        );
-                        false
-                    }
-                    Ok(bytes) => channel.tx().send(bytes).await.is_ok(),
-                }
-            }
-            Some(Socket {
-                state: State::Connecting(_rsp),
-                ..
-            }) => {
-                tracing::warn!(
-                    id.local = %local_id,
-                    ?reset,
-                    "reset: tried to RESET an establishing connection. the remote *should* have sent a REJECT instead",
-                );
-                // TODO(eliza): send some kinda rejection?
-                false
-            }
-            None => {
-                tracing::warn!(
-                    id.local = %local_id,
-                    ?reset,
-                    "reset: tried to RESET a non-existent connection",
-                );
-                false
-            }
+    async fn reset(&mut self, local_id: Id, reason: Reset) -> bool {
+        tracing::trace!(id.local = %local_id, %reason, "reset: resetting connection...");
+        let Some(Socket { state, reset, .. }) = self.remove(local_id) else {
+            tracing::warn!(
+                id.local = %local_id,
+                %reason,
+                "reset: tried to RESET a non-existent connection",
+            );
+            return false;
+        };
+
+        if matches!(state, State::Connecting(..)) {
+            tracing::warn!(
+                id.local = %local_id,
+                %reason,
+                "reset: tried to RESET an establishing connection. the remote *should* have sent a REJECT instead",
+            );
+            // TODO(eliza): send some kinda rejection?
+            return false;
         }
+
+        reset.send(reason).is_ok()
     }
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if

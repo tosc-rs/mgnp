@@ -11,10 +11,10 @@ use super::channel_core::{Core, CoreVtable};
 // TODO(eliza): we should probably replace the use of `Arc` here with manual ref
 // counting, since the `Core` tracks the number of senders and receivers
 // already. But, I was in a hurry to get a prototype working...
-pub struct TrickyPipe<T: 'static>(Arc<Inner<T>>);
+pub struct TrickyPipe<T: 'static, E: 'static = ()>(Arc<Inner<T, E>>);
 
-struct Inner<T: 'static> {
-    core: Core,
+struct Inner<T: 'static, E: 'static> {
+    core: Core<T>,
     // TODO(eliza): instead of boxing the elements array, we should probably
     // manually allocate a `Layout`. This works for now, though.
     //
@@ -41,7 +41,7 @@ impl<T: 'static> TrickyPipe<T> {
         }))
     }
 
-    const CORE_VTABLE: &'static CoreVtable = &CoreVtable {
+    const CORE_VTABLE: &'static CoreVtable<E> = &CoreVtable {
         get_core: Self::get_core,
         get_elems: Self::get_elems,
         clone: Self::erased_clone,

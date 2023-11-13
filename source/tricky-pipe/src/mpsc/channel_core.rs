@@ -18,7 +18,7 @@ use serde::{de::DeserializeOwned, Serialize};
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-pub(super) struct Core {
+pub(super) struct Core<E> {
     // === receiver-only state ====
     /// The head of the queue (i.e. the position at which elements are popped by
     /// the receiver).
@@ -76,17 +76,19 @@ pub(super) struct Core {
     /// This is the length of the actual queue elements array (which is not part
     /// of this struct).
     pub(super) capacity: u8,
+    /// If the channel closed with an error, this is the error.
+    error: UnsafeCell<MaybeUninit<E>>,
 }
 
-pub(super) struct Reservation<'core> {
-    core: &'core Core,
+pub(super) struct Reservation<'core, E> {
+    core: &'core Core<E>,
     pub(super) idx: u8,
 }
 
 /// Erases both a pipe and its element type.
-pub(super) struct ErasedPipe {
+pub(super) struct ErasedPipe<E> {
     ptr: *const (),
-    vtable: &'static CoreVtable,
+    vtable: &'static CoreVtable<E>,
 }
 
 pub(super) struct TypedPipe<T: 'static> {
@@ -103,8 +105,8 @@ pub(super) struct ErasedSlice {
     typ: core::any::TypeId,
 }
 
-pub(super) struct CoreVtable {
-    pub(super) get_core: unsafe fn(*const ()) -> *const Core,
+pub(super) struct CoreVtable<E> {
+    pub(super) get_core: unsafe fn(*const ()) -> *const Core<E>,
     pub(super) get_elems: unsafe fn(*const ()) -> ErasedSlice,
     pub(super) clone: unsafe fn(*const ()),
     pub(super) drop: unsafe fn(*const ()),

@@ -1,4 +1,7 @@
-use crate::{message::Rejection, registry};
+use crate::{
+    message::{Rejection, Reset},
+    registry, Service,
+};
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
 pub struct Connector<S: registry::Service> {
@@ -17,6 +20,7 @@ pub struct OutboundConnect {
     pub(crate) channel: bidi::SerBiDi,
     /// Sender for the response from the remote service.
     pub(crate) rsp: oneshot::Sender<Result<(), Rejection>>,
+    pub(crate) reset: oneshot::Sender<Reset>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -25,20 +29,23 @@ pub enum ConnectError {
     Nak(Rejection),
 }
 
-pub type ClientChannel<S> =
-    bidi::BiDi<<S as registry::Service>::ServerMsg, <S as registry::Service>::ClientMsg>;
+pub struct Connection<S: Service> {
+    chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
+    reset: oneshot::Receiver<Reset>,
+}
 
 pub struct Channels<S: registry::Service> {
     srv_chan: bidi::SerBiDi,
     client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
+    reset: oneshot::Receiver<Reset>,
 }
 
-pub struct StaticChannels<S: registry::Service, const CAPACITY: usize> {
+pub struct StaticChannels<S: Service, const CAPACITY: usize> {
     s2c: mpsc::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
     c2s: mpsc::StaticTrickyPipe<S::ClientMsg, CAPACITY>,
 }
 
-impl<S: registry::Service> Channels<S> {
+impl<S: Service> Channels<S> {
     pub fn from_static<const CAPACITY: usize>(
         storage: &'static StaticChannels<S, CAPACITY>,
     ) -> Self {
@@ -54,11 +61,12 @@ impl<S: registry::Service> Channels<S> {
         Self {
             srv_chan,
             client_chan,
+            reset: oneshot::Receiver::new(),
         }
     }
 }
 
-impl<S: registry::Service> Connector<S> {
+impl<S: Service> Connector<S> {
     pub async fn connect(
         &mut self,
         identity: impl Into<registry::IdentityKind>,
@@ -66,8 +74,9 @@ impl<S: registry::Service> Connector<S> {
         Channels {
             srv_chan,
             client_chan,
+            reset,
         }: Channels<S>,
-    ) -> Result<ClientChannel<S>, ConnectError> {
+    ) -> Result<Connection<S>, ConnectError> {
         let permit = self
             .tx
             .reserve()
@@ -80,6 +89,7 @@ impl<S: registry::Service> Connector<S> {
             hello,
             channel: srv_chan,
             rsp,
+            reset,
         };
         permit.send(connect);
         match self.rsp.recv().await {
