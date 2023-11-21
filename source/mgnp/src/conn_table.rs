@@ -4,7 +4,14 @@ use crate::{
     registry,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
-use tricky_pipe::{bidi::SerBiDi, mpsc::SerPermit, oneshot};
+use tricky_pipe::{
+    bidi::SerBiDi,
+    mpsc::{
+        error::{RecvError, SendError},
+        SerPermit,
+    },
+    oneshot,
+};
 
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -33,20 +40,9 @@ enum State {
 }
 
 #[derive(Debug)]
-#[non_exhaustive]
-enum InboundError {
-    /// The connection tracking table doesn't have a connection for the provided ID.
-    NoSocket,
-
-    /// The local channel for this socket has closed.
-    ChannelClosed,
-}
-
-#[derive(Debug)]
 struct Socket {
     state: State,
-    channel: SerBiDi,
-    reset: oneshot::Sender<Reset>,
+    channel: SerBiDi<Reset>,
 }
 
 enum Entry {
@@ -98,7 +94,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 // data or has closed.
                 match channel.rx().poll_recv(cx) {
                     // a local data frame is ready to send!
-                    Poll::Ready(Some(data)) => {
+                    Poll::Ready(Ok(data)) => {
                         let local_id = Id::from_index(idx);
                         return Poll::Ready(OutboundFrame::data(*remote_id, local_id, data));
                     }
@@ -106,12 +102,13 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     // the local stream has closed, so mark the socket as dead
                     // and generate a reset frame to tell the remote that it's
                     // closed.
-                    Poll::Ready(None) => {
+                    Poll::Ready(Err(error)) => {
                         self.dead_index = Some(Id::from_index(idx));
-                        return Poll::Ready(OutboundFrame::reset(
-                            *remote_id,
-                            Reset::BecauseISaidSo,
-                        ));
+                        let reason = match error {
+                            RecvError::Closed => Reset::BecauseISaidSo,
+                            RecvError::Error(reason) => reason,
+                        };
+                        return Poll::Ready(OutboundFrame::reset(*remote_id, reason));
                     }
 
                     // nothing to do, move on to the next socket.
@@ -158,17 +155,43 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 );
                 // the remote peer's remote ID is our local ID.
                 let id = remote_id;
-                let Some(socket) = self.conns.get_mut(id) else {
-                    tracing::debug!(
-                        id.remote = %local_id,
-                        id.local = %id,
-                        "process_inbound(DATA): connection does not exist, resetting...",
-                    );
-                    return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
+                let socket = match self.conns.get_mut(id).and_then(|entry| entry.socket()) {
+                    None => {
+                        tracing::debug!(
+                            id.remote = %local_id,
+                            id.local = %id,
+                            "process_inbound(DATA): connection does not exist, resetting...",
+                        );
+                        return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
+                    }
+                    Some(Socket {
+                        state: State::Open { remote_id },
+                        ..
+                    }) if &local_id != remote_id => {
+                        tracing::warn!(
+                            id.remote = %local_id,
+                            id.remote.actual = %remote_id,
+                            id.local = %id,
+                            "process_inbound(DATA): wrong remote ID, resetting...",
+                        );
+                        return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
+                    }
+                    Some(Socket {
+                        state: State::Connecting(..),
+                        ..
+                    }) => {
+                        tracing::warn!(
+                            id.remote = %local_id,
+                            id.local = %id,
+                            "process_inbound(DATA): recieved DATA on a socket that was not ACKed",
+                        );
+                        return Some(OutboundFrame::reset(local_id, Reset::NoSuchConn));
+                    }
+                    Some(socket) => socket,
                 };
 
                 // try to reserve send capacity on this socket.
-                let reset = match socket.reserve_send().await {
+                let reset = match socket.channel.tx().reserve().await {
                     Ok(permit) => match permit.send(frame.body) {
                         Ok(_) => return None,
                         Err(error) => {
@@ -187,7 +210,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                             Reset::bad_frame(error)
                         }
                     },
-                    Err(reset) => reset,
+                    Err(SendError::Closed(_)) => Reset::BecauseISaidSo,
+                    Err(SendError::Error { error, .. }) => error,
                 };
                 tracing::trace!(
                     id.remote = %local_id,
@@ -238,7 +262,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             identity,
             channel,
             rsp,
-            reset,
         } = connect;
 
         let local_id = match self.reserve_id() {
@@ -256,7 +279,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             Socket {
                 state: State::Connecting(rsp),
                 channel,
-                reset,
             },
         );
 
@@ -313,11 +335,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     /// Accept a remote initiated connection with the provided `remote_id`.
     #[must_use]
-    fn accept(&mut self, remote_id: Id, channel: SerBiDi) -> OutboundFrame<'_> {
+    fn accept(&mut self, remote_id: Id, channel: SerBiDi<Reset>) -> OutboundFrame<'_> {
         let sock = Socket {
             state: State::Open { remote_id },
             channel,
-            ..
         };
 
         match self.insert(sock) {
@@ -358,7 +379,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 
     async fn reset(&mut self, local_id: Id, reason: Reset) -> bool {
         tracing::trace!(id.local = %local_id, %reason, "reset: resetting connection...");
-        let Some(Socket { state, reset, .. }) = self.remove(local_id) else {
+        let Some(Socket { state, channel }) = self.remove(local_id) else {
             tracing::warn!(
                 id.local = %local_id,
                 %reason,
@@ -377,7 +398,8 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             return false;
         }
 
-        reset.send(reason).is_ok()
+        let (_, mut rx) = channel.split();
+        rx.close_with_error(reason)
     }
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if
@@ -457,10 +479,10 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
 // === impl Id ===
 
 impl Id {
-    // #[cfg(test)]
-    // pub(crate) fn new(n: u16) -> Self {
-    //     Self(NonZeroU16::new(n).expect("IDs must be non-zero"))
-    // }
+    #[cfg(test)]
+    pub(crate) fn new(n: u16) -> Self {
+        Self(NonZeroU16::new(n).expect("IDs must be non-zero"))
+    }
 
     #[cfg(not(debug_assertions))]
     #[must_use]
@@ -572,32 +594,10 @@ impl<const CAPACITY: usize> Entries<CAPACITY> {
 // === impl Entry ===
 
 impl Entry {
-    async fn reserve_send(&self) -> Result<SerPermit<'_>, Reset> {
-        self.channel()
-            .ok_or(Reset::NoSuchConn)?
-            .tx()
-            .reserve()
-            .await
-            .map_err(|_| Reset::BecauseISaidSo)
-    }
-
     fn socket(&self) -> Option<&Socket> {
         match self {
             Entry::Occupied(ref sock) => Some(sock),
             _ => None,
-        }
-    }
-
-    fn channel(&self) -> Option<&SerBiDi> {
-        self.socket().map(|sock| &sock.channel)
-    }
-}
-
-impl fmt::Display for InboundError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoSocket => f.write_str("no socket exists for this ID"),
-            Self::ChannelClosed => f.write_str("local channel has closed"),
         }
     }
 }

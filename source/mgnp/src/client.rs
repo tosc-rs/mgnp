@@ -17,10 +17,9 @@ pub struct OutboundConnect {
     /// The "hello" message to send to the remote service.
     pub(crate) hello: serbox::Consumer,
     /// The local bidirectional channel to bind to the remote service.
-    pub(crate) channel: bidi::SerBiDi,
+    pub(crate) channel: bidi::SerBiDi<Reset>,
     /// Sender for the response from the remote service.
     pub(crate) rsp: oneshot::Sender<Result<(), Rejection>>,
-    pub(crate) reset: oneshot::Sender<Reset>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -29,15 +28,11 @@ pub enum ConnectError {
     Nak(Rejection),
 }
 
-pub struct Connection<S: Service> {
-    chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
-    reset: oneshot::Receiver<Reset>,
-}
+pub type Connection<S> = bidi::BiDi<<S as Service>::ServerMsg, <S as Service>::ClientMsg, Reset>;
 
 pub struct Channels<S: registry::Service> {
-    srv_chan: bidi::SerBiDi,
-    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
-    reset: oneshot::Receiver<Reset>,
+    srv_chan: bidi::SerBiDi<Reset>,
+    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg, Reset>,
 }
 
 pub struct StaticChannels<S: Service, const CAPACITY: usize> {
@@ -61,7 +56,6 @@ impl<S: Service> Channels<S> {
         Self {
             srv_chan,
             client_chan,
-            reset: oneshot::Receiver::new(),
         }
     }
 }
@@ -74,7 +68,6 @@ impl<S: Service> Connector<S> {
         Channels {
             srv_chan,
             client_chan,
-            reset,
         }: Channels<S>,
     ) -> Result<Connection<S>, ConnectError> {
         let permit = self
@@ -89,7 +82,6 @@ impl<S: Service> Connector<S> {
             hello,
             channel: srv_chan,
             rsp,
-            reset,
         };
         permit.send(connect);
         match self.rsp.recv().await {

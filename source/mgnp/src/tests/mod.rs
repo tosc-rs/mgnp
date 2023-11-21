@@ -1,6 +1,5 @@
-#![cfg(feature = "alloc")]
-use mgnp::{
-    message::{OutboundFrame, Rejection},
+use crate::{
+    message::{OutboundFrame, Rejection, Reset},
     registry::{self, Registry},
     tricky_pipe::{
         bidi::{BiDi, SerBiDi},
@@ -16,9 +15,12 @@ use std::{
 use tokio::sync::{mpsc, oneshot, Notify};
 pub use tracing::Instrument;
 
-pub mod svcs {
+mod e2e;
+mod integration;
+
+pub(crate) mod svcs {
     use super::*;
-    use mgnp::registry;
+    use crate::registry;
     use uuid::{uuid, Uuid};
 
     pub struct HelloWorld;
@@ -88,10 +90,10 @@ pub mod svcs {
         worker: usize,
         req_msg: &'static str,
         rsp_msg: &'static str,
-        chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse>,
+        chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse, Reset>,
     ) {
         tracing::debug!("hello world worker {worker} running...");
-        while let Some(req) = chan.rx().recv().await {
+        while let Ok(req) = chan.rx().recv().await {
             tracing::info!(?req);
             assert_eq!(req.hello, req_msg);
             chan.tx()
@@ -110,19 +112,19 @@ pub struct Fixture<L, R> {
     test_done: Arc<Notify>,
 }
 
-impl Fixture<TestWire, TestWire> {
+impl Fixture<Option<TestWire>, Option<TestWire>> {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Default for Fixture<TestWire, TestWire> {
+impl Default for Fixture<Option<TestWire>, Option<TestWire>> {
     fn default() -> Self {
         trace_init();
         let (local, remote) = TestWire::new();
         Self {
-            local,
-            remote,
+            local: Some(local),
+            remote: Some(remote),
             test_done: Arc::new(Notify::new()),
         }
     }
@@ -130,51 +132,69 @@ impl Default for Fixture<TestWire, TestWire> {
 
 type Running = (Interface, tokio::task::JoinHandle<()>);
 
-impl<R> Fixture<TestWire, R> {
-    pub fn spawn_local(self, registry: TestRegistry) -> Fixture<Running, R> {
-        let Fixture {
-            local,
-            remote,
-            test_done,
-        } = self;
-
-        let (iface, machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
-            local,
+impl<T, E> Fixture<T, E> {
+    fn spawn_peer(
+        name: &'static str,
+        wire: TestWire,
+        registry: TestRegistry,
+        test_done: &Arc<Notify>,
+    ) -> Running {
+        let (iface, machine) = Interface::new::<_, _, { crate::DEFAULT_MAX_CONNS }>(
+            wire,
             registry,
             TrickyPipe::new(8),
         );
+        let task = tokio::spawn(interface("name", machine, test_done.clone()));
+        (iface, task)
+    }
+}
+
+impl<R> Fixture<Option<TestWire>, R> {
+    pub fn spawn_local(self, registry: TestRegistry) -> Fixture<Running, R> {
+        let Fixture {
+            mut local,
+            remote,
+            test_done,
+        } = self;
+        let wire = local
+            .take()
+            .expect("attempted to take the local end of the wire twice!");
         Fixture {
-            local: (
-                iface,
-                tokio::spawn(interface("local", machine, test_done.clone())),
-            ),
+            local: Self::spawn_peer("local", wire, registry, &test_done),
             remote,
             test_done,
         }
     }
+
+    pub fn take_local_wire(&mut self) -> TestWire {
+        self.local
+            .take()
+            .expect("attempted to take the local end of the wire twice!")
+    }
 }
 
-impl<L> Fixture<L, TestWire> {
+impl<L> Fixture<L, Option<TestWire>> {
     pub fn spawn_remote(self, registry: TestRegistry) -> Fixture<L, Running> {
         let Fixture {
             local,
-            remote,
+            mut remote,
             test_done,
         } = self;
 
-        let (iface, machine) = Interface::new::<_, _, { mgnp::DEFAULT_MAX_CONNS }>(
-            remote,
-            registry,
-            TrickyPipe::new(8),
-        );
+        let wire = remote
+            .take()
+            .expect("attempted to take the remote end of the wire twice!");
         Fixture {
             local,
-            remote: (
-                iface,
-                tokio::spawn(interface("remote", machine, test_done.clone())),
-            ),
+            remote: Self::spawn_peer("local", wire, registry, &test_done),
             test_done,
         }
+    }
+
+    pub fn take_remote_wire(&mut self) -> TestWire {
+        self.remote
+            .take()
+            .expect("attempted to take the remote end of the wire twice!")
     }
 }
 
@@ -211,7 +231,7 @@ impl Fixture<Running, Running> {
 #[tracing::instrument(level = tracing::Level::INFO, skip(machine, test_done))]
 async fn interface(
     peer: &'static str,
-    mut machine: mgnp::Machine<TestWire, TestRegistry, { mgnp::DEFAULT_MAX_CONNS }>,
+    mut machine: crate::Machine<TestWire, TestRegistry, { crate::DEFAULT_MAX_CONNS }>,
     test_done: Arc<Notify>,
 ) {
     tokio::select! {
@@ -240,7 +260,7 @@ pub fn trace_init() {
         .try_init();
 }
 
-pub fn make_bidis<In, Out>(cap: u8) -> (SerBiDi, BiDi<In, Out>)
+pub fn make_bidis<In, Out>(cap: u8) -> (SerBiDi<Reset>, BiDi<In, Out, Reset>)
 where
     In: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
     Out: serde::Serialize + serde::de::DeserializeOwned + Send + 'static,
@@ -277,7 +297,7 @@ pub struct TestFrame(Vec<u8>);
 
 pub struct InboundConnect {
     pub hello: Vec<u8>,
-    pub rsp: oneshot::Sender<Result<SerBiDi, Rejection>>,
+    pub rsp: oneshot::Sender<Result<SerBiDi<Reset>, Rejection>>,
 }
 
 // === impl TestRegistry ===
@@ -288,7 +308,7 @@ impl Registry for TestRegistry {
         &self,
         identity: registry::Identity,
         hello: &[u8],
-    ) -> Result<SerBiDi, Rejection> {
+    ) -> Result<SerBiDi<Reset>, Rejection> {
         let Some(svc) = self.svcs.read().unwrap().get(&identity).cloned() else {
             tracing::info!("REGISTRY: service not found!");
             return Err(Rejection::NotFound);
@@ -372,6 +392,15 @@ impl TestWire {
         let (tx2, rx2) = mpsc::channel(8);
         (Self { tx: tx1, rx: rx2 }, Self { tx: tx2, rx: rx1 })
     }
+
+    pub async fn send_bytes(&mut self, frame: impl Into<Vec<u8>>) -> Result<(), &'static str> {
+        let frame = frame.into();
+        tracing::info!(frame = ?HexSlice::new(&frame), "SEND");
+        self.tx
+            .send(frame)
+            .await
+            .map_err(|_| "the recv end of this wire has been dropped")
+    }
 }
 
 impl Wire for TestWire {
@@ -387,11 +416,7 @@ impl Wire for TestWire {
     async fn send(&mut self, msg: OutboundFrame<'_>) -> Result<(), &'static str> {
         tracing::info!(?msg, "sending message");
         let frame = msg.to_vec().expect("message should serialize");
-        tracing::info!(frame = ?HexSlice::new(&frame), "SEND");
-        self.tx
-            .send(frame)
-            .await
-            .map_err(|_| "the recv end of this wire has been dropped")
+        self.send_bytes(frame).await
     }
 }
 
@@ -424,18 +449,18 @@ impl fmt::Debug for HexSlice<'_> {
 
 #[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
 pub async fn connect_should_nak<S: registry::Service>(
-    connector: &mut mgnp::Connector<S>,
+    connector: &mut crate::Connector<S>,
     name: &'static str,
     hello: S::Hello,
-    nak: mgnp::message::Rejection,
+    nak: crate::message::Rejection,
 ) {
     tracing::info!("connecting to {name} (should NAK)...");
     let res = connector
-        .connect(name, hello, mgnp::client::Channels::new(8))
+        .connect(name, hello, crate::client::Channels::new(8))
         .await;
     tracing::info!(?res, "connect result");
     match res {
-        Err(mgnp::client::ConnectError::Nak(actual)) => assert_eq!(
+        Err(crate::client::ConnectError::Nak(actual)) => assert_eq!(
             actual, nak,
             "expected connection to {name} to be NAK'd with {nak:?}, but it was NAK'd with {actual:?}!"
         ),
@@ -450,13 +475,13 @@ pub async fn connect_should_nak<S: registry::Service>(
 
 #[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
 pub async fn connect<S: registry::Service>(
-    connector: &mut mgnp::Connector<S>,
+    connector: &mut crate::Connector<S>,
     name: &'static str,
     hello: S::Hello,
-) -> mgnp::client::ClientChannel<S> {
+) -> crate::client::Connection<S> {
     tracing::info!("connecting to {name} (should SUCCEED)...");
     let res = connector
-        .connect(name, hello, mgnp::client::Channels::new(8))
+        .connect(name, hello, crate::client::Channels::new(8))
         .await;
     tracing::info!(?res, "connect result");
     match res {

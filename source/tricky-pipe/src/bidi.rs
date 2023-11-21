@@ -13,9 +13,9 @@ use futures::FutureExt;
 /// This channel consists of a [`Sender`] paired with a [`Receiver`], and can be
 /// used to both send and receive typed messages to and from a remote peer.
 #[must_use]
-pub struct BiDi<In: 'static, Out: 'static = In> {
-    tx: Sender<Out>,
-    rx: Receiver<In>,
+pub struct BiDi<In: 'static, Out: 'static, E: 'static> {
+    tx: Sender<Out, E>,
+    rx: Receiver<In, E>,
 }
 
 /// A bidirectional type-erased serializing channel.
@@ -24,9 +24,9 @@ pub struct BiDi<In: 'static, Out: 'static = In> {
 /// and can be  used to both send and receive serialized messages to and from a
 /// remote peer.
 #[must_use]
-pub struct SerBiDi {
-    tx: DeserSender,
-    rx: SerReceiver,
+pub struct SerBiDi<E: 'static> {
+    tx: DeserSender<E>,
+    rx: SerReceiver<E>,
 }
 
 /// Events returned by [`BiDi::wait`] and [`SerBiDi::wait`].
@@ -39,19 +39,20 @@ pub enum Event<In, Out> {
     SendReady(Out),
 }
 
-impl<In, Out> BiDi<In, Out>
+impl<In, Out, E> BiDi<In, Out, E>
 where
     In: 'static,
     Out: 'static,
+    E: Clone + 'static,
 {
     /// Constructs a new `BiDi` from a [`Sender`] and a [`Receiver`].
-    pub fn from_pair(tx: Sender<Out>, rx: Receiver<In>) -> Self {
+    pub fn from_pair(tx: Sender<Out, E>, rx: Receiver<In, E>) -> Self {
         Self { tx, rx }
     }
 
     /// Consumes `self`, extracting the inner [`Sender`] and [`Receiver`].
     #[must_use]
-    pub fn split(self) -> (Sender<Out>, Receiver<In>) {
+    pub fn split(self) -> (Sender<Out, E>, Receiver<In, E>) {
         (self.tx, self.rx)
     }
 
@@ -78,7 +79,7 @@ where
     /// [`Sender::try_reserve`], [`Sender::capacity`], et cetera, on the send
     /// half of the channel.
     #[must_use]
-    pub fn tx(&self) -> &Sender<Out> {
+    pub fn tx(&self) -> &Sender<Out, E> {
         &self.tx
     }
 
@@ -88,7 +89,7 @@ where
     /// [`Receiver::try_recv`], [`Receiver::capacity`], et cetera, on the
     /// receive half of the channel.
     #[must_use]
-    pub fn rx(&self) -> &Receiver<In> {
+    pub fn rx(&self) -> &Receiver<In, E> {
         &self.rx
     }
 
@@ -121,10 +122,11 @@ where
     }
 }
 
-impl<In, Out> fmt::Debug for BiDi<In, Out>
+impl<In, Out, E> fmt::Debug for BiDi<In, Out, E>
 where
     In: 'static,
     Out: 'static,
+    E: 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { tx, rx } = self;
@@ -137,15 +139,15 @@ where
 
 // === impl SerBiDi ===
 
-impl SerBiDi {
+impl<E: Clone + 'static> SerBiDi<E> {
     /// Constructs a new `SerBiDi` from a [`DeserSender`] and a [`SerReceiver`].
-    pub fn from_pair(tx: DeserSender, rx: SerReceiver) -> Self {
+    pub fn from_pair(tx: DeserSender<E>, rx: SerReceiver<E>) -> Self {
         Self { tx, rx }
     }
 
     /// Consumes `self`, extracting the inner [`DeserSender`] and [`SerReceiver`].
     #[must_use]
-    pub fn split(self) -> (DeserSender, SerReceiver) {
+    pub fn split(self) -> (DeserSender<E>, SerReceiver<E>) {
         (self.tx, self.rx)
     }
 
@@ -172,7 +174,7 @@ impl SerBiDi {
     /// [`DeserSender::try_reserve`], [`DeserSender::capacity`], et cetera, on
     /// the send half of the channel.
     #[must_use]
-    pub fn tx(&self) -> &DeserSender {
+    pub fn tx(&self) -> &DeserSender<E> {
         &self.tx
     }
 
@@ -182,7 +184,7 @@ impl SerBiDi {
     /// [`SerReceiver::try_recv`], [`SerReceiver::capacity`], et cetera, on the
     /// receive half of the channel.
     #[must_use]
-    pub fn rx(&self) -> &SerReceiver {
+    pub fn rx(&self) -> &SerReceiver<E> {
         &self.rx
     }
 
@@ -215,7 +217,7 @@ impl SerBiDi {
     }
 }
 
-impl fmt::Debug for SerBiDi {
+impl<E> fmt::Debug for SerBiDi<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { tx, rx } = self;
         f.debug_struct("SerBiDi")

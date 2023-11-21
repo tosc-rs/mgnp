@@ -1,7 +1,5 @@
-#![cfg(feature = "alloc")]
-mod support;
-use mgnp::{message::Rejection, registry::Identity};
-use support::*;
+use super::*;
+use crate::{message::Rejection, registry::Identity};
 use svcs::{HelloWorldRequest, HelloWorldResponse};
 
 #[tokio::test]
@@ -25,7 +23,7 @@ async fn basically_works() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -62,7 +60,7 @@ async fn hellos_work() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -112,7 +110,7 @@ async fn nak_bad_hello() {
     let rsp = chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -152,13 +150,13 @@ async fn mux_single_service() {
 
     assert_eq!(
         rsp1,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
     assert_eq!(
         rsp2,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -228,7 +226,7 @@ async fn service_type_routing() {
     let rsp = helloworld_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -264,7 +262,7 @@ async fn service_type_routing() {
     let rsp = helloworld_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -272,7 +270,7 @@ async fn service_type_routing() {
     let rsp = hellohello_chan.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "world".to_string()
         })
     );
@@ -318,7 +316,7 @@ async fn service_identity_routing() {
     let rsp = sf_conn.rx().recv().await;
     assert_eq!(
         rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "san francisco".to_string()
         })
     );
@@ -346,13 +344,13 @@ async fn service_identity_routing() {
     let (sf_rsp, uni_rsp) = tokio::join! { sf_conn.rx().recv(), uni_conn.rx().recv() };
     assert_eq!(
         sf_rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "san francisco".to_string()
         })
     );
     assert_eq!(
         uni_rsp,
-        Some(HelloWorldResponse {
+        Ok(HelloWorldResponse {
             world: "universe".to_string()
         })
     );

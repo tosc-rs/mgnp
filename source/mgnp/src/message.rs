@@ -159,7 +159,7 @@ pub type OutboundFrame<'data> = Frame<OutboundData<'data>>;
 #[derive(Debug)]
 pub enum OutboundData<'recv> {
     Empty,
-    Data(SerRecvRef<'recv>),
+    Data(SerRecvRef<'recv, Reset>),
     Rejected(serbox::Consumer),
     Hello(serbox::Consumer),
 }
@@ -284,7 +284,7 @@ impl<'bytes, T: Deserialize<'bytes>> Frame<T> {
 }
 
 impl<'data> Frame<OutboundData<'data>> {
-    pub fn data(remote_id: Id, local_id: Id, data: SerRecvRef<'data>) -> Self {
+    pub fn data(remote_id: Id, local_id: Id, data: SerRecvRef<'data, Reset>) -> Self {
         Self {
             header: Header::Data {
                 local_id,
