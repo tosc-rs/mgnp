@@ -39,6 +39,7 @@ pub use self::arc_impl::*;
 /// [`StaticTrickyPipe::receiver`] and [`TrickyPipe::receiver`] methods.
 pub struct Receiver<T: 'static, E: 'static = ()> {
     pipe: TypedPipe<T, E>,
+    closed_error: bool,
 }
 
 /// Sends `T`-typed values to an associated [`Receiver`]s or [`SerReceiver`].
@@ -58,6 +59,7 @@ pub struct Sender<T: 'static, E: 'static = ()> {
 pub struct SerReceiver<E: 'static = ()> {
     pipe: ErasedPipe<E>,
     vtable: &'static SerVtable,
+    closed_error: bool,
 }
 
 /// Sends serialized values to an associated [`Receiver`] or [`SerReceiver`].
@@ -242,6 +244,22 @@ where
     #[inline(always)]
     fn take_value(&self, res: Reservation<'_, E>) -> T {
         self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() })
+    }
+
+    /// Close this channel with an error. Any subsequent attempts to send
+    /// messages to this channel will fail with `error`.
+    ///
+    /// This method returns `true` if the channel was successfully closed. If
+    /// this channel has already been closed with an error, this method does
+    /// nothing and returns `false`.
+    pub fn close_with_error(&mut self, error: E) -> bool {
+        if self.closed_error {
+            return false;
+        }
+
+        self.pipe.core().close_rx_error(error);
+
+        true
     }
 
     /// Returns `true` if this channel is empty.
@@ -440,6 +458,22 @@ impl<E: Clone> SerReceiver<E> {
                 vtable: self.vtable,
             })
         })
+    }
+
+    /// Close this channel with an error. Any subsequent attempts to send
+    /// messages to this channel will fail with `error`.
+    ///
+    /// This method returns `true` if the channel was successfully closed. If
+    /// this channel has already been closed with an error, this method does
+    /// nothing and returns `false`.
+    pub fn close_with_error(&mut self, error: E) -> bool {
+        if self.closed_error {
+            return false;
+        }
+
+        self.pipe.core().close_rx_error(error);
+
+        true
     }
 
     /// Returns `true` if this channel is empty.

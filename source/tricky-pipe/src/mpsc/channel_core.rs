@@ -256,6 +256,23 @@ impl<E> Core<E> {
         test_println!("Core::close_rx: -> closed");
     }
 
+    pub(super) fn close_rx_error(&self, error: E) {
+        // store the error in the channel.
+        self.error.with_mut(|ptr| unsafe {
+            // Safety: this is okay, because there is only one receiver, and the
+            // senders will not attempt to access the error until the receiver
+            // has set the `CLOSED_ERROR` bits.
+            //
+            // The receiver will not close the channel more than once.
+            (*ptr).write(error);
+        });
+        // set the state to indicate that the receiver closed the channel.
+        test_dbg!(self.enqueue_pos.fetch_or(CLOSED_ERROR, Release));
+        // notify any waiting senders that the channel is closed.
+        self.prod_wait.close();
+        test_println!("Core::close_rx_error: -> closed");
+    }
+
     #[inline]
     pub(super) fn add_tx(&self) {
         // Using a relaxed ordering is alright here, as knowledge of the

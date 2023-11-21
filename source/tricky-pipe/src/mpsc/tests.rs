@@ -589,6 +589,32 @@ fn mpsc_send() {
     })
 }
 
+#[test]
+fn close_error_simple() {
+    const CAPACITY: u8 = 2;
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>, &'static str>::new(CAPACITY);
+
+        let mut rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx = chan.sender();
+
+        rx.close_with_error("fake rx error");
+
+        let t1 = thread::spawn(move || {
+            future::block_on(async move {
+                let err = test_dbg!(tx.send(loom::alloc::Track::new(1)).await.unwrap_err());
+                match err {
+                    SendError::Error { error, .. } => assert_eq!(error, "fake rx error"),
+                    err => panic!("expected SendError::Error, got {:?}", err),
+                }
+            })
+        });
+
+        t1.join().unwrap();
+    })
+}
+
 fn do_tx(
     sends: usize,
     offset: usize,
