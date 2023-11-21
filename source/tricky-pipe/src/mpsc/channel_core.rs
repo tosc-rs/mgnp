@@ -433,9 +433,6 @@ impl<E: Clone> Core<E> {
         test_span!("Core::try_dequeue");
         let mut head = test_dbg!(self.dequeue_pos.load(Acquire));
         loop {
-            if head & CLOSED_ERROR == CLOSED_ERROR {
-                return Err(TryRecvError::Error(unsafe { self.close_error() }));
-            }
             // Shift to the right to extract the actual position, and
             // discard the `CLOSED` and `HAS_ERROR` bits.
             let pos = head >> POS_SHIFT;
@@ -447,7 +444,11 @@ impl<E: Clone> Core<E> {
 
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
-                    return Err(TryRecvError::Closed)
+                    if head & CLOSED_ERROR == CLOSED_ERROR {
+                        return Err(TryRecvError::Error(unsafe { self.close_error() }));
+                    } else {
+                        return Err(TryRecvError::Closed);
+                    }
                 }
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
@@ -477,7 +478,7 @@ impl<E: Clone> Core<E> {
         loop {
             // Shift one bit to the right to extract the actual position, and
             // discard the `CLOSED` bit.
-            let pos = tail >> 1;
+            let pos = tail >> POS_SHIFT;
             let slot = &self.queue[test_dbg!(pos & MASK) as usize];
             let seq = slot.load(Acquire) >> SEQ_SHIFT;
             let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos as i8));
@@ -517,6 +518,9 @@ impl<E: Clone> Core<E> {
             .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() })
     }
 }
+
+unsafe impl<E: Send + Sync> Send for Core<E> {}
+unsafe impl<E: Send + Sync> Sync for Core<E> {}
 
 // === impl Reservation ===
 
