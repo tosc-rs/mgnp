@@ -7,7 +7,7 @@ use core::{fmt, mem, num::NonZeroU16, task::Poll};
 use tricky_pipe::{
     bidi::SerBiDi,
     mpsc::{
-        error::{RecvError, SendError},
+        error::{RecvError, SendError, SerSendError},
         SerPermit,
     },
     oneshot,
@@ -105,7 +105,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                     Poll::Ready(Err(error)) => {
                         self.dead_index = Some(Id::from_index(idx));
                         let reason = match error {
-                            RecvError::Closed => Reset::BecauseISaidSo,
+                            RecvError::Disconnected => Reset::BecauseISaidSo,
                             RecvError::Error(reason) => reason,
                         };
                         return Poll::Ready(OutboundFrame::reset(*remote_id, reason));
@@ -191,27 +191,27 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 };
 
                 // try to reserve send capacity on this socket.
-                let reset = match socket.channel.tx().reserve().await {
-                    Ok(permit) => match permit.send(frame.body) {
-                        Ok(_) => return None,
-                        Err(error) => {
-                            // TODO(eliza): possibly it would be better if we
-                            // just sent the deserialize error to the local peer
-                            // and let it decide whether this should kill the
-                            // connection or not? maybe by turning the server's
-                            // client-to-server stream into `Result<ClientMsg,
-                            // DecodeError>`s?
-                            tracing::debug!(
-                                id.remote = %local_id,
-                                id.local = %id,
-                                %error,
-                                "process_inbound(DATA): failed to deserialize; resetting...",
-                            );
-                            Reset::bad_frame(error)
-                        }
-                    },
-                    Err(SendError::Closed(_)) => Reset::BecauseISaidSo,
-                    Err(SendError::Error { error, .. }) => error,
+                let reset = match socket.channel.tx().send(frame.body).await {
+                    Ok(_) => return None,
+                    Err(SerSendError::Deserialize(error)) => {
+                        // TODO(eliza): possibly it would be better if we
+                        // just sent the deserialize error to the local peer
+                        // and let it decide whether this should kill the
+                        // connection or not? maybe by turning the server's
+                        // client-to-server stream into `Result<ClientMsg,
+                        // DecodeError>`s?
+                        tracing::debug!(
+                            id.remote = %local_id,
+                            id.local = %id,
+                            %error,
+                            "process_inbound(DATA): failed to deserialize; resetting...",
+                        );
+                        Reset::bad_frame(error)
+                    }
+                    // channel closed gracefully.
+                    Err(SerSendError::Disconnected) => Reset::BecauseISaidSo,
+                    // remote server reset the connection.
+                    Err(SerSendError::Error(error)) => error,
                 };
                 tracing::trace!(
                     id.remote = %local_id,

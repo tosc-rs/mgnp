@@ -174,7 +174,10 @@ mod single_threaded {
             let tx = test_dbg!(chan.sender());
             let rx = test_dbg!(chan.receiver().unwrap());
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
+            assert_eq!(
+                tx.try_reserve().unwrap_err(),
+                TrySendError::Disconnected(()),
+            );
         });
     }
 
@@ -186,7 +189,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.receiver().unwrap());
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
         });
     }
 
@@ -200,7 +203,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
         });
     }
 
@@ -257,7 +260,10 @@ mod single_threaded {
             let tx = test_dbg!(chan.sender());
             let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
+            assert_eq!(
+                tx.try_reserve().unwrap_err(),
+                TrySendError::Disconnected(())
+            );
         });
     }
 
@@ -269,7 +275,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -283,7 +289,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -389,10 +395,7 @@ mod single_threaded {
             drop(chan);
             drop(rx);
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-            assert_eq!(
-                res.unwrap_err(),
-                SerTrySendError::Send(TrySendError::Closed(())),
-            );
+            assert_eq!(res.unwrap_err(), SerTrySendError::Disconnected,);
         });
     }
 
@@ -404,7 +407,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.receiver()).unwrap();
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -418,7 +421,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 

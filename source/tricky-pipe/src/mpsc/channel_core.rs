@@ -76,8 +76,12 @@ pub(super) struct Core<E> {
     /// This is the length of the actual queue elements array (which is not part
     /// of this struct).
     pub(super) capacity: u8,
-    /// If the channel closed with an error, this is the error.
-    error: UnsafeCell<MaybeUninit<E>>,
+    /// If the receiver side of the channel closed with an error, this is the
+    /// error.
+    send_error: UnsafeCell<MaybeUninit<E>>,
+    /// If the sender side of the channel closed with an error, this is the
+    /// error.
+    recv_error: UnsafeCell<MaybeUninit<E>>,
 }
 
 pub(super) struct Reservation<'core, E> {
@@ -198,7 +202,8 @@ impl<E> Core<E> {
             // dropped.
             state: AtomicUsize::new(state::TX_ONE),
             capacity,
-            error: UnsafeCell::new(MaybeUninit::uninit()),
+            send_error: UnsafeCell::new(MaybeUninit::uninit()),
+            recv_error: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
@@ -258,7 +263,7 @@ impl<E> Core<E> {
 
     pub(super) fn close_rx_error(&self, error: E) {
         // store the error in the channel.
-        self.error.with_mut(|ptr| unsafe {
+        self.send_error.with_mut(|ptr| unsafe {
             // Safety: this is okay, because there is only one receiver, and the
             // senders will not attempt to access the error until the receiver
             // has set the `CLOSED_ERROR` bits.
@@ -271,6 +276,27 @@ impl<E> Core<E> {
         // notify any waiting senders that the channel is closed.
         self.prod_wait.close();
         test_println!("Core::close_rx_error: -> closed");
+    }
+
+    pub(super) fn close_tx_error(&self, error: E) -> bool {
+        if test_dbg!(self.dequeue_pos.fetch_or(HAS_ERROR, AcqRel) & HAS_ERROR) == HAS_ERROR {
+            // someone else is setting the close error!
+            return false;
+        }
+        // store the error in the channel.
+        self.recv_error.with_mut(|ptr| unsafe {
+            // Safety: this is okay, because the HAS_ERROR bit guards against
+            // any other sender setting the error, but the receiver will not
+            // read the error until the CLOSED bit is also set. For now, we have
+            // exclusive access to the error field.
+            (*ptr).write(error);
+        });
+        // set the state to indicate that the sender closed the channel.
+        test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
+        // notify any waiting senders that the channel is closed.
+        self.cons_wait.wake();
+        test_println!("Core::close_tx_error: -> closed");
+        true
     }
 
     #[inline]
@@ -374,7 +400,7 @@ impl<E: Clone> Core<E> {
             return Err(self
                 .send_closed_error()
                 .map(|error| TrySendError::Error { error, message: () })
-                .unwrap_or(TrySendError::Closed(())));
+                .unwrap_or(TrySendError::Disconnected(())));
         }
 
         test_dbg!(self.indices.allocate())
@@ -386,14 +412,14 @@ impl<E: Clone> Core<E> {
         loop {
             match self.try_reserve() {
                 Ok(res) => return Ok(res),
-                Err(TrySendError::Closed(())) => return Err(SendError::Closed(())),
+                Err(TrySendError::Disconnected(())) => return Err(SendError::Disconnected(())),
                 Err(TrySendError::Error { error, .. }) => {
                     return Err(SendError::Error { error, message: () })
                 }
                 Err(TrySendError::Full(())) => self.prod_wait.wait().await.map_err(|_| {
                     self.send_closed_error()
                         .map(|error| SendError::Error { error, message: () })
-                        .unwrap_or(SendError::Closed(()))
+                        .unwrap_or(SendError::Disconnected(()))
                 })?,
             }
         }
@@ -406,7 +432,9 @@ impl<E: Clone> Core<E> {
         loop {
             match self.try_dequeue() {
                 Ok(res) => return Poll::Ready(Ok(res)),
-                Err(TryRecvError::Closed) => return Poll::Ready(Err(RecvError::Closed)),
+                Err(TryRecvError::Disconnected) => {
+                    return Poll::Ready(Err(RecvError::Disconnected))
+                }
                 Err(TryRecvError::Error(error)) => {
                     return Poll::Ready(Err(RecvError::Error(error)))
                 }
@@ -444,11 +472,10 @@ impl<E: Clone> Core<E> {
 
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
-                    if head & CLOSED_ERROR == CLOSED_ERROR {
-                        return Err(TryRecvError::Error(unsafe { self.close_error() }));
-                    } else {
-                        return Err(TryRecvError::Closed);
-                    }
+                    return Err(self
+                        .recv_close_error()
+                        .map(TryRecvError::Error)
+                        .unwrap_or(TryRecvError::Disconnected));
                 }
                 cmp::Ordering::Less => return Err(TryRecvError::Empty),
                 cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
@@ -471,11 +498,18 @@ impl<E: Clone> Core<E> {
         }
     }
 
-    fn commit_send(&self, idx: u8) -> Result<(), SendError<(), E>> {
+    fn commit_send(&self, idx: u8) -> Result<(), SendError<E>> {
         test_span!("Core::commit_send", idx);
         debug_assert!(idx as u16 <= MASK);
         let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
         loop {
+            if test_dbg!(tail & CLOSED) == CLOSED {
+                return Err(self
+                    .send_closed_error()
+                    .map(|error| SendError::Error { error, message: () })
+                    .unwrap_or(SendError::Disconnected(())));
+            }
+
             // Shift one bit to the right to extract the actual position, and
             // discard the `CLOSED` bit.
             let pos = tail >> POS_SHIFT;
@@ -505,17 +539,29 @@ impl<E: Clone> Core<E> {
     }
 
     fn send_closed_error(&self) -> Option<E> {
-        if test_dbg!(self.enqueue_pos.load(Acquire) & CLOSED_ERROR) == CLOSED_ERROR {
-            Some(unsafe { self.close_error() })
+        let pos = self.enqueue_pos.load(Acquire);
+        debug_assert_eq!(pos & CLOSED, CLOSED);
+        if test_dbg!(pos & CLOSED_ERROR) == CLOSED_ERROR {
+            Some(
+                self.send_error
+                    .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() }),
+            )
         } else {
             None
         }
     }
 
-    unsafe fn close_error(&self) -> E {
-        // debug_assert!(self.enqueue_pos.load(Acquire) & CLOSED_ERROR == CLOSED_ERROR);
-        self.error
-            .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() })
+    fn recv_close_error(&self) -> Option<E> {
+        let pos = self.dequeue_pos.load(Acquire);
+        debug_assert_eq!(pos & CLOSED, CLOSED);
+        if test_dbg!(pos & CLOSED_ERROR) == CLOSED_ERROR {
+            Some(
+                self.recv_error
+                    .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() }),
+            )
+        } else {
+            None
+        }
     }
 }
 
@@ -525,7 +571,7 @@ unsafe impl<E: Send + Sync> Sync for Core<E> {}
 // === impl Reservation ===
 
 impl<E: Clone> Reservation<'_, E> {
-    pub(super) fn commit_send(self) -> Result<(), SendError<(), E>> {
+    pub(super) fn commit_send(self) -> Result<(), SendError<E>> {
         // don't run the destructor that frees the index, since we are dropping
         // the cell...
         let this = ManuallyDrop::new(self);

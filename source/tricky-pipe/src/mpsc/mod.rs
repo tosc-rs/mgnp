@@ -340,7 +340,7 @@ impl<T, E: Clone> futures::Stream for &'_ Receiver<T, E> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
             Ok(res) => Some(Ok(res)),
-            Err(RecvError::Closed) => None,
+            Err(RecvError::Disconnected) => None,
             Err(RecvError::Error(error)) => Some(Err(error)),
         })
     }
@@ -353,7 +353,7 @@ impl<T, E: Clone> futures::Stream for Receiver<T, E> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
             Ok(res) => Some(Ok(res)),
-            Err(RecvError::Closed) => None,
+            Err(RecvError::Disconnected) => None,
             Err(RecvError::Error(error)) => Some(Err(error)),
         })
     }
@@ -554,7 +554,7 @@ impl<'rx, E: Clone> futures::Stream for &'rx SerReceiver<E> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
             Ok(res) => Some(Ok(res)),
-            Err(RecvError::Closed) => None,
+            Err(RecvError::Disconnected) => None,
             Err(RecvError::Error(error)) => Some(Err(error)),
         })
     }
@@ -745,9 +745,9 @@ impl<E: Clone> DeserSender<E> {
     /// [SerPermit::send].
     pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError<E>> {
         self.try_reserve()
-            .map_err(SerTrySendError::Send)?
+            .map_err(SerTrySendError::from_try_send_error)?
             .send(bytes)
-            .map_err(SerTrySendError::Deserialize)
+            .map_err(SerTrySendError::from_ser_send_error)
     }
 
     /// Attempt to immediately send the given framed bytes
@@ -761,9 +761,9 @@ impl<E: Clone> DeserSender<E> {
     /// [SerPermit::send_framed].
     pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError<E>> {
         self.try_reserve()
-            .map_err(SerTrySendError::Send)?
+            .map_err(SerTrySendError::from_try_send_error)?
             .send_framed(bytes)
-            .map_err(SerTrySendError::Deserialize)
+            .map_err(SerTrySendError::from_ser_send_error)
     }
 
     /// Attempt to send the given bytes
@@ -775,12 +775,11 @@ impl<E: Clone> DeserSender<E> {
     ///
     /// This is equivalent to calling [DeserSender::reserve] followed by
     /// [SerPermit::send].
-    pub async fn send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
+    pub async fn send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError<E>> {
         self.reserve()
             .await
-            .map_err(|_| SerSendError::Closed)?
+            .map_err(SerSendError::from_send_error)?
             .send(bytes)
-            .map_err(SerSendError::Deserialize)
     }
 
     /// Attempt to  send the given framed bytes
@@ -792,12 +791,11 @@ impl<E: Clone> DeserSender<E> {
     ///
     /// This is equivalent to calling [DeserSender::reserve] followed by
     /// [SerPermit::send_framed].
-    pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError> {
+    pub async fn send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError<E>> {
         self.reserve()
             .await
-            .map_err(|_| SerSendError::Closed)?
+            .map_err(SerSendError::from_send_error)?
             .send_framed(bytes)
-            .map_err(SerSendError::Deserialize)
     }
 
     /// Returns `true` if this channel is empty.
@@ -886,28 +884,32 @@ impl<E: Clone> SerPermit<'_, E> {
     ///
     /// This will attempt to deserialize the bytes into the reservation, consuming
     /// it. If the deserialization fails, the [SerPermit] is still consumed.
-    pub fn send(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
+    pub fn send(self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError<E>> {
         // try to deserialize the bytes into the reserved pipe slot.
-        (self.vtable.from_bytes)(self.elems, self.res.idx, bytes.as_ref())?;
+        (self.vtable.from_bytes)(self.elems, self.res.idx, bytes.as_ref())
+            .map_err(SerSendError::Deserialize)?;
 
         // if we successfully deserialized the bytes, commit the send.
         // otherwise, we'll release the send index when we drop the reservation.
-        self.res.commit_send();
-        Ok(())
+        self.res
+            .commit_send()
+            .map_err(SerSendError::from_send_error)
     }
 
     /// Attempt to send the given bytes
     ///
     /// This will attempt to deserialize the COBS-encoded bytes into the reservation, consuming
     /// it. If the deserialization fails, the [SerPermit] is still consumed.
-    pub fn send_framed(self, bytes: impl AsRef<[u8]>) -> postcard::Result<()> {
+    pub fn send_framed(self, bytes: impl AsRef<[u8]>) -> Result<(), SerSendError<E>> {
         // try to deserialize the bytes into the reserved pipe slot.
-        (self.vtable.from_bytes_framed)(self.elems, self.res.idx, bytes.as_ref())?;
+        (self.vtable.from_bytes_framed)(self.elems, self.res.idx, bytes.as_ref())
+            .map_err(SerSendError::Deserialize)?;
 
         // if we successfully deserialized the bytes, commit the send.
         // otherwise, we'll release the send index when we drop the reservation.
-        self.res.commit_send();
-        Ok(())
+        self.res
+            .commit_send()
+            .map_err(SerSendError::from_send_error)
     }
 }
 

@@ -238,7 +238,10 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
+        assert_eq!(
+            tx.try_reserve().unwrap_err(),
+            TrySendError::Disconnected(()),
+        );
     }
 
     #[test]
@@ -252,7 +255,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
     }
 
     #[test]
@@ -268,7 +271,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
     }
 
     #[test]
@@ -321,7 +324,10 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
+        assert_eq!(
+            tx.try_reserve().unwrap_err(),
+            TrySendError::Disconnected(())
+        );
     }
 
     #[test]
@@ -335,7 +341,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -351,7 +357,7 @@ mod tests {
         let rx = CHAN.ser_receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -450,10 +456,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(rx);
         let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-        assert_eq!(
-            res.unwrap_err(),
-            SerTrySendError::Send(TrySendError::Closed(())),
-        );
+        assert_eq!(res.unwrap_err(), SerTrySendError::Disconnected,);
     }
 
     #[test]
@@ -467,7 +470,7 @@ mod tests {
         let tx = CHAN.deser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -483,7 +486,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]

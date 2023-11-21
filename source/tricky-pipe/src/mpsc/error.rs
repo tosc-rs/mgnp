@@ -27,7 +27,7 @@ pub enum SendError<E, T = ()> {
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
-    Closed(T),
+    Disconnected(T),
     Error {
         message: T,
         error: E,
@@ -55,7 +55,7 @@ pub enum TrySendError<E, T = ()> {
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
-    Closed(T),
+    Disconnected(T),
     Error {
         message: T,
         error: E,
@@ -78,7 +78,7 @@ pub enum TryRecvError<E> {
     ///
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
-    Closed,
+    Disconnected,
     Error(E),
 }
 
@@ -95,7 +95,7 @@ pub enum RecvError<E> {
     ///
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
-    Closed,
+    Disconnected,
     Error(E),
 }
 
@@ -104,16 +104,17 @@ pub enum RecvError<E> {
 /// [`DeserSender::send`]: super::DeserSender::send
 /// [`DeserSender::send_framed`]: super::DeserSender::send_framed
 #[derive(Debug, Eq, PartialEq)]
-pub enum SerSendError {
+pub enum SerSendError<E> {
     /// A message cannot be sent because the channel is closed (no [`Receiver`]
     /// or [`SerReceiver`] exists).
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
-    Closed,
+    Disconnected,
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
+    Error(E),
 }
 
 /// Errors returned by [`DeserSender::try_send`] and
@@ -123,11 +124,18 @@ pub enum SerSendError {
 /// [`DeserSender::try_send_framed`]: super::DeserSender::send_framed
 #[derive(Debug, Eq, PartialEq)]
 pub enum SerTrySendError<E> {
-    /// The channel is [`Closed`](TrySendError::Closed) or [`Full`](TrySendError::Full).
-    Send(TrySendError<E>),
+    /// A message cannot be sent because the channel is closed (no [`Receiver`]
+    /// or [`SerReceiver`] exists).
+    ///
+    /// [`Receiver`]: super::Receiver
+    /// [`SerReceiver`]: super::SerReceiver
+    Disconnected,
+    Full,
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
+
+    Error(E),
 }
 
 // === impl SendError ===
@@ -138,14 +146,14 @@ impl<E, T> SendError<E, T> {
     #[must_use]
     pub fn into_inner(self) -> T {
         match self {
-            Self::Closed(msg) => msg,
+            Self::Disconnected(msg) => msg,
             Self::Error { message, .. } => message,
         }
     }
 
     pub(crate) fn with_message<M>(self, message: M) -> SendError<E, M> {
         match self {
-            Self::Closed(_) => SendError::Closed(message),
+            Self::Disconnected(_) => SendError::Disconnected(message),
             Self::Error { error, .. } => SendError::Error { message, error },
         }
     }
@@ -154,11 +162,20 @@ impl<E, T> SendError<E, T> {
 impl<E: fmt::Debug, T> fmt::Debug for SendError<E, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Closed(_) => f.debug_tuple("SendError::Closed").finish(),
+            Self::Disconnected(_) => f.debug_tuple("SendError::Closed").finish(),
             Self::Error { error, .. } => f
                 .debug_struct("SendError::Error")
                 .field("error", &error)
                 .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<E: fmt::Display, T> fmt::Display for SendError<E, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected(_) => f.write_str("the receiver has been dropped"),
+            Self::Error { error, .. } => error.fmt(f),
         }
     }
 }
@@ -171,7 +188,7 @@ impl<E, T> TrySendError<E, T> {
     #[must_use]
     pub fn into_inner(self) -> T {
         match self {
-            Self::Closed(inner) => inner,
+            Self::Disconnected(inner) => inner,
             Self::Full(t) => t,
             Self::Error { message, .. } => message,
         }
@@ -179,7 +196,7 @@ impl<E, T> TrySendError<E, T> {
 
     pub(crate) fn with_message<M>(self, message: M) -> TrySendError<E, M> {
         match self {
-            Self::Closed(_) => TrySendError::Closed(message),
+            Self::Disconnected(_) => TrySendError::Disconnected(message),
             Self::Full(_) => TrySendError::Full(message),
             Self::Error { error, .. } => TrySendError::Error { message, error },
         }
@@ -189,12 +206,74 @@ impl<E, T> TrySendError<E, T> {
 impl<E: fmt::Debug, T> fmt::Debug for TrySendError<E, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Closed(_) => f.debug_tuple("TrySendError::Closed").finish(),
+            Self::Disconnected(_) => f.debug_tuple("TrySendError::Closed").finish(),
             Self::Full(_) => f.debug_tuple("TrySendError::Full").finish(),
             Self::Error { error, .. } => f
                 .debug_struct("TrySendError::Error")
                 .field("error", &error)
                 .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<E: fmt::Display, T> fmt::Display for TrySendError<E, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected(_) => f.write_str("the receiver has been dropped"),
+            Self::Full(_) => f.write_str("the channel is currently at capacity"),
+            Self::Error { error, .. } => error.fmt(f),
+        }
+    }
+}
+
+// === impl SerSendError ===
+
+impl<E> SerSendError<E> {
+    pub(crate) fn from_send_error(err: SendError<E>) -> Self {
+        match err {
+            SendError::Disconnected(_) => Self::Disconnected,
+            SendError::Error { error, .. } => Self::Error(error),
+        }
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for SerSendError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("the receiver has been dropped"),
+            Self::Error(error) => error.fmt(f),
+            Self::Deserialize(error) => write!(f, "error deserializing message: {error}"),
+        }
+    }
+}
+
+// === impl SerTrySendError ===
+
+impl<E> SerTrySendError<E> {
+    pub(crate) fn from_try_send_error(err: TrySendError<E>) -> Self {
+        match err {
+            TrySendError::Disconnected(_) => Self::Disconnected,
+            TrySendError::Error { error, .. } => Self::Error(error),
+            TrySendError::Full(_) => Self::Full,
+        }
+    }
+
+    pub(crate) fn from_ser_send_error(err: SerSendError<E>) -> Self {
+        match err {
+            SerSendError::Disconnected => Self::Disconnected,
+            SerSendError::Error(e) => Self::Error(e),
+            SerSendError::Deserialize(e) => Self::Deserialize(e),
+        }
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for SerTrySendError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("the receiver has been dropped"),
+            Self::Error(error) => error.fmt(f),
+            Self::Full => f.write_str("the channel is currently at capacity"),
+            Self::Deserialize(error) => write!(f, "error deserializing message: {error}"),
         }
     }
 }
