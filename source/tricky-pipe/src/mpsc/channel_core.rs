@@ -86,13 +86,13 @@ pub(super) struct Reservation<'core, E> {
 }
 
 /// Erases both a pipe and its element type.
-pub(super) struct ErasedPipe<E> {
+pub(super) struct ErasedPipe<E: 'static> {
     ptr: *const (),
     vtable: &'static CoreVtable<E>,
 }
 
-pub(super) struct TypedPipe<T: 'static> {
-    pipe: ErasedPipe,
+pub(super) struct TypedPipe<T: 'static, E: 'static> {
+    pipe: ErasedPipe<E>,
     _t: PhantomData<fn(T)>,
 }
 
@@ -156,18 +156,21 @@ pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
 ///
 /// This is the first bit of the pos word, so that it is not clobbered if
 /// incrementing the actual position in the queue wraps around (which is fine).
-const CLOSED: u16 = 0b1;
+const CLOSED: u16 = 1 << 0;
+const HAS_ERROR: u16 = 1 << 1;
+const CLOSED_ERROR: u16 = CLOSED | HAS_ERROR;
+const POS_SHIFT: u16 = CLOSED_ERROR.trailing_ones() as u16;
 /// The value by which `enqueue_pos` and `dequeue_pos` are incremented. This is
-/// shifted left by one to account for the lowest bit being used for
-/// [`CLOSED_BIT`].
-const POS_ONE: u16 = 1 << 1;
+/// shifted left by two to account for the lowest bits being used for `CLOSED`
+/// and `HAS_ERROR`
+const POS_ONE: u16 = 1 << POS_SHIFT;
 const MASK: u16 = MAX_CAPACITY as u16 - 1;
 const SEQ_SHIFT: u16 = MASK.trailing_ones() as u16;
 const SEQ_ONE: u16 = 1 << SEQ_SHIFT;
 
 // === impl Core ===
 
-impl Core {
+impl<E> Core<E> {
     #[cfg(not(loom))]
     pub(super) const fn new(capacity: u8) -> Self {
         #[allow(clippy::declare_interior_mutable_const)]
@@ -195,6 +198,7 @@ impl Core {
             // dropped.
             state: AtomicUsize::new(state::TX_ONE),
             capacity,
+            error: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
@@ -222,123 +226,8 @@ impl Core {
             queue,
             state: AtomicUsize::new(state::TX_ONE),
             capacity,
-        }
-    }
 
-    pub(super) fn try_reserve(&self) -> Result<Reservation<'_>, TrySendError> {
-        test_span!("Core::try_reserve");
-        if test_dbg!(self.enqueue_pos.load(Acquire)) & CLOSED != 0 {
-            return Err(TrySendError::Closed(()));
-        }
-        test_dbg!(self.indices.allocate())
-            .ok_or(TrySendError::Full(()))
-            .map(|idx| Reservation { core: self, idx })
-    }
-
-    pub(super) async fn reserve(&self) -> Result<Reservation, SendError> {
-        loop {
-            match self.try_reserve() {
-                Ok(res) => return Ok(res),
-                Err(TrySendError::Closed(())) => return Err(SendError(())),
-                Err(TrySendError::Full(())) => {
-                    self.prod_wait.wait().await.map_err(|_| SendError(()))?
-                }
-            }
-        }
-    }
-
-    pub(super) fn poll_dequeue(&self, cx: &mut Context<'_>) -> Poll<Option<Reservation<'_>>> {
-        loop {
-            match self.try_dequeue() {
-                Ok(res) => return Poll::Ready(Some(res)),
-                Err(TryRecvError::Closed) => return Poll::Ready(None),
-                Err(TryRecvError::Empty) => {
-                    // we never close the rx waitcell, because the
-                    // rx is responsible for determining if the channel is
-                    // closed by the tx: there may be messages in the channel to
-                    // consume before the rx considers it properly closed.
-                    let _ = task::ready!(test_dbg!(self.cons_wait.poll_wait(cx)));
-                    // if the poll_wait returns ready, then another thread just
-                    // enqueued something. sticking a spin loop hint here tells
-                    // `loom` that we're waiting for that thread before we can
-                    // make progress. in real life, the `PAUSE` instruction or
-                    // similar may also help us actually see the other thread's
-                    // change...if it takes a single cycle of delay for it to
-                    // reflect? idk lol ¯\_(ツ)_/¯
-                    hint::spin_loop();
-                }
-            }
-        }
-    }
-
-    pub(super) fn try_dequeue(&self) -> Result<Reservation<'_>, TryRecvError> {
-        test_span!("Core::try_dequeue");
-        let mut head = test_dbg!(self.dequeue_pos.load(Acquire));
-        loop {
-            // Shift one bit to the right to extract the actual position, and
-            // discard the `CLOSED` bit.
-            let pos = head >> 1;
-            let slot = &self.queue[(pos & MASK) as usize];
-            // Load the slot's current value, and extract its sequence number.
-            let val = slot.load(Acquire);
-            let seq = val >> SEQ_SHIFT;
-            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos).wrapping_add(1) as i8);
-
-            match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
-                    return Err(TryRecvError::Closed)
-                }
-                cmp::Ordering::Less => return Err(TryRecvError::Empty),
-                cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
-                    head,
-                    head.wrapping_add(POS_ONE),
-                    AcqRel,
-                    Acquire,
-                )) {
-                    Ok(_) => {
-                        slot.store(val.wrapping_add(SEQ_ONE), Release);
-                        return Ok(Reservation {
-                            core: self,
-                            idx: (val & MASK) as u8,
-                        });
-                    }
-                    Err(actual) => head = actual,
-                },
-                cmp::Ordering::Greater => head = test_dbg!(self.dequeue_pos.load(Acquire)),
-            }
-        }
-    }
-
-    fn commit_send(&self, idx: u8) {
-        test_span!("Core::commit_send", idx);
-        debug_assert!(idx as u16 <= MASK);
-        let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
-        loop {
-            // Shift one bit to the right to extract the actual position, and
-            // discard the `CLOSED` bit.
-            let pos = tail >> 1;
-            let slot = &self.queue[test_dbg!(pos & MASK) as usize];
-            let seq = slot.load(Acquire) >> SEQ_SHIFT;
-            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos as i8));
-
-            match test_dbg!(dif).cmp(&0) {
-                cmp::Ordering::Less => unreachable!(),
-                cmp::Ordering::Equal => match test_dbg!(self.enqueue_pos.compare_exchange_weak(
-                    tail,
-                    tail.wrapping_add(POS_ONE),
-                    AcqRel,
-                    Acquire,
-                )) {
-                    Ok(_) => {
-                        let new = test_dbg!(test_dbg!((pos) << SEQ_SHIFT).wrapping_add(SEQ_ONE));
-                        slot.store(test_dbg!(idx as u16 | new), Release);
-                        test_dbg!(self.cons_wait.wake());
-                        return;
-                    }
-                    Err(actual) => tail = actual,
-                },
-                cmp::Ordering::Greater => tail = test_dbg!(self.enqueue_pos.load(Acquire)),
-            }
+            error: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
@@ -460,25 +349,177 @@ impl Core {
     }
 }
 
+impl<E: Clone> Core<E> {
+    pub(super) fn try_reserve(&self) -> Result<Reservation<'_, E>, TrySendError<E>> {
+        test_span!("Core::try_reserve");
+        let enqueue_pos = self.enqueue_pos.load(Acquire);
+        if test_dbg!(enqueue_pos & CLOSED) == CLOSED {
+            return Err(self
+                .send_closed_error()
+                .map(|error| TrySendError::Error { error, message: () })
+                .unwrap_or(TrySendError::Closed(())));
+        }
+
+        test_dbg!(self.indices.allocate())
+            .ok_or(TrySendError::Full(()))
+            .map(|idx| Reservation { core: self, idx })
+    }
+
+    pub(super) async fn reserve(&self) -> Result<Reservation<'_, E>, SendError<E>> {
+        loop {
+            match self.try_reserve() {
+                Ok(res) => return Ok(res),
+                Err(TrySendError::Closed(())) => return Err(SendError::Closed(())),
+                Err(TrySendError::Error { error, .. }) => {
+                    return Err(SendError::Error { error, message: () })
+                }
+                Err(TrySendError::Full(())) => self.prod_wait.wait().await.map_err(|_| {
+                    self.send_closed_error()
+                        .map(|error| SendError::Error { error, message: () })
+                        .unwrap_or(SendError::Closed(()))
+                })?,
+            }
+        }
+    }
+
+    pub(super) fn poll_dequeue(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Reservation<'_, E>, RecvError<E>>> {
+        loop {
+            match self.try_dequeue() {
+                Ok(res) => return Poll::Ready(Ok(res)),
+                Err(TryRecvError::Closed) => return Poll::Ready(Err(RecvError::Closed)),
+                Err(TryRecvError::Error(error)) => {
+                    return Poll::Ready(Err(RecvError::Error(error)))
+                }
+                Err(TryRecvError::Empty) => {
+                    // we never close the rx waitcell, because the
+                    // rx is responsible for determining if the channel is
+                    // closed by the tx: there may be messages in the channel to
+                    // consume before the rx considers it properly closed.
+                    let _ = task::ready!(test_dbg!(self.cons_wait.poll_wait(cx)));
+                    // if the poll_wait returns ready, then another thread just
+                    // enqueued something. sticking a spin loop hint here tells
+                    // `loom` that we're waiting for that thread before we can
+                    // make progress. in real life, the `PAUSE` instruction or
+                    // similar may also help us actually see the other thread's
+                    // change...if it takes a single cycle of delay for it to
+                    // reflect? idk lol ¯\_(ツ)_/¯
+                    hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    pub(super) fn try_dequeue(&self) -> Result<Reservation<'_, E>, TryRecvError<E>> {
+        test_span!("Core::try_dequeue");
+        let mut head = test_dbg!(self.dequeue_pos.load(Acquire));
+        loop {
+            if head & CLOSED_ERROR == CLOSED_ERROR {
+                return Err(TryRecvError::Error(unsafe { self.close_error() }));
+            }
+            // Shift to the right to extract the actual position, and
+            // discard the `CLOSED` and `HAS_ERROR` bits.
+            let pos = head >> POS_SHIFT;
+            let slot = &self.queue[(pos & MASK) as usize];
+            // Load the slot's current value, and extract its sequence number.
+            let val = slot.load(Acquire);
+            let seq = val >> SEQ_SHIFT;
+            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos).wrapping_add(1) as i8);
+
+            match test_dbg!(dif).cmp(&0) {
+                cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
+                    return Err(TryRecvError::Closed)
+                }
+                cmp::Ordering::Less => return Err(TryRecvError::Empty),
+                cmp::Ordering::Equal => match test_dbg!(self.dequeue_pos.compare_exchange_weak(
+                    head,
+                    head.wrapping_add(POS_ONE),
+                    AcqRel,
+                    Acquire,
+                )) {
+                    Ok(_) => {
+                        slot.store(val.wrapping_add(SEQ_ONE), Release);
+                        return Ok(Reservation {
+                            core: self,
+                            idx: (val & MASK) as u8,
+                        });
+                    }
+                    Err(actual) => head = actual,
+                },
+                cmp::Ordering::Greater => head = test_dbg!(self.dequeue_pos.load(Acquire)),
+            }
+        }
+    }
+
+    fn commit_send(&self, idx: u8) -> Result<(), SendError<(), E>> {
+        test_span!("Core::commit_send", idx);
+        debug_assert!(idx as u16 <= MASK);
+        let mut tail = test_dbg!(self.enqueue_pos.load(Acquire));
+        loop {
+            // Shift one bit to the right to extract the actual position, and
+            // discard the `CLOSED` bit.
+            let pos = tail >> 1;
+            let slot = &self.queue[test_dbg!(pos & MASK) as usize];
+            let seq = slot.load(Acquire) >> SEQ_SHIFT;
+            let dif = test_dbg!(seq as i8).wrapping_sub(test_dbg!(pos as i8));
+
+            match test_dbg!(dif).cmp(&0) {
+                cmp::Ordering::Less => unreachable!(),
+                cmp::Ordering::Equal => match test_dbg!(self.enqueue_pos.compare_exchange_weak(
+                    tail,
+                    tail.wrapping_add(POS_ONE),
+                    AcqRel,
+                    Acquire,
+                )) {
+                    Ok(_) => {
+                        let new = test_dbg!(test_dbg!((pos) << SEQ_SHIFT).wrapping_add(SEQ_ONE));
+                        slot.store(test_dbg!(idx as u16 | new), Release);
+                        test_dbg!(self.cons_wait.wake());
+                        return Ok(());
+                    }
+                    Err(actual) => tail = actual,
+                },
+                cmp::Ordering::Greater => tail = test_dbg!(self.enqueue_pos.load(Acquire)),
+            }
+        }
+    }
+
+    fn send_closed_error(&self) -> Option<E> {
+        if test_dbg!(self.enqueue_pos.load(Acquire) & CLOSED_ERROR) == CLOSED_ERROR {
+            Some(unsafe { self.close_error() })
+        } else {
+            None
+        }
+    }
+
+    unsafe fn close_error(&self) -> E {
+        // debug_assert!(self.enqueue_pos.load(Acquire) & CLOSED_ERROR == CLOSED_ERROR);
+        self.error
+            .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() })
+    }
+}
+
 // === impl Reservation ===
 
-impl Reservation<'_> {
-    pub(super) fn commit_send(self) {
+impl<E: Clone> Reservation<'_, E> {
+    pub(super) fn commit_send(self) -> Result<(), SendError<(), E>> {
         // don't run the destructor that frees the index, since we are dropping
         // the cell...
         let this = ManuallyDrop::new(self);
         // ...and commit to the queue.
-        this.core.commit_send(this.idx);
+        this.core.commit_send(this.idx)
     }
 }
 
-impl Drop for Reservation<'_> {
+impl<E> Drop for Reservation<'_, E> {
     fn drop(&mut self) {
         unsafe { self.core.uncommit(self.idx) }
     }
 }
 
-impl fmt::Debug for Reservation<'_> {
+impl<E> fmt::Debug for Reservation<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { core, idx } = self;
         f.debug_struct("Reservation")
@@ -514,8 +555,8 @@ impl ErasedSlice {
 
 // == impl ErasedPipe ===
 
-impl ErasedPipe {
-    pub(super) unsafe fn new(ptr: *const (), vtable: &'static CoreVtable) -> Self {
+impl<E> ErasedPipe<E> {
+    pub(super) unsafe fn new(ptr: *const (), vtable: &'static CoreVtable<E>) -> Self {
         Self { ptr, vtable }
     }
 
@@ -523,14 +564,14 @@ impl ErasedPipe {
     ///
     /// This `ErasedPipe` must have been type-erased from a tricky-pipe with
     /// elements of type `T`!
-    pub(super) unsafe fn typed<T>(self) -> TypedPipe<T> {
+    pub(super) unsafe fn typed<T>(self) -> TypedPipe<T, E> {
         TypedPipe {
             pipe: self,
             _t: PhantomData,
         }
     }
 
-    pub(super) fn core(&self) -> &Core {
+    pub(super) fn core(&self) -> &Core<E> {
         unsafe { &*(self.vtable.get_core)(self.ptr) }
     }
 
@@ -549,7 +590,7 @@ impl ErasedPipe {
     }
 }
 
-impl Clone for ErasedPipe {
+impl<E> Clone for ErasedPipe<E> {
     fn clone(&self) -> Self {
         unsafe { (self.vtable.clone)(self.ptr) }
         Self {
@@ -559,21 +600,21 @@ impl Clone for ErasedPipe {
     }
 }
 
-impl Drop for ErasedPipe {
+impl<E> Drop for ErasedPipe<E> {
     fn drop(&mut self) {
         unsafe { (self.vtable.drop)(self.ptr) }
     }
 }
 
 // Safety: a pipe's element type must be `Send` in order to be erased.
-unsafe impl Send for ErasedPipe {}
+unsafe impl<E: Send + Sync> Send for ErasedPipe<E> {}
 // Safety: a pipe's element type must be `Send` in order to be erased.
-unsafe impl Sync for ErasedPipe {}
+unsafe impl<E: Send + Sync> Sync for ErasedPipe<E> {}
 
 // === impl TypedPipe ===
 
-impl<T: 'static> TypedPipe<T> {
-    pub(super) fn core(&self) -> &Core {
+impl<T: 'static, E> TypedPipe<T, E> {
+    pub(super) fn core(&self) -> &Core<E> {
         self.pipe.core()
     }
 
@@ -586,7 +627,7 @@ impl<T: 'static> TypedPipe<T> {
     }
 }
 
-impl<T: 'static> Clone for TypedPipe<T> {
+impl<T: 'static, E> Clone for TypedPipe<T, E> {
     fn clone(&self) -> Self {
         Self {
             pipe: self.pipe.clone(),
@@ -595,8 +636,8 @@ impl<T: 'static> Clone for TypedPipe<T> {
     }
 }
 
-unsafe impl<T: Send> Send for TypedPipe<T> {}
-unsafe impl<T: Send> Sync for TypedPipe<T> {}
+unsafe impl<T: Send, E: Send + Sync> Send for TypedPipe<T, E> {}
+unsafe impl<T: Send, E: Send + Sync> Sync for TypedPipe<T, E> {}
 
 // === impl SerVtable ===
 

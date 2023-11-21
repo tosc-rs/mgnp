@@ -37,16 +37,16 @@ pub use self::arc_impl::*;
 ///
 /// A `Receiver` for a channel can be obtained using the
 /// [`StaticTrickyPipe::receiver`] and [`TrickyPipe::receiver`] methods.
-pub struct Receiver<T: 'static> {
-    pipe: TypedPipe<T>,
+pub struct Receiver<T: 'static, E: 'static = ()> {
+    pipe: TypedPipe<T, E>,
 }
 
 /// Sends `T`-typed values to an associated [`Receiver`]s or [`SerReceiver`].
 ///
 /// A `Sender` for a channel can be obtained using the
 /// [`StaticTrickyPipe::sender`] and [`TrickyPipe::sender`] methods.
-pub struct Sender<T: 'static> {
-    pipe: TypedPipe<T>,
+pub struct Sender<T: 'static, E: 'static = ()> {
+    pipe: TypedPipe<T, E>,
 }
 
 /// Receives serialized values from associated [`Sender`]s or [`DeserSender`]s.
@@ -55,8 +55,8 @@ pub struct Sender<T: 'static> {
 /// [`StaticTrickyPipe::ser_receiver`] and [`TrickyPipe::ser_receiver`] methods,
 /// when the channel's message type implements [`Serialize`]. Messages may be
 /// sent as typed values by a [`Sender`], or as serialized bytes by a [`DeserSender`].
-pub struct SerReceiver {
-    pipe: ErasedPipe,
+pub struct SerReceiver<E: 'static = ()> {
+    pipe: ErasedPipe<E>,
     vtable: &'static SerVtable,
 }
 
@@ -67,8 +67,8 @@ pub struct SerReceiver {
 /// when the channel's message type implements [`DeserializeOwned`]. Messages may be
 /// received as deserialized typed values by a [`Receiver`], or as serialized
 /// bytes by a [`SerReceiver`].
-pub struct DeserSender {
-    pipe: ErasedPipe,
+pub struct DeserSender<E: 'static = ()> {
+    pipe: ErasedPipe<E>,
     vtable: &'static DeserVtable,
 }
 
@@ -77,8 +77,8 @@ pub struct DeserSender {
 /// See [the method documentation for `recv`](Receiver::recv) for details.
 #[must_use = "futures do nothing unless `.await`ed or `poll`ed"]
 #[derive(Debug)]
-pub struct Recv<'rx, T: 'static> {
-    rx: &'rx Receiver<T>,
+pub struct Recv<'rx, T: 'static, E: 'static = ()> {
+    rx: &'rx Receiver<T, E>,
 }
 
 /// Future returned by [`SerReceiver::recv`].
@@ -86,8 +86,8 @@ pub struct Recv<'rx, T: 'static> {
 /// See [the method documentation for `recv`](SerReceiver::recv) for details.
 #[must_use = "futures do nothing unless `.await`ed or `poll`ed"]
 #[derive(Debug)]
-pub struct SerRecv<'rx> {
-    rx: &'rx SerReceiver,
+pub struct SerRecv<'rx, E: 'static = ()> {
+    rx: &'rx SerReceiver<E>,
 }
 
 /// A reference to a type-erased, serializable message received from a
@@ -108,8 +108,8 @@ pub struct SerRecv<'rx> {
 /// [`to_vec_framed`]: Self::to_vec_framed
 #[must_use = "a `SerRecvRef` does nothing unless the `to_slice`, \
     `to_slice_framed`, `to_vec`, or `to_vec_framed` methods are called"]
-pub struct SerRecvRef<'pipe> {
-    res: Reservation<'pipe>,
+pub struct SerRecvRef<'pipe, E: 'static = ()> {
+    res: Reservation<'pipe, E>,
     elems: ErasedSlice,
     vtable: &'static SerVtable,
 }
@@ -135,10 +135,10 @@ pub struct SerRecvRef<'pipe> {
 /// [`commit`]: Self::commit
 #[must_use = "a `Permit` does nothing unless the `send` or `commit` \
               methods are called"]
-pub struct Permit<'core, T> {
+pub struct Permit<'core, T, E> {
     // load bearing drop ordering lol lmao
     cell: cell::MutPtr<MaybeUninit<T>>,
-    pipe: Reservation<'core>,
+    pipe: Reservation<'core, E>,
 }
 
 /// A permit to send a single serialized value to a channel.
@@ -156,8 +156,8 @@ pub struct Permit<'core, T> {
 /// [`send_framed`]: Self::send_framed
 #[must_use = "a `SerPermit` does nothing unless the `send` or `send_framed` '
               methods are called"]
-pub struct SerPermit<'core> {
-    res: Reservation<'core>,
+pub struct SerPermit<'core, E> {
+    res: Reservation<'core, E>,
     elems: ErasedSlice,
     vtable: &'static DeserVtable,
 }
@@ -166,7 +166,10 @@ type Cell<T> = UnsafeCell<MaybeUninit<T>>;
 
 // === impl Receiver ===
 
-impl<T> Receiver<T> {
+impl<T, E> Receiver<T, E>
+where
+    E: Clone,
+{
     /// Attempts to receive the next message from the channel, without waiting
     /// for a new message to be sent.
     ///
@@ -186,7 +189,7 @@ impl<T> Receiver<T> {
     ///   messages sent before the channel closed have already been received.
     /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
     ///   messages in the queue, but the channel has not been closed.
-    pub fn try_recv(&self) -> Result<T, TryRecvError> {
+    pub fn try_recv(&self) -> Result<T, TryRecvError<E>> {
         self.pipe
             .core()
             .try_dequeue()
@@ -222,22 +225,22 @@ impl<T> Receiver<T> {
     /// complete, and another future completes first, it is guaranteed that no
     /// message will be received from the channel.
     #[inline]
-    pub fn recv(&self) -> Recv<'_, T> {
+    pub fn recv(&self) -> Recv<'_, T, E> {
         Recv { rx: self }
     }
 
     /// Polls to receive a message from the channel, returning [`Poll::Ready`]
     /// if a message has been recieved, or [`Poll::Pending`] if there are
     /// currently no messages in the channel.
-    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError<E>>> {
         self.pipe
             .core()
             .poll_dequeue(cx)
-            .map(|res| Some(self.take_value(res?)))
+            .map(|res| Ok(self.take_value(res?)))
     }
 
     #[inline(always)]
-    fn take_value(&self, res: Reservation<'_>) -> T {
+    fn take_value(&self, res: Reservation<'_, E>) -> T {
         self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() })
     }
 
@@ -300,39 +303,47 @@ impl<T> Receiver<T> {
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T, E> Drop for Receiver<T, E> {
     fn drop(&mut self) {
         self.pipe.core().close_rx();
     }
 }
 
-impl<T> fmt::Debug for Receiver<T> {
+impl<T, E> fmt::Debug for Receiver<T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("Receiver"))
     }
 }
 
-impl<T> futures::Stream for &'_ Receiver<T> {
-    type Item = T;
+impl<T, E: Clone> futures::Stream for &'_ Receiver<T, E> {
+    type Item = Result<T, E>;
 
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.as_ref().get_ref().poll_recv(cx)
+        self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
+            Ok(res) => Some(Ok(res)),
+            Err(RecvError::Closed) => None,
+            Err(RecvError::Error(error)) => Some(Err(error)),
+        })
     }
 }
 
-impl<T> futures::Stream for Receiver<T> {
-    type Item = T;
+impl<T, E: Clone> futures::Stream for Receiver<T, E> {
+    type Item = Result<T, E>;
 
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.as_ref().get_ref().poll_recv(cx)
+        self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
+            Ok(res) => Some(Ok(res)),
+            Err(RecvError::Closed) => None,
+            Err(RecvError::Error(error)) => Some(Err(error)),
+        })
     }
 }
 
 // === impl SerReceiver ===
 
-impl SerReceiver {
+impl<E: Clone> SerReceiver<E> {
     /// Attempts to receive the serialized representation of next message from
     /// the channel, without waiting for a new message to be sent if none are
     /// available.
@@ -361,7 +372,7 @@ impl SerReceiver {
     ///   messages in the queue, but the channel has not been closed.
     ///
     /// [`Vec`]: alloc::vec::Vec
-    pub fn try_recv(&self) -> Result<SerRecvRef<'_>, TryRecvError> {
+    pub fn try_recv(&self) -> Result<SerRecvRef<'_, E>, TryRecvError<E>> {
         let res = self.pipe.core().try_dequeue()?;
         Ok(SerRecvRef {
             res,
@@ -414,16 +425,16 @@ impl SerReceiver {
     /// message will be received from the channel.
     ///
     /// [`Vec`]: alloc::vec::Vec
-    pub fn recv(&self) -> SerRecv<'_> {
+    pub fn recv(&self) -> SerRecv<'_, E> {
         SerRecv { rx: self }
     }
 
     /// Polls to receive a serialized message from the channel, returning
     /// [`Poll::Ready`] if a message has been recieved, or [`Poll::Pending`] if
     /// there are currently no messages in the channel.
-    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<SerRecvRef<'_>>> {
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<SerRecvRef<'_, E>, RecvError<E>>> {
         self.pipe.core().poll_dequeue(cx).map(|res| {
-            Some(SerRecvRef {
+            Ok(SerRecvRef {
                 res: res?,
                 elems: self.pipe.elems(),
                 vtable: self.vtable,
@@ -490,31 +501,35 @@ impl SerReceiver {
     }
 }
 
-impl Drop for SerReceiver {
+impl<E> Drop for SerReceiver<E> {
     fn drop(&mut self) {
         self.pipe.core().close_rx();
     }
 }
 
-impl fmt::Debug for SerReceiver {
+impl<E> fmt::Debug for SerReceiver<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("SerReceiver"))
     }
 }
 
-impl<'rx> futures::Stream for &'rx SerReceiver {
-    type Item = SerRecvRef<'rx>;
+impl<'rx, E: Clone> futures::Stream for &'rx SerReceiver<E> {
+    type Item = Result<SerRecvRef<'rx, E>, E>;
 
     #[inline]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.as_ref().get_ref().poll_recv(cx)
+        self.as_ref().get_ref().poll_recv(cx).map(|res| match res {
+            Ok(res) => Some(Ok(res)),
+            Err(RecvError::Closed) => None,
+            Err(RecvError::Error(error)) => Some(Err(error)),
+        })
     }
 }
 
 // === impl Recv ===
 
-impl<T: 'static> Future for Recv<'_, T> {
-    type Output = Option<T>;
+impl<T: 'static, E: Clone> Future for Recv<'_, T, E> {
+    type Output = Result<T, RecvError<E>>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -524,8 +539,8 @@ impl<T: 'static> Future for Recv<'_, T> {
 
 // === impl SerRecv ===
 
-impl<'rx> Future for SerRecv<'rx> {
-    type Output = Option<SerRecvRef<'rx>>;
+impl<'rx, E: Clone> Future for SerRecv<'rx, E> {
+    type Output = Result<SerRecvRef<'rx, E>, RecvError<E>>;
 
     #[inline]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -535,7 +550,7 @@ impl<'rx> Future for SerRecv<'rx> {
 
 // === impl SerRecvRef ===
 
-impl SerRecvRef<'_> {
+impl<E> SerRecvRef<'_, E> {
     /// Attempt to serialize the received item into the provided buffer
     ///
     /// This function will fail if the provided buffer was too small.
@@ -564,7 +579,7 @@ impl SerRecvRef<'_> {
     }
 }
 
-impl fmt::Debug for SerRecvRef<'_> {
+impl<E> fmt::Debug for SerRecvRef<'_, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             res,
@@ -578,7 +593,7 @@ impl fmt::Debug for SerRecvRef<'_> {
     }
 }
 
-impl Drop for SerRecvRef<'_> {
+impl<E> Drop for SerRecvRef<'_, E> {
     fn drop(&mut self) {
         let Self { res, elems, vtable } = self;
         unsafe {
@@ -593,15 +608,15 @@ impl Drop for SerRecvRef<'_> {
 // Safety: this is safe, because a `SerRecvRef` can only be constructed by a
 // `SerReceiver`, and `SerReceiver`s may only be constructed for a pipe whose
 // messages are `Send`.
-unsafe impl Send for SerRecvRef<'_> {}
+unsafe impl<E: Send + Sync> Send for SerRecvRef<'_, E> {}
 // Safety: this is safe, because a `SerRecvRef` can only be constructed by a
 // `SerReceiver`, and `SerReceiver`s may only be constructed for a pipe whose
 // messages are `Send`.
-unsafe impl Sync for SerRecvRef<'_> {}
+unsafe impl<E: Send + Sync> Sync for SerRecvRef<'_, E> {}
 
 // === impl DeserSender ===
 
-impl DeserSender {
+impl<E: Clone> DeserSender<E> {
     /// Reserve capacity to send a serialized message to the channel.
     ///
     /// If the channel is currently at capacity, this method waits until
@@ -636,7 +651,7 @@ impl DeserSender {
     /// This channel uses a queue to ensure that calls to `send` and `reserve`
     /// complete in the order they were requested. Cancelling a call to
     /// `reserve` causes the caller to lose its place in that queue.
-    pub async fn reserve(&self) -> Result<SerPermit<'_>, SendError<()>> {
+    pub async fn reserve(&self) -> Result<SerPermit<'_, E>, SendError<E>> {
         self.pipe.core().reserve().await.map(|res| SerPermit {
             res,
             elems: self.pipe.elems(),
@@ -677,7 +692,7 @@ impl DeserSender {
     ///   have capacity to send another message without waiting. A subsequent
     ///   call to `try_reserve` may complete successfully, once capacity has
     ///   become available again.
-    pub fn try_reserve(&self) -> Result<SerPermit<'_>, TrySendError> {
+    pub fn try_reserve(&self) -> Result<SerPermit<'_, E>, TrySendError<E>> {
         self.pipe.core().try_reserve().map(|res| SerPermit {
             res,
             elems: self.pipe.elems(),
@@ -694,7 +709,7 @@ impl DeserSender {
     ///
     /// This is equivalent to calling [DeserSender::try_reserve] followed by
     /// [SerPermit::send].
-    pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
+    pub fn try_send(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError<E>> {
         self.try_reserve()
             .map_err(SerTrySendError::Send)?
             .send(bytes)
@@ -710,7 +725,7 @@ impl DeserSender {
     ///
     /// This is equivalent to calling [DeserSender::try_reserve] followed by
     /// [SerPermit::send_framed].
-    pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError> {
+    pub fn try_send_framed(&self, bytes: impl AsRef<[u8]>) -> Result<(), SerTrySendError<E>> {
         self.try_reserve()
             .map_err(SerTrySendError::Send)?
             .send_framed(bytes)
@@ -809,7 +824,7 @@ impl DeserSender {
     }
 }
 
-impl Clone for DeserSender {
+impl<E> Clone for DeserSender<E> {
     fn clone(&self) -> Self {
         self.pipe.core().add_tx();
         Self {
@@ -819,20 +834,20 @@ impl Clone for DeserSender {
     }
 }
 
-impl Drop for DeserSender {
+impl<E> Drop for DeserSender<E> {
     fn drop(&mut self) {
         self.pipe.core().drop_tx();
     }
 }
 
-impl fmt::Debug for DeserSender {
+impl<E> fmt::Debug for DeserSender<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("DeserSender"))
     }
 }
 // === impl SerPermit ===
 
-impl SerPermit<'_> {
+impl<E: Clone> SerPermit<'_, E> {
     /// Attempt to send the given bytes
     ///
     /// This will attempt to deserialize the bytes into the reservation, consuming
@@ -865,15 +880,15 @@ impl SerPermit<'_> {
 // Safety: this is safe, because a `SerPermit` can only be constructed by a
 // `SerSender`, and `SerSender`s may only be constructed for a pipe whose
 // messages are `Send`.
-unsafe impl Send for SerPermit<'_> {}
+unsafe impl<E: Send + Sync> Send for SerPermit<'_, E> {}
 // Safety: this is safe, because a `SerPermit` can only be constructed by a
 // `SerSender`, and `SerSender`s may only be constructed for a pipe whose
 // messages are `Send`.
-unsafe impl Sync for SerPermit<'_> {}
+unsafe impl<E: Send + Sync> Sync for SerPermit<'_, E> {}
 
 // === impl Sender ===
 
-impl<T> Sender<T> {
+impl<T, E: Clone> Sender<T, E> {
     /// Send a `T`-typed message to the channel.
     ///
     /// If the channel is currently at capacity, this method waits until
@@ -899,13 +914,13 @@ impl<T> Sender<T> {
     /// This channel uses a queue to ensure that calls to `send` and `reserve`
     /// complete in the order they were requested. Cancelling a call to
     /// `send` causes the caller to lose its place in that queue.
-    pub async fn send(&self, message: T) -> Result<(), SendError<T>> {
+    pub async fn send(&self, message: T) -> Result<(), SendError<E, T>> {
         match self.reserve().await {
             Ok(permit) => {
                 permit.send(message);
                 Ok(())
             }
-            Err(_) => Err(SendError(message)),
+            Err(err) => Err(err.with_message(message)),
         }
     }
 
@@ -934,14 +949,13 @@ impl<T> Sender<T> {
     /// [`send`]: Self::send
     /// [`reserve`]: Self::reserve
     /// [`try_reserve`]: Self::try_reserve
-    pub fn try_send(&self, message: T) -> Result<(), TrySendError<T>> {
+    pub fn try_send(&self, message: T) -> Result<(), TrySendError<E, T>> {
         match self.try_reserve() {
             Ok(permit) => {
                 permit.send(message);
                 Ok(())
             }
-            Err(TrySendError::Closed(())) => Err(TrySendError::Closed(message)),
-            Err(TrySendError::Full(())) => Err(TrySendError::Full(message)),
+            Err(e) => Err(e.with_message(message)),
         }
     }
 
@@ -979,7 +993,7 @@ impl<T> Sender<T> {
     /// This channel uses a queue to ensure that calls to `send` and `reserve`
     /// complete in the order they were requested. Cancelling a call to
     /// `reserve` causes the caller to lose its place in that queue.
-    pub async fn reserve(&self) -> Result<Permit<'_, T>, SendError> {
+    pub async fn reserve(&self) -> Result<Permit<'_, T, E>, SendError<E>> {
         let pipe = self.pipe.core().reserve().await?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(Permit { cell, pipe })
@@ -1018,7 +1032,7 @@ impl<T> Sender<T> {
     ///   have capacity to send another message without waiting. A subsequent
     ///   call to `try_reserve` may complete successfully, once capacity has
     ///   become available again.
-    pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError> {
+    pub fn try_reserve(&self) -> Result<Permit<'_, T, E>, TrySendError<E>> {
         let pipe = self.pipe.core().try_reserve()?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(Permit { cell, pipe })
@@ -1082,7 +1096,7 @@ impl<T> Sender<T> {
     }
 }
 
-impl<T: 'static> Clone for Sender<T> {
+impl<T: 'static, E> Clone for Sender<T, E> {
     fn clone(&self) -> Self {
         self.pipe.core().add_tx();
         Self {
@@ -1091,13 +1105,13 @@ impl<T: 'static> Clone for Sender<T> {
     }
 }
 
-impl<T: 'static> Drop for Sender<T> {
+impl<T: 'static, E> Drop for Sender<T, E> {
     fn drop(&mut self) {
         self.pipe.core().drop_tx();
     }
 }
 
-impl<T: 'static> fmt::Debug for Sender<T> {
+impl<T: 'static, E> fmt::Debug for Sender<T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.pipe.fmt_into(&mut f.debug_struct("Sender"))
     }
@@ -1105,7 +1119,7 @@ impl<T: 'static> fmt::Debug for Sender<T> {
 
 // === impl Permit ===
 
-impl<T> Permit<'_, T> {
+impl<T, E: Clone> Permit<'_, T, E> {
     /// Write the given value into the [Permit], and send it
     ///
     /// This makes the data available to the [Receiver].
@@ -1145,20 +1159,20 @@ impl<T> Permit<'_, T> {
     }
 }
 
-impl<T> fmt::Debug for Permit<'_, T> {
+impl<T, E> fmt::Debug for Permit<'_, T, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Permit").field(&self.pipe).finish()
     }
 }
 
-impl<T> Deref for Permit<'_, T> {
+impl<T, E> Deref for Permit<'_, T, E> {
     type Target = MaybeUninit<T>;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.cell.deref() }
     }
 }
 
-impl<T> DerefMut for Permit<'_, T> {
+impl<T, E> DerefMut for Permit<'_, T, E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.cell.deref() }
     }
@@ -1166,8 +1180,8 @@ impl<T> DerefMut for Permit<'_, T> {
 
 // Safety: a `Permit` allows referencing a `T`, so it's morally equivalent to a
 // reference: a `Permit` is `Send` if `T` is `Send + Sync`.
-unsafe impl<T: Send + Sync> Send for Permit<'_, T> {}
+unsafe impl<T: Send + Sync, E: Send + Sync> Send for Permit<'_, T, E> {}
 
 // Safety: a `Permit` allows referencing a `T`, so it's morally equivalent to a
 // reference: a `Permit` is `Sync` if `T` is `Sync`.
-unsafe impl<T: Sync> Sync for Permit<'_, T> {}
+unsafe impl<T: Sync, E: Send + Sync> Sync for Permit<'_, T, E> {}

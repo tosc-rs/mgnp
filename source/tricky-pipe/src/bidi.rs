@@ -55,22 +55,22 @@ where
         (self.tx, self.rx)
     }
 
-    /// Wait until the channel is either ready to send a message *or* a new
-    /// incoming message is received, whichever occurs first.
-    #[must_use]
-    pub async fn wait(&self) -> Option<Event<In, Permit<'_, Out>>> {
-        futures::select_biased! {
-            res = self.tx.reserve().fuse() => {
-                match res {
-                    Ok(permit) => Some(Event::SendReady(permit)),
-                    Err(_) => self.rx.recv().await.map(Event::Recv),
-                }
-            }
-            recv = self.rx.recv().fuse() => {
-                recv.map(Event::Recv)
-            }
-        }
-    }
+    // /// Wait until the channel is either ready to send a message *or* a new
+    // /// incoming message is received, whichever occurs first.
+    // #[must_use]
+    // pub async fn wait(&self) -> Option<Event<In, Permit<'_, Out, ()>>> {
+    //     futures::select_biased! {
+    //         res = self.tx.reserve().fuse() => {
+    //             match res {
+    //                 Ok(permit) => Some(Event::SendReady(permit)),
+    //                 Err(_) => self.rx.recv().await.map(Event::Recv),
+    //             }
+    //         }
+    //         recv = self.rx.recv().fuse() => {
+    //             recv.map(Event::Recv)
+    //         }
+    //     }
+    // }
 
     /// Borrows the **send half** of this bidirectional channel.
     ///
@@ -149,22 +149,22 @@ impl SerBiDi {
         (self.tx, self.rx)
     }
 
-    /// Wait until the channel is either ready to send a message *or* a new
-    /// incoming message is received, whichever occurs first.
-    #[must_use]
-    pub async fn wait(&self) -> Option<Event<SerRecvRef<'_>, SerPermit<'_>>> {
-        futures::select_biased! {
-            res = self.tx.reserve().fuse() => {
-                match res {
-                    Ok(permit) => Some(Event::SendReady(permit)),
-                    Err(_) => self.rx.recv().await.map(Event::Recv),
-                }
-            }
-            recv = self.rx.recv().fuse() => {
-                recv.map(Event::Recv)
-            }
-        }
-    }
+    // /// Wait until the channel is either ready to send a message *or* a new
+    // /// incoming message is received, whichever occurs first.
+    // #[must_use]
+    // pub async fn wait(&self) -> Option<Event<SerRecvRef<'_>, SerPermit<'_, ()>>> {
+    //     futures::select_biased! {
+    //         res = self.tx.reserve().fuse() => {
+    //             match res {
+    //                 Ok(permit) => Some(Event::SendReady(permit)),
+    //                 Err(_) => self.rx.recv().await.map(Event::Recv),
+    //             }
+    //         }
+    //         recv = self.rx.recv().fuse() => {
+    //             recv.map(Event::Recv)
+    //         }
+    //     }
+    // }
 
     /// Borrows the **send half** of this bidirectional channel.
     ///

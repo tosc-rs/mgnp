@@ -21,7 +21,18 @@ use core::fmt;
 /// [`DeserSender::reserve`]: super::DeserSender::reserve
 /// [`Sender::send`]: super::Sender::send
 #[derive(Eq, PartialEq)]
-pub struct SendError<T = ()>(pub(crate) T);
+pub enum SendError<E, T = ()> {
+    /// A message cannot be sent because the channel is closed (no [`Receiver`]
+    /// or [`SerReceiver`] exists).
+    ///
+    /// [`Receiver`]: super::Receiver
+    /// [`SerReceiver`]: super::SerReceiver
+    Closed(T),
+    Error {
+        message: T,
+        error: E,
+    },
+}
 
 /// Error returned by [`Sender::try_reserve`], [`Sender::try_send`], and
 /// [`DeserSender::try_reserve`].
@@ -35,7 +46,7 @@ pub struct SendError<T = ()>(pub(crate) T);
 /// [`DeserSender::try_reserve`]: super::DeserSender::try_reserve
 /// [`Sender::try_send`]: super::Sender::try_send
 #[derive(Eq, PartialEq)]
-pub enum TrySendError<T = ()> {
+pub enum TrySendError<E, T = ()> {
     /// The channel is currently full, and a message cannot be sent without
     /// waiting for a slot to become available.
     Full(T),
@@ -45,6 +56,10 @@ pub enum TrySendError<T = ()> {
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
     Closed(T),
+    Error {
+        message: T,
+        error: E,
+    },
 }
 
 /// Errors returned by [`Receiver::try_recv`] and [`SerReceiver::try_recv`].
@@ -52,7 +67,7 @@ pub enum TrySendError<T = ()> {
 /// [`Receiver::try_recv`]: super::Receiver::try_recv
 /// [`SerReceiver::try_recv`]: super::SerReceiver::try_recv
 #[derive(Debug, Eq, PartialEq)]
-pub enum TryRecvError {
+pub enum TryRecvError<E> {
     /// No messages are currently present in the channel. The receiver must wait
     /// for an additional message to be sent.
     Empty,
@@ -64,6 +79,7 @@ pub enum TryRecvError {
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
     Closed,
+    Error(E),
 }
 
 /// Errors returned by [`Receiver::recv`] and [`SerReceiver::recv`].
@@ -71,7 +87,7 @@ pub enum TryRecvError {
 /// [`Receiver::recv`]: super::Receiver::recv
 /// [`SerReceiver::recv`]: super::SerReceiver::recv
 #[derive(Debug, Eq, PartialEq)]
-pub enum RecvError {
+pub enum RecvError<E> {
     /// A message cannot be received because channel is closed.
     ///
     /// This indicates that no [`Sender`]s or [`DeserSender`]s exist, and all
@@ -80,6 +96,7 @@ pub enum RecvError {
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
     Closed,
+    Error(E),
 }
 
 /// Errors returned by [`DeserSender::send`] and [`DeserSender::send_framed`].
@@ -105,9 +122,9 @@ pub enum SerSendError {
 /// [`DeserSender::try_send`]: super::DeserSender::try_send
 /// [`DeserSender::try_send_framed`]: super::DeserSender::send_framed
 #[derive(Debug, Eq, PartialEq)]
-pub enum SerTrySendError {
+pub enum SerTrySendError<E> {
     /// The channel is [`Closed`](TrySendError::Closed) or [`Full`](TrySendError::Full).
-    Send(TrySendError),
+    Send(TrySendError<E>),
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
@@ -115,40 +132,69 @@ pub enum SerTrySendError {
 
 // === impl SendError ===
 
-impl<T> SendError<T> {
+impl<E, T> SendError<E, T> {
     /// Obtain the `T` that failed to send, discarding the "kind" of [`SendError`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
-        self.0
+        match self {
+            Self::Closed(msg) => msg,
+            Self::Error { message, .. } => message,
+        }
+    }
+
+    pub(crate) fn with_message<M>(self, message: M) -> SendError<E, M> {
+        match self {
+            Self::Closed(_) => SendError::Closed(message),
+            Self::Error { error, .. } => SendError::Error { message, error },
+        }
     }
 }
 
-impl<T> fmt::Debug for SendError<T> {
+impl<E: fmt::Debug, T> fmt::Debug for SendError<E, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SendError").finish_non_exhaustive()
+        match self {
+            Self::Closed(_) => f.debug_tuple("SendError::Closed").finish(),
+            Self::Error { error, .. } => f
+                .debug_struct("SendError::Error")
+                .field("error", &error)
+                .finish_non_exhaustive(),
+        }
     }
 }
 
 // === impl TrySendError ===
 
-impl<T> TrySendError<T> {
+impl<E, T> TrySendError<E, T> {
     /// Obtain the `T` that failed to send, discarding the "kind" of [`TrySendError`].
     #[inline]
     #[must_use]
     pub fn into_inner(self) -> T {
         match self {
-            TrySendError::Closed(t) => t,
-            TrySendError::Full(t) => t,
+            Self::Closed(inner) => inner,
+            Self::Full(t) => t,
+            Self::Error { message, .. } => message,
+        }
+    }
+
+    pub(crate) fn with_message<M>(self, message: M) -> TrySendError<E, M> {
+        match self {
+            Self::Closed(_) => TrySendError::Closed(message),
+            Self::Full(_) => TrySendError::Full(message),
+            Self::Error { error, .. } => TrySendError::Error { message, error },
         }
     }
 }
 
-impl<T> fmt::Debug for TrySendError<T> {
+impl<E: fmt::Debug, T> fmt::Debug for TrySendError<E, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Closed(_) => f.write_str("Closed(..)"),
-            Self::Full(_) => f.write_str("Full(..)"),
+            Self::Closed(_) => f.debug_tuple("TrySendError::Closed").finish(),
+            Self::Full(_) => f.debug_tuple("TrySendError::Full").finish(),
+            Self::Error { error, .. } => f
+                .debug_struct("TrySendError::Error")
+                .field("error", &error)
+                .finish_non_exhaustive(),
         }
     }
 }

@@ -92,16 +92,16 @@ mod trait_impls {
 
     #[test]
     fn permit() {
-        assert_send::<Permit<'_, UnSerStruct>>();
-        assert_sync::<Permit<'_, UnSerStruct>>();
-        assert_unpin::<Permit<'_, UnSerStruct>>();
+        assert_send::<Permit<'_, UnSerStruct, ()>>();
+        assert_sync::<Permit<'_, UnSerStruct, ()>>();
+        assert_unpin::<Permit<'_, UnSerStruct, ()>>();
     }
 
     #[test]
     fn ser_permit() {
-        assert_send::<SerPermit<'_>>();
-        assert_sync::<SerPermit<'_>>();
-        assert_unpin::<SerPermit<'_>>();
+        assert_send::<SerPermit<'_, ()>>();
+        assert_sync::<SerPermit<'_, ()>>();
+        assert_unpin::<SerPermit<'_, ()>>();
     }
 }
 
@@ -505,7 +505,7 @@ fn spsc_try_send_in_capacity() {
 
         future::block_on(async move {
             let mut i = 0;
-            while let Some(msg) = test_dbg!(rx.recv().await) {
+            while let Ok(msg) = test_dbg!(rx.recv().await) {
                 assert_eq!(msg.get_ref(), &i);
                 i += 1;
             }
@@ -532,7 +532,7 @@ fn spsc_send() {
 
         future::block_on(async move {
             let mut i = 0;
-            while let Some(msg) = rx.recv().await {
+            while let Ok(msg) = rx.recv().await {
                 assert_eq!(msg.get_ref(), &i);
                 i += 1;
             }
@@ -565,7 +565,7 @@ fn mpsc_send() {
 
         let recvs = future::block_on(async move {
             let mut recvs = std::collections::BTreeSet::new();
-            while let Some(msg) = rx.recv().await {
+            while let Ok(msg) = rx.recv().await {
                 let msg = msg.into_inner();
                 tracing::info!(received = msg);
                 assert!(
