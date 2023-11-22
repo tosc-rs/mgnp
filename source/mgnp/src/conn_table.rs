@@ -119,12 +119,6 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         .await
     }
 
-    pub(crate) async fn reset_all(&mut self) {
-        for entry in self.conns.iter_mut() {
-            if entry
-        }
-    }
-
     fn cleanup_dead(&mut self) {
         // receiving a data frame from the conn table borrows it, so we must
         // remove the dead index from the *previous* next_outbound call before
