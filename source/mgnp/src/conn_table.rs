@@ -6,10 +6,7 @@ use crate::{
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
 use tricky_pipe::{
     bidi::SerBiDi,
-    mpsc::{
-        error::{RecvError, SendError, SerSendError},
-        SerPermit,
-    },
+    mpsc::error::{RecvError, SerSendError},
     oneshot,
 };
 
