@@ -1,6 +1,6 @@
 use crate::{
     message::{OutboundFrame, Rejection, Reset},
-    registry::{self, Registry},
+    service::{self, Registry},
     tricky_pipe::{
         bidi::{BiDi, SerBiDi},
         mpsc::TrickyPipe,
@@ -21,7 +21,7 @@ mod integration;
 
 pub(crate) mod svcs {
     use super::*;
-    use crate::registry;
+    use crate::service;
     use uuid::{uuid, Uuid};
 
     pub struct HelloWorld;
@@ -41,7 +41,7 @@ pub(crate) mod svcs {
         pub world: String,
     }
 
-    impl registry::Service for HelloWorld {
+    impl service::Service for HelloWorld {
         type ClientMsg = HelloWorldRequest;
         type ServerMsg = HelloWorldResponse;
         type ConnectError = ();
@@ -51,7 +51,7 @@ pub(crate) mod svcs {
 
     pub struct HelloWithHello;
 
-    impl registry::Service for HelloWithHello {
+    impl service::Service for HelloWithHello {
         type ClientMsg = HelloWorldRequest;
         type ServerMsg = HelloWorldResponse;
         type ConnectError = ();
@@ -59,12 +59,12 @@ pub(crate) mod svcs {
         const UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
     }
 
-    pub fn hello_with_hello_id() -> registry::Identity {
-        registry::Identity::from_name::<HelloWithHello>("hello-hello")
+    pub fn hello_with_hello_id() -> service::Identity {
+        service::Identity::from_name::<HelloWithHello>("hello-hello")
     }
 
-    pub fn hello_world_id() -> registry::Identity {
-        registry::Identity::from_name::<HelloWorld>("hello-world")
+    pub fn hello_world_id() -> service::Identity {
+        service::Identity::from_name::<HelloWorld>("hello-world")
     }
 
     pub fn hello_req(hello: impl ToString) -> HelloWorldRequest {
@@ -319,7 +319,7 @@ where
 
 #[derive(Default, Clone)]
 pub struct TestRegistry {
-    svcs: Arc<RwLock<HashMap<registry::Identity, mpsc::Sender<InboundConnect>>>>,
+    svcs: Arc<RwLock<HashMap<service::Identity, mpsc::Sender<InboundConnect>>>>,
 }
 
 pub struct TestWire {
@@ -341,7 +341,7 @@ impl Registry for TestRegistry {
     #[tracing::instrument(level = tracing::Level::INFO, name = "Registry::connect", skip(self, hello),)]
     async fn connect(
         &self,
-        identity: registry::Identity,
+        identity: service::Identity,
         hello: &[u8],
     ) -> Result<SerBiDi<Reset>, Rejection> {
         let Some(svc) = self.svcs.read().unwrap().get(&identity).cloned() else {
@@ -372,7 +372,7 @@ impl Registry for TestRegistry {
 
 impl TestRegistry {
     #[tracing::instrument(level = tracing::Level::INFO, name = "Registry::add_service", skip(self),)]
-    pub fn add_service(&self, identity: registry::Identity) -> mpsc::Receiver<InboundConnect> {
+    pub fn add_service(&self, identity: service::Identity) -> mpsc::Receiver<InboundConnect> {
         let (tx, rx) = mpsc::channel(1);
         self.svcs.write().unwrap().insert(identity, tx);
         tracing::info!("REGISTRY: service added");
@@ -490,7 +490,7 @@ impl fmt::Debug for HexSlice<'_> {
 }
 
 #[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
-pub async fn connect_should_nak<S: registry::Service>(
+pub async fn connect_should_nak<S: service::Service>(
     connector: &mut crate::Connector<S>,
     name: &'static str,
     hello: S::Hello,
@@ -516,7 +516,7 @@ pub async fn connect_should_nak<S: registry::Service>(
 }
 
 #[tracing::instrument(level = tracing::Level::INFO, skip(connector, hello))]
-pub async fn connect<S: registry::Service>(
+pub async fn connect<S: service::Service>(
     connector: &mut crate::Connector<S>,
     name: &'static str,
     hello: S::Hello,

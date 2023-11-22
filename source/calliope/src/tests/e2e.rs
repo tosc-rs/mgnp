@@ -1,5 +1,5 @@
 use super::*;
-use crate::{message::Rejection, registry::Identity};
+use crate::{message::Rejection, service::Identity};
 use svcs::{HelloWorldRequest, HelloWorldResponse};
 
 #[tokio::test]

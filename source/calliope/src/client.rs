@@ -1,10 +1,10 @@
 use crate::{
     message::{Rejection, Reset},
-    registry, Service,
+    service, Service,
 };
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
-pub struct Connector<S: registry::Service> {
+pub struct Connector<S: Service> {
     pub(super) hello_sharer: serbox::Sharer<S::Hello>,
     pub(super) rsp: oneshot::Receiver<Result<(), Rejection>>,
     pub(super) tx: mpsc::Sender<OutboundConnect>,
@@ -13,7 +13,7 @@ pub struct Connector<S: registry::Service> {
 /// An outbound connect request.
 pub struct OutboundConnect {
     /// The identity of the remote service to connect to.
-    pub(crate) identity: registry::Identity,
+    pub(crate) identity: service::Identity,
     /// The "hello" message to send to the remote service.
     pub(crate) hello: serbox::Consumer,
     /// The local bidirectional channel to bind to the remote service.
@@ -30,7 +30,7 @@ pub enum ConnectError {
 
 pub type Connection<S> = bidi::BiDi<<S as Service>::ServerMsg, <S as Service>::ClientMsg, Reset>;
 
-pub struct Channels<S: registry::Service> {
+pub struct Channels<S: Service> {
     srv_chan: bidi::SerBiDi<Reset>,
     client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg, Reset>,
 }
@@ -63,7 +63,7 @@ impl<S: Service> Channels<S> {
 impl<S: Service> Connector<S> {
     pub async fn connect(
         &mut self,
-        identity: impl Into<registry::IdentityKind>,
+        identity: impl Into<service::IdentityKind>,
         hello: S::Hello,
         Channels {
             srv_chan,
@@ -78,7 +78,7 @@ impl<S: Service> Connector<S> {
         let hello = self.hello_sharer.share(hello).await;
         let rsp = self.rsp.sender().await.unwrap();
         let connect = OutboundConnect {
-            identity: registry::Identity::new::<S>(identity.into()),
+            identity: service::Identity::new::<S>(identity.into()),
             hello,
             channel: srv_chan,
             rsp,

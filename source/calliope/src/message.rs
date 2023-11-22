@@ -1,4 +1,4 @@
-use crate::{registry::Identity, Id, LinkId};
+use crate::{service::Identity, Id, LinkId};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use tricky_pipe::{mpsc::SerRecvRef, serbox};
@@ -100,7 +100,7 @@ pub enum Rejection {
     /// No service matching the [`Identity`] provided in the
     /// [`CONNECT`](Header::Connect) frame exists on the server.
     ///
-    /// This may indicate that the [`Service`](crate::registry::Service) UUID
+    /// This may indicate that the [`Service`](crate::service::Service) UUID
     /// does not match any service running on the server, or that no instance of
     /// that service with the provided identity does not exist.
     ///
@@ -109,11 +109,11 @@ pub enum Rejection {
     /// with the same [`Identity`] may succeed, if a service with the requested
     /// identity is later started.
     NotFound,
-    /// The connection was rejected by the [`Service`](crate::registry::Service).
+    /// The connection was rejected by the [`Service`](crate::service::Service).
     ///
     /// The body of this [`REJECT`](Header::Reject) frame may contain additional bytes
     /// which can be interpreted as a [service-specific `ConnectError`
-    /// value](crate::registry::Service::ConnectError).]
+    /// value](crate::service::Service::ConnectError).]
     ServiceRejected,
     /// The connection was rejected because data could not be decoded.
     DecodeError(DecodeError),

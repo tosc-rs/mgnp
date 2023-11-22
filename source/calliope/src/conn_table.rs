@@ -1,7 +1,7 @@
 use crate::{
     client::OutboundConnect,
     message::{Header, InboundFrame, OutboundFrame, Rejection, Reset},
-    registry,
+    service,
 };
 use core::{fmt, mem, num::NonZeroU16, task::Poll};
 use tricky_pipe::{
@@ -133,7 +133,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
     /// Process an inbound frame.
     pub async fn process_inbound(
         &mut self,
-        registry: &'_ impl registry::Registry,
+        registry: &'_ impl service::Registry,
         frame: InboundFrame<'_>,
     ) -> Option<OutboundFrame<'_>> {
         let span = tracing::trace_span!("process_inbound", id = %frame.header.link_id());

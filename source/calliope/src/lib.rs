@@ -8,12 +8,12 @@ use core::fmt;
 pub mod client;
 mod conn_table;
 pub mod message;
-pub mod registry;
+pub mod service;
 
 pub use client::Connector;
 pub use conn_table::{Id, LinkId};
 pub use message::Frame;
-pub use registry::{Registry, Service};
+pub use service::{Registry, Service};
 pub use tricky_pipe;
 
 use client::OutboundConnect;
@@ -148,7 +148,7 @@ impl Interface {
     /// When the "alloc" crate feature flag is enabled, the
     /// [`Interface::connector`] method may be used to automatically allocate
     /// these values on the heap.
-    pub fn connector_with<S: registry::Service>(
+    pub fn connector_with<S: service::Service>(
         &self,
         hello_sharer: serbox::Sharer<S::Hello>,
         rsp: oneshot::Receiver<Result<(), Rejection>>,
