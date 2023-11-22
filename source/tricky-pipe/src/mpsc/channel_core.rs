@@ -76,12 +76,8 @@ pub(super) struct Core<E> {
     /// This is the length of the actual queue elements array (which is not part
     /// of this struct).
     pub(super) capacity: u8,
-    /// If the receiver side of the channel closed with an error, this is the
-    /// error.
-    send_error: UnsafeCell<MaybeUninit<E>>,
-    /// If the sender side of the channel closed with an error, this is the
-    /// error.
-    recv_error: UnsafeCell<MaybeUninit<E>>,
+    /// If the channel has been closed with an error, this is that error.
+    error: UnsafeCell<MaybeUninit<E>>,
 }
 
 pub(super) struct Reservation<'core, E> {
@@ -141,15 +137,20 @@ pub(super) type DeserFn = fn(ErasedSlice, u8, &[u8]) -> postcard::Result<()>;
 
 /// Values for the `core.state` bitfield.
 mod state {
+    use mycelium_bitfield::PackUsize;
     /// If set, the channel's receiver has been claimed, indicating that no
     /// additional receivers can be claimed.
-    pub(super) const RX_CLAIMED: usize = 1 << 0;
+    pub(super) const RX_CLAIMED: PackUsize = PackUsize::least_significant(1);
 
-    /// Sender reference count; value of one sender.
-    pub(super) const TX_ONE: usize = 1 << TX_SHIFT;
+    pub(super) const ERRORING: PackUsize = RX_CLAIMED.next(1);
+    pub(super) const ERRORED: PackUsize = ERRORING.next(1);
 
-    /// Offset of TX count, in bits
-    pub(super) const TX_SHIFT: usize = 1;
+    /// Sender reference count.
+    pub(super) const TX_CNT: PackUsize = ERRORED.remaining();
+    /// Sender reference count, one sender.
+    pub(super) const TX_ONE: usize = TX_CNT.first_bit();
+    /// Sender reference count; bit offset.
+    pub(super) const TX_SHIFT: u32 = TX_CNT.least_significant_index();
 }
 
 pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
@@ -161,9 +162,7 @@ pub(super) const MAX_CAPACITY: usize = IndexAllocWord::MAX_CAPACITY as usize;
 /// This is the first bit of the pos word, so that it is not clobbered if
 /// incrementing the actual position in the queue wraps around (which is fine).
 const CLOSED: u16 = 1 << 0;
-const HAS_ERROR: u16 = 1 << 1;
-const CLOSED_ERROR: u16 = CLOSED | HAS_ERROR;
-const POS_SHIFT: u16 = CLOSED_ERROR.trailing_ones() as u16;
+const POS_SHIFT: u16 = CLOSED.trailing_ones() as u16;
 /// The value by which `enqueue_pos` and `dequeue_pos` are incremented. This is
 /// shifted left by two to account for the lowest bits being used for `CLOSED`
 /// and `HAS_ERROR`
@@ -202,8 +201,7 @@ impl<E> Core<E> {
             // dropped.
             state: AtomicUsize::new(state::TX_ONE),
             capacity,
-            send_error: UnsafeCell::new(MaybeUninit::uninit()),
-            recv_error: UnsafeCell::new(MaybeUninit::uninit()),
+            error: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
 
@@ -231,7 +229,6 @@ impl<E> Core<E> {
             queue,
             state: AtomicUsize::new(state::TX_ONE),
             capacity,
-
             error: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
@@ -244,10 +241,10 @@ impl<E> Core<E> {
 
     pub(super) fn try_claim_rx(&self) -> Option<()> {
         // set `RX_CLAIMED`.
-        let state = test_dbg!(self.state.fetch_or(state::RX_CLAIMED, AcqRel));
+        let state = test_dbg!(self.state.fetch_or(state::RX_CLAIMED.first_bit(), AcqRel));
         // if the `RX_CLAIMED` bit was not set, we successfully claimed the
         // receiver.
-        let claimed = test_dbg!(state & state::RX_CLAIMED) == 0;
+        let claimed = test_dbg!(!state::RX_CLAIMED.contained_in_any(state));
         test_println!(claimed, "Core::try_claim_rx");
         claimed.then_some(())
     }
@@ -261,41 +258,36 @@ impl<E> Core<E> {
         test_println!("Core::close_rx: -> closed");
     }
 
-    pub(super) fn close_rx_error(&self, error: E) {
-        // store the error in the channel.
-        self.send_error.with_mut(|ptr| unsafe {
-            // Safety: this is okay, because there is only one receiver, and the
-            // senders will not attempt to access the error until the receiver
-            // has set the `CLOSED_ERROR` bits.
-            //
-            // The receiver will not close the channel more than once.
-            (*ptr).write(error);
-        });
-        // set the state to indicate that the receiver closed the channel.
-        test_dbg!(self.enqueue_pos.fetch_or(CLOSED_ERROR, Release));
-        // notify any waiting senders that the channel is closed.
-        self.prod_wait.close();
-        test_println!("Core::close_rx_error: -> closed");
+    /// Close the channel from the sender side.
+    fn close_tx(&self) {
+        test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
+        self.cons_wait.close();
     }
 
-    pub(super) fn close_tx_error(&self, error: E) -> bool {
-        if test_dbg!(self.dequeue_pos.fetch_or(HAS_ERROR, AcqRel) & HAS_ERROR) == HAS_ERROR {
-            // someone else is setting the close error!
+    pub(super) fn close_with_error(&self, error: E) -> bool {
+        test_span!("Core::close_with_error()");
+        // If `ERRORING` _or_ `ERRORED` are set, we can't set the error...
+        const CANT_ERROR: usize = state::ERRORING.first_bit() | state::ERRORED.first_bit();
+        let state = test_dbg!(self.state.fetch_or(state::ERRORING.first_bit(), AcqRel));
+
+        if test_dbg!(state & CANT_ERROR != 0) {
             return false;
         }
-        // store the error in the channel.
-        self.recv_error.with_mut(|ptr| unsafe {
-            // Safety: this is okay, because the HAS_ERROR bit guards against
-            // any other sender setting the error, but the receiver will not
-            // read the error until the CLOSED bit is also set. For now, we have
-            // exclusive access to the error field.
+
+        self.error.with_mut(|ptr| unsafe {
+            // Safety: this is okay, because access to the error field is
+            // guarded by the `ERRORING` bit, and if we were the first thread to
+            // successfully set it, then we have exclusive access to the error
+            // field. Readers won't try to access the error until we set the
+            // `ERRORED` bit, which hasn't been set yet.
             (*ptr).write(error);
         });
-        // set the state to indicate that the sender closed the channel.
-        test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
-        // notify any waiting senders that the channel is closed.
-        self.cons_wait.wake();
-        test_println!("Core::close_tx_error: -> closed");
+
+        // set the ERRORED bit.
+        test_dbg!(self.state.fetch_or(state::ERRORED.first_bit(), Release));
+        self.close_rx();
+        self.close_tx();
+
         true
     }
 
@@ -334,9 +326,7 @@ impl<E> Core<E> {
             debug_assert_eq!(_val >> state::TX_SHIFT, 0);
             // Now that we're after all other ref count ops, we can close the
             // channel itself.
-            test_dbg!(self.dequeue_pos.fetch_or(CLOSED, Release));
-            self.cons_wait.close();
-
+            self.close_tx();
             test_println!("Core::drop_tx -> closed");
         } else {
             test_println!("Core::drop_tx -> tx refs remaining");
@@ -398,7 +388,7 @@ impl<E: Clone> Core<E> {
         let enqueue_pos = self.enqueue_pos.load(Acquire);
         if test_dbg!(enqueue_pos & CLOSED) == CLOSED {
             return Err(self
-                .send_closed_error()
+                .close_reason()
                 .map(|error| TrySendError::Error { error, message: () })
                 .unwrap_or(TrySendError::Disconnected(())));
         }
@@ -417,7 +407,7 @@ impl<E: Clone> Core<E> {
                     return Err(SendError::Error { error, message: () })
                 }
                 Err(TrySendError::Full(())) => self.prod_wait.wait().await.map_err(|_| {
-                    self.send_closed_error()
+                    self.close_reason()
                         .map(|error| SendError::Error { error, message: () })
                         .unwrap_or(SendError::Disconnected(()))
                 })?,
@@ -473,7 +463,7 @@ impl<E: Clone> Core<E> {
             match test_dbg!(dif).cmp(&0) {
                 cmp::Ordering::Less if test_dbg!(head & CLOSED) != 0 => {
                     return Err(self
-                        .recv_close_error()
+                        .close_reason()
                         .map(TryRecvError::Error)
                         .unwrap_or(TryRecvError::Disconnected));
                 }
@@ -505,7 +495,7 @@ impl<E: Clone> Core<E> {
         loop {
             if test_dbg!(tail & CLOSED) == CLOSED {
                 return Err(self
-                    .send_closed_error()
+                    .close_reason()
                     .map(|error| SendError::Error { error, message: () })
                     .unwrap_or(SendError::Disconnected(())));
             }
@@ -538,27 +528,12 @@ impl<E: Clone> Core<E> {
         }
     }
 
-    fn send_closed_error(&self) -> Option<E> {
-        let pos = self.enqueue_pos.load(Acquire);
-        debug_assert_eq!(pos & CLOSED, CLOSED);
-        if test_dbg!(pos & CLOSED_ERROR) == CLOSED_ERROR {
-            Some(
-                self.send_error
-                    .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() }),
-            )
-        } else {
-            None
-        }
-    }
-
-    fn recv_close_error(&self) -> Option<E> {
-        let pos = self.dequeue_pos.load(Acquire);
-        debug_assert_eq!(pos & CLOSED, CLOSED);
-        if test_dbg!(pos & CLOSED_ERROR) == CLOSED_ERROR {
-            Some(
-                self.recv_error
-                    .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() }),
-            )
+    fn close_reason(&self) -> Option<E> {
+        if test_dbg!(state::ERRORED.contained_in_any(self.state.load(Acquire))) {
+            let error = self
+                .error
+                .with(|ptr| unsafe { (*ptr).assume_init_ref().clone() });
+            Some(error)
         } else {
             None
         }

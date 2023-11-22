@@ -60,10 +60,7 @@ where
     pub fn receiver(&'static self) -> Option<Receiver<T, E>> {
         self.core.try_claim_rx()?;
 
-        Some(Receiver {
-            pipe: self.typed(),
-            closed_error: false,
-        })
+        Some(Receiver { pipe: self.typed() })
     }
 
     /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
@@ -110,7 +107,6 @@ where
         Some(SerReceiver {
             pipe: self.erased(),
             vtable: Self::SER_VTABLE,
-            closed_error: false,
         })
     }
 

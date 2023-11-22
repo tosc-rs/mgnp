@@ -593,13 +593,13 @@ fn mpsc_send() {
 }
 
 #[test]
-fn close_error_simple() {
+fn rx_closes_error() {
     const CAPACITY: u8 = 2;
 
     loom::model(|| {
         let chan = TrickyPipe::<loom::alloc::Track<usize>, &'static str>::new(CAPACITY);
 
-        let mut rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
         let tx = chan.sender();
 
         rx.close_with_error("fake rx error");
@@ -615,6 +615,38 @@ fn close_error_simple() {
         });
 
         t1.join().unwrap();
+    })
+}
+
+#[test]
+fn tx_closes_error() {
+    const CAPACITY: u8 = 2;
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>, &'static str>::new(CAPACITY);
+
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx1 = chan.sender();
+        let tx2 = chan.sender();
+
+        let t1 = thread::spawn(move || {
+            tx1.close_with_error("fake tx1 error");
+        });
+
+        let t2 = thread::spawn(move || {
+            tx2.close_with_error("fake tx2 error");
+        });
+
+        future::block_on(async move {
+            let err = test_dbg!(rx.recv().await).unwrap_err();
+            assert!(matches!(
+                err,
+                RecvError::Error("fake tx1 error") | RecvError::Error("fake tx2 error")
+            ))
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
     })
 }
 
