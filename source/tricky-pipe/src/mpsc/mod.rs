@@ -184,9 +184,12 @@ where
     /// # Returns
     ///
     /// - [`Ok`]`(T)` if a message was received from the channel.
-    /// - [`Err`]`(`[`TryRecvError::Closed`]`) if the channel has been closed
-    ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
-    ///   messages sent before the channel closed have already been received.
+    /// - [`Err`]`(`[`TryRecvError::Disconnected`]`)` if all [`Sender`]s and
+    ///   [`DeserSender`]s have been dropped *and* all messages sent before the
+    ///   channel closed have already been received.
+    /// - [`Err`]`(`[`TryRecvError::Error`]`(E)` if the channel has been closed
+    ///   with an error using the [`Receiver::close_with_error`] or
+    ///   [`Sender::close_with_error`] methods.
     /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
     ///   messages in the queue, but the channel has not been closed.
     pub fn try_recv(&self) -> Result<T, TryRecvError<E>> {
@@ -207,7 +210,7 @@ where
     /// # }
     /// ```
     ///
-    /// The [`Future`] returned by this method outputs [`None`] if the channel
+    /// The [`Future`] returned by this method outputs an error if the channel
     /// has been closed (all [`Sender`]s and [`DeserSender`]s have been dropped)
     /// *and* all messages sent before the channel closed have been received.
     ///
@@ -217,6 +220,16 @@ where
     ///
     /// To return an error rather than waiting, use the
     /// [`try_recv`](Self::try_recv) method, instead.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(T)` if a message was received from the channel.
+    /// - [`Err`]`(`[`RecvError::Disconnected`]`)` if all [`Sender`]s and
+    ///   [`DeserSender`]s have been dropped *and* all messages sent before the
+    ///   channel closed have already been received.
+    /// - [`Err`]`(`[`RecvError::Error`]`(E)` if the channel has been closed
+    ///   with an error using the [`Receiver::close_with_error`] or
+    ///   [`Sender::close_with_error`] methods.
     ///
     /// # Cancellation Safety
     ///
@@ -232,6 +245,18 @@ where
     /// Polls to receive a message from the channel, returning [`Poll::Ready`]
     /// if a message has been recieved, or [`Poll::Pending`] if there are
     /// currently no messages in the channel.
+    ///
+    /// # Returns
+    ///
+    /// - [`Poll::Ready`]`(`[`Ok`]`(T))` if a message was received from the channel.
+    /// - [`Poll::Ready`]`(`[`Err`]`(`[`RecvError::Disconnected`]`))` if all
+    ///   [`Sender`]s and [`DeserSender`]s have been dropped *and* all messages
+    ///   sent before the  channel closed have already been received.
+    /// - [`Poll::Ready`]`(`[`Err`]`(`[`TryRecvError::Error`]`(E))` if the channel
+    ///   has been closed with an error using the [`Receiver::close_with_error`]
+    ///   or [`Sender::close_with_error`] methods.
+    /// - [`Poll::Pending`] if there are currently no messages in the queue and
+    ///   the calling task should wait for additional messages to be sent.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError<E>>> {
         self.pipe
             .core()
@@ -375,10 +400,13 @@ impl<E: Clone> SerReceiver<E> {
     ///   serialize the message as a COBS frame, use the
     ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
     ///   methods, instead.
-    /// - [`Err`]`([`TryRecvError::Closed`]) if the channel has been closed
-    ///   (all [`Sender`]s and [`DeserSender`]s have been dropped) *and* all
-    ///   messages sent before the channel closed have already been received.
-    /// - [`Err`]`([`TryRecvError::Empty`]) if there are currently no
+    /// - [`Err`]`(`[`TryRecvError::Disconnected`]`)` if all [`Sender`]s and
+    ///   [`DeserSender`]s have been dropped) *and* all messages sent before the
+    ///   channel closed have already been received.
+    /// - [`Err`]`(`[`TryRecvError::Error`]`(E)` if the channel has been closed
+    ///   with an error using the [`Receiver::close_with_error`] or
+    ///   [`Sender::close_with_error`] methods.
+    /// - [`Err`]`(`[`TryRecvError::Empty`]`)` if there are currently no
     ///   messages in the queue, but the channel has not been closed.
     ///
     /// [`Vec`]: alloc::vec::Vec
@@ -404,10 +432,11 @@ impl<E: Clone> SerReceiver<E> {
     /// ```
     ///
     /// This method returns a [`SerRecv`] [`Future`] that outputs an
-    /// [`Option`]`<`[`SerRecvRef`]`>`. The future will complete with [`None`]
-    /// if the channel has been closed (all [`Sender`]s and [`DeserSender`]s
-    /// have been dropped) *and* all messages sent before the channel closed
-    /// have been received. If the channel has not yet been closed, but there
+    /// [`Result`]`<`[`SerRecvRef`]`, `[`RecvError`]`<E>>`. The future will
+    /// complete with an error if the channel has been closed (all [`Sender`]s
+    /// and [`DeserSender`]s have been dropped) *and* all messages sent before
+    /// the channel closed  have been received, or if the channel is closed with
+    /// an error by the user. If the channel has not yet been closed, but there
     /// are no messages currently available in the queue, the [`SerRecv`] future
     /// yields and waits for a new message to be sent, or for the channel to
     /// close.
@@ -417,15 +446,19 @@ impl<E: Clone> SerReceiver<E> {
     ///
     /// # Returns
     ///
-    /// - [`Some`]`(`[`SerRecvRef`]`)` if a message was received from the
+    /// - [`Ok`]`(`[`SerRecvRef`]`)` if a message was received from the
     ///   channel. The [`SerRecvRef::to_slice`] and [`SerRecvRef::to_vec`]
     ///   methods can be used to serialize the binary representation of the
     ///   message to a `&mut [u8]` or to a [`Vec`]`<u8>`, respectively. To
     ///   serialize the message as a COBS frame, use the
     ///   [`SerRecvRef::to_slice_framed`] or [`SerRecvRef::to_vec_framed`]
     ///   methods, instead.
-    /// - [`None`] if the channel is closed *and* all messages have been
-    ///   received.
+    /// - [`Err`]`(`[`RecvError::Disconnected`]`)` if all [`Sender`]s and
+    ///   [`DeserSender`]s have been dropped *and* all messages sent before the
+    ///   channel closed have already been received.
+    /// - [`Err`]`(`[`RecvError::Error`]`(E)` if the channel has been closed
+    ///   with an error using the [`Receiver::close_with_error`] or
+    ///   [`Sender::close_with_error`] methods.
     ///
     /// # Cancellation Safety
     ///
@@ -442,6 +475,19 @@ impl<E: Clone> SerReceiver<E> {
     /// Polls to receive a serialized message from the channel, returning
     /// [`Poll::Ready`] if a message has been recieved, or [`Poll::Pending`] if
     /// there are currently no messages in the channel.
+    ///
+    /// # Returns
+    ///
+    /// - [`Poll::Ready`]`(`[`Ok`]`(`[`SerRecvRef`]`<'_, E>))` if a message was
+    ///   received from the channel.
+    /// - [`Poll::Ready`]`(`[`Err`]`(`[`RecvError::Disconnected`]`))` if all
+    ///   [`Sender`]s and [`DeserSender`]s have been dropped *and* all messages
+    ///   sent before the  channel closed have already been received.
+    /// - [`Poll::Ready`]`(`[`Err`]`(`[`RecvError::Error`]`(E))` if the channel
+    ///   has been closed with an error using the [`Receiver::close_with_error`]
+    ///   or [`Sender::close_with_error`] methods.
+    /// - [`Poll::Pending`] if there are currently no messages in the queue and
+    ///   the calling task should wait for additional messages to be sent.
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<SerRecvRef<'_, E>, RecvError<E>>> {
         self.pipe.core().poll_dequeue(cx).map(|res| {
             Ok(SerRecvRef {
@@ -660,8 +706,12 @@ impl<E: Clone> DeserSender<E> {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`SerPermit`]`)` if the channel is not closed.
-    /// - [`Err`]`(`[SendError`]`<()>)` if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    /// - [`Err`]`(`[`SendError::Disconnected`]`<()>)` if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped.
+    /// - [`Err`]`(`[`SendError::Error`]`<E, ()>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to [`try_reserve`] or `reserve` on this channel will always fail.
     ///
     /// # Cancellation Safety
     ///
@@ -704,10 +754,13 @@ impl<E: Clone> DeserSender<E> {
     ///
     /// - [`Ok`]`(`[`SerPermit`]`)` if the channel has capacity available and
     ///   has not closed.
-    /// - [`Err`]`(`[TrySendError::Closed`]`)` if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
-    ///   subsequent calls to `try_reserve` or [`reserve`] on this channel will
-    ///   always fail.
+    /// - [`Err`]`(`[`TrySendError::Disconnected`]`<()>)` if the [`Receiver`] or
+    ///   [`SerReceiver`] has been dropped. This indicates that subsequent calls
+    ///   to `try_reserve` or [`reserve`] on this channel will always fail.
+    /// - [`Err`]`(`[`TrySendError::Error`]`<E, ()>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to `try_reserve` or [`reserve`] on this channel will always fail.
     /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
     ///   have capacity to send another message without waiting. A subsequent
     ///   call to `try_reserve` may complete successfully, once capacity has
@@ -935,8 +988,12 @@ impl<T, E: Clone> Sender<T, E> {
     /// # Returns
     ///
     /// - [`Ok`]`(`[`()`]`)` if the channel is not closed.
-    /// - [`Err`]([1SendError`]`<T>`) if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    /// - [`Err`]([`SendError::Disconnected`]`<T>`) if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped.
+    /// - [`Err`]`(`[`SendError::Error`]`<E, T>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to `send` or [`try_send`] on this channel will always fail.
     ///
     /// # Cancellation Safety
     ///
@@ -969,10 +1026,15 @@ impl<T, E: Clone> Sender<T, E> {
     /// # Returns
     ///
     /// - [`Ok`]`(())` if the message was sent successfully.
-    /// - [`Err`]([`TrySendError::Closed`]`<T>`) if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
-    ///   subsequent calls to [`send`], `try_send`, [`try_reserve`], or
-    ///   [`reserve`] on this channel will always fail.
+    /// - [`Err`]([`TrySendError::Disconnected`]`<T>`) if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped. This indicates that subsequent
+    ///   calls to [`send`], `try_send`, [`try_reserve`], or [`reserve`] on this
+    ///   channel will always fail.
+    /// - [`Err`]([`TrySendError::Error`]`<E, T>`) if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to [`send`], `try_send`, [`try_reserve`], or [`reserve`] on this
+    ///   channel will always fail.
     /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
     ///   have capacity to send another message without waiting. A subsequent
     ///   call to `try_reserve` may complete successfully, once capacity has
@@ -1006,16 +1068,17 @@ impl<T, E: Clone> Sender<T, E> {
     /// To attempt to reserve capacity *without* waiting if the channel is full,
     /// use the [`try_reserve`] method, instead.
     ///
-    /// [`Permit`]: Permit
-    /// [`send`]: Permit::send
-    /// [`commit`]: Permit::commit
-    /// [`try_reserve`]: Self::try_reserve
     ///
     /// # Returns
     ///
     /// - [`Ok`]`(`[`Permit`]`)` if the channel is not closed.
-    /// - [`Err`]`(`[SendError::Closed`]`)` if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped.
+    /// - [`Err`]([`SendError::Disconnected`]`<()>`) if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped.
+    /// - [`Err`]`(`[`SendError::Error`]`<E, ()>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to `reserve`, [`try_reserve`], [`send`](Self::send),
+    ///   [`try_send`] on this  channel will always fail.
     ///
     /// # Cancellation Safety
     ///
@@ -1025,6 +1088,12 @@ impl<T, E: Clone> Sender<T, E> {
     /// This channel uses a queue to ensure that calls to `send` and `reserve`
     /// complete in the order they were requested. Cancelling a call to
     /// `reserve` causes the caller to lose its place in that queue.
+    ///
+    /// [`Permit`]: Permit
+    /// [`send`]: Permit::send
+    /// [`try_send`]: Self::try_send
+    /// [`commit`]: Permit::commit
+    /// [`try_reserve`]: Self::try_reserve
     pub async fn reserve(&self) -> Result<Permit<'_, T, E>, SendError<E>> {
         let pipe = self.pipe.core().reserve().await?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
@@ -1056,14 +1125,22 @@ impl<T, E: Clone> Sender<T, E> {
     ///
     /// - [`Ok`]`(`[`Permit`]`)` if the channel has capacity available and
     ///   has not closed.
-    /// - [`Err`]`(`[TrySendError::Closed`]`)` if the channel is closed (the
-    ///   [`Receiver`] or [`SerReceiver`]) has been dropped. This indicates that
-    ///   subsequent calls to `try_reserve` or [`reserve`] on this channel will
-    ///   always fail.
+    /// - [`Err`]([`TrySendError::Disconnected`]`<()>`) if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped. This indicates that subsequent
+    ///   calls to [`send`], `try_send`, [`try_reserve`], or [`reserve`] on this
+    ///   channel will always fail.
+    /// - [`Err`]([`TrySendError::Error`]`<E, ()>`) if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to [`send`](Self::send), `try_send`, [`try_reserve`], or
+    ///   [`reserve`] on this  channel will always fail.
     /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
     ///   have capacity to send another message without waiting. A subsequent
     ///   call to `try_reserve` may complete successfully, once capacity has
     ///   become available again.
+    ///
+    /// [`reserve`]: Self::reserve
+    /// [`try_reserve`]: Self::try_reserve
     pub fn try_reserve(&self) -> Result<Permit<'_, T, E>, TrySendError<E>> {
         let pipe = self.pipe.core().try_reserve()?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();

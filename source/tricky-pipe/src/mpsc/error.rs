@@ -112,8 +112,8 @@ pub enum TryRecvError<E> {
     ///
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
-    /// [`Receiver::try_recv`]: Receiver::try_recv
-    /// [`SerReceiver::try_recv`]: SerReceiver::try_recv
+    /// [`Receiver::try_recv`]: super::Receiver::try_recv
+    /// [`SerReceiver::try_recv`]: super::SerReceiver::try_recv
     Disconnected,
 
     /// A message could not be sent because this channel was closed with an
@@ -126,8 +126,8 @@ pub enum TryRecvError<E> {
     ///
     /// [`Sender::close_with_error`]: super::Sender::close_with_error
     /// [`DeserSender::close_with_error`]: super::DeserSender::close_with_error
-    /// [`Receiver::try_recv`]: Receiver::try_recv
-    /// [`SerReceiver::try_recv`]: SerReceiver::try_recv
+    /// [`Receiver::try_recv`]: super::Receiver::try_recv
+    /// [`SerReceiver::try_recv`]: super::SerReceiver::try_recv
     Error(E),
 }
 
