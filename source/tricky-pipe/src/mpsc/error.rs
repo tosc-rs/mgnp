@@ -7,29 +7,47 @@
 //! [`SerReceiver`]: super::SerReceiver
 use core::fmt;
 
-/// A message cannot be sent because the channel is closed (no [`Receiver`]
-/// or [`SerReceiver`] exists).
+/// Errors returned by [`Sender::send`], [`Sender::reserve`], and
+/// [`DeserSender::reserve`], indicating that a message cannot be sent to the
+/// channel.
 ///
 /// A `SendError<()>` is returned by the [`Sender::reserve`] and
 /// [`DeserSender::reserve`] methods. The [`Sender::send`] method instead returns
 /// a `SendError<T>`, from which the original message can be recovered using
 /// [`SendError::into_inner`].
 ///
+/// Both the [`Disconnected`](Self::Disconnected) and [`Error`](Self::Error)
+/// variants of this error indicate that the channel is *closed*: once a
+/// `SendError` is returned, no future attempts to send a message to this
+/// channel (i.e. [`Sender::send`], [`Sender::reserve`],
+/// [`DeserSender::reserve`], [`DeserSender::send`], etc.) will ever
+/// succeed.
+///
 /// [`Receiver`]: super::Receiver
 /// [`SerReceiver`]: super::SerReceiver
+/// [`Sender::send`]: super::Sender::send
 /// [`Sender::reserve`]: super::Sender::reserve
 /// [`DeserSender::reserve`]: super::DeserSender::reserve
-/// [`Sender::send`]: super::Sender::send
+/// [`DeserSender::send`]: super::DeserSender::send
 #[derive(Eq, PartialEq)]
 pub enum SendError<E, T = ()> {
-    /// A message cannot be sent because the channel is closed (no [`Receiver`]
-    /// or [`SerReceiver`] exists).
+    /// A message cannot be sent because no [`Receiver`] or [`SerReceiver`]
+    /// exists to receive the message.
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
     Disconnected(T),
+
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Receiver::close_with_error`] or
+    /// [`SerReceiver::close_with_error`] methods.
+    ///
+    /// [`Receiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`SerReceiver::close_with_error`]: super::Receiver::close_with_error
     Error {
+        /// The message that the sender was attempting to send.
         message: T,
+        /// The error set when the channel closed.
         error: E,
     },
 }
@@ -50,14 +68,24 @@ pub enum TrySendError<E, T = ()> {
     /// The channel is currently full, and a message cannot be sent without
     /// waiting for a slot to become available.
     Full(T),
-    /// A message cannot be sent because the channel is closed (no [`Receiver`]
-    /// or [`SerReceiver`] exists).
+
+    /// A message cannot be sent because no [`Receiver`] or [`SerReceiver`]
+    /// exists.
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
     Disconnected(T),
+
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Receiver::close_with_error`] or
+    /// [`SerReceiver::close_with_error`] methods.
+    ///
+    /// [`Receiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`SerReceiver::close_with_error`]: super::Receiver::close_with_error
     Error {
+        /// The message that the sender was attempting to send.
         message: T,
+        /// The error set when the channel closed.
         error: E,
     },
 }
@@ -71,14 +99,35 @@ pub enum TryRecvError<E> {
     /// No messages are currently present in the channel. The receiver must wait
     /// for an additional message to be sent.
     Empty,
-    /// A message cannot be received because the channel is closed.
+
+    /// A message cannot be received because tno [`Sender`] or [`DeserSender`]
+    /// exists.
     ///
     /// This indicates that no [`Sender`]s or [`DeserSender`]s exist, and all
     /// previously sent messages have already been received.
     ///
+    /// If this variant is returned, the channel is permanently closed, and no
+    /// subsequent calls to [`Receiver::try_recv`] or [`SerReceiver::try_recv`]
+    /// will succeed on this channel.
+    ///
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
+    /// [`Receiver::try_recv`]: Receiver::try_recv
+    /// [`SerReceiver::try_recv`]: SerReceiver::try_recv
     Disconnected,
+
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Sender::close_with_error`] or
+    /// [`DeserSender::close_with_error`] methods.
+    ///
+    /// If this variant is returned, the channel is permanently closed, and no
+    /// subsequent calls to [`Receiver::try_recv`] or [`SerReceiver::try_recv`]
+    /// will succeed on this channel.
+    ///
+    /// [`Sender::close_with_error`]: super::Sender::close_with_error
+    /// [`DeserSender::close_with_error`]: super::DeserSender::close_with_error
+    /// [`Receiver::try_recv`]: Receiver::try_recv
+    /// [`SerReceiver::try_recv`]: SerReceiver::try_recv
     Error(E),
 }
 
@@ -96,6 +145,13 @@ pub enum RecvError<E> {
     /// [`Sender`]: super::Sender
     /// [`DeserSender`]: super::DeserSender
     Disconnected,
+
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Receiver::close_with_error`] or
+    /// [`SerReceiver::close_with_error`] methods.
+    ///
+    /// [`Receiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`SerReceiver::close_with_error`]: super::Receiver::close_with_error
     Error(E),
 }
 
@@ -105,15 +161,28 @@ pub enum RecvError<E> {
 /// [`DeserSender::send_framed`]: super::DeserSender::send_framed
 #[derive(Debug, Eq, PartialEq)]
 pub enum SerSendError<E> {
-    /// A message cannot be sent because the channel is closed (no [`Receiver`]
-    /// or [`SerReceiver`] exists).
+    /// A message cannot be sent because no [`Receiver`]  or [`SerReceiver`] exists.
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
     Disconnected,
+
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
+
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Receiver::close_with_error`] or
+    /// [`SerReceiver::close_with_error`] methods.
+    ///
+    /// If this variant is returned, the channel is permanently closed, and no
+    /// subsequent calls to [`DeserSender::send`] and
+    /// [`DeserSender::send_framed`] will succeed on this channel.
+    ///
+    /// [`Receiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`SerReceiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`DeserSender::send`]: super::DeserSender::send
+    /// [`DeserSender::send_framed`]: super::DeserSender::send_framed
     Error(E),
 }
 
@@ -124,17 +193,39 @@ pub enum SerSendError<E> {
 /// [`DeserSender::try_send_framed`]: super::DeserSender::send_framed
 #[derive(Debug, Eq, PartialEq)]
 pub enum SerTrySendError<E> {
-    /// A message cannot be sent because the channel is closed (no [`Receiver`]
-    /// or [`SerReceiver`] exists).
+    /// A message cannot be sent because no [`Receiver`] or [`SerReceiver`]
+    /// exists.
+    ///
+    /// If this variant is returned, the channel is permanently closed, and no
+    /// subsequent calls to [`DeserSender::try_send`] and
+    /// [`DeserSender::try_send_framed`] will succeed on this channel.
     ///
     /// [`Receiver`]: super::Receiver
     /// [`SerReceiver`]: super::SerReceiver
+    /// [`DeserSender::try_send`]: super::DeserSender::try_send
+    /// [`DeserSender::try_send_framed`]: super::DeserSender::try_send_framed
     Disconnected,
+
+    /// The channel is currently full, and a message cannot be sent without
+    /// waiting for a slot to become available.
     Full,
+
     /// The sent bytes could not be deserialized to a value of this channel's
     /// message type.
     Deserialize(postcard::Error),
 
+    /// A message could not be sent because this channel was closed with an
+    /// error, by the [`Receiver::close_with_error`] or
+    /// [`SerReceiver::close_with_error`] methods.
+    ///
+    /// If this variant is returned, the channel is permanently closed, and no
+    /// subsequent calls to [`DeserSender::try_send`] and
+    /// [`DeserSender::try_send_framed`] will succeed on this channel.
+    ///
+    /// [`Receiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`SerReceiver::close_with_error`]: super::Receiver::close_with_error
+    /// [`DeserSender::try_send`]: super::DeserSender::try_send
+    /// [`DeserSender::try_send_framed`]: super::DeserSender::try_send_framed
     Error(E),
 }
 
