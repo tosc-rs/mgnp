@@ -15,9 +15,7 @@ async fn basically_works() {
 
     let chan = connect(&mut connector, "hello-world", ()).await;
     chan.tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
     let rsp = chan.rx().recv().await;
@@ -52,9 +50,7 @@ async fn hellos_work() {
     .await;
 
     chan.tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
     let rsp = chan.rx().recv().await;
@@ -102,9 +98,7 @@ async fn nak_bad_hello() {
 
     // the good connection should stil lwork
     chan.tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
     let rsp = chan.rx().recv().await;
@@ -134,12 +128,8 @@ async fn mux_single_service() {
     let chan2 = connect(&mut connector, "hello-world", ()).await;
 
     tokio::try_join! {
-        chan1.tx().send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        }),
-        chan2.tx().send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        chan1.tx().send(svcs::hello_req("hello")),
+        chan2.tx().send(svcs::hello_req("hello"))
     }
     .expect("send should work");
 
@@ -218,9 +208,7 @@ async fn service_type_routing() {
 
     helloworld_chan
         .tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
     let rsp = helloworld_chan.rx().recv().await;
@@ -245,17 +233,13 @@ async fn service_type_routing() {
 
     hellohello_chan
         .tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
 
     helloworld_chan
         .tx()
-        .send(HelloWorldRequest {
-            hello: "hello".to_string(),
-        })
+        .send(svcs::hello_req("hello"))
         .await
         .expect("send request");
 
@@ -354,4 +338,86 @@ async fn service_identity_routing() {
             world: "universe".to_string()
         })
     );
+}
+
+#[tokio::test]
+async fn reset_closed() {
+    let remote_registry: TestRegistry = TestRegistry::default();
+    let conns = remote_registry.add_service(svcs::hello_world_id());
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+
+    tokio::spawn(svcs::serve_hello_with_shutdown(
+        "hello",
+        "world",
+        conns,
+        shutdown.clone(),
+    ));
+
+    let fixture = Fixture::new()
+        .spawn_local(Default::default())
+        .spawn_remote(remote_registry);
+
+    let mut connector = fixture.local_iface().connector::<svcs::HelloWorld>();
+
+    let chan1 = connect(&mut connector, "hello-world", ()).await;
+
+    let chan2 = connect(&mut connector, "hello-world", ()).await;
+
+    tokio::try_join! {
+        chan1.tx().send(svcs::hello_req("hello")),
+        chan2.tx().send(svcs::hello_req("hello"))
+    }
+    .expect("send should work");
+
+    let (rsp1, rsp2) = tokio::join! {
+        chan1.rx().recv(),
+        chan2.rx().recv(),
+    };
+
+    assert_eq!(
+        rsp1,
+        Ok(HelloWorldResponse {
+            world: "world".to_string()
+        })
+    );
+    assert_eq!(
+        rsp2,
+        Ok(HelloWorldResponse {
+            world: "world".to_string()
+        })
+    );
+
+    // now shut down the remote service
+    tracing::info!("");
+    tracing::info!("!!! shutting down remote service !!!");
+    tracing::info!("");
+    shutdown.notify_waiters();
+
+    let send2 = tokio::join! {
+        chan1.tx().send(svcs::hello_req("hello")),
+        chan2.tx().send(svcs::hello_req("hello"))
+    };
+
+    let _ = dbg!(send2);
+
+    let (rsp1, rsp2) = tokio::join! {
+        chan1.rx().recv(),
+        chan2.rx().recv(),
+    };
+
+    assert_eq!(
+        dbg!(rsp1),
+        Err(tricky_pipe::mpsc::error::RecvError::Error(
+            Reset::BecauseISaidSo
+        ))
+    );
+
+    assert_eq!(
+        dbg!(rsp2),
+        Err(tricky_pipe::mpsc::error::RecvError::Error(
+            Reset::BecauseISaidSo
+        ))
+    );
+
+    fixture.finish_test().await;
 }

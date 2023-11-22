@@ -10,6 +10,7 @@ use crate::{
 use std::{
     collections::HashMap,
     fmt,
+    future::Future,
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -66,11 +67,28 @@ pub(crate) mod svcs {
         registry::Identity::from_name::<HelloWorld>("hello-world")
     }
 
+    pub fn hello_req(hello: impl ToString) -> HelloWorldRequest {
+        HelloWorldRequest {
+            hello: hello.to_string(),
+        }
+    }
+
     #[tracing::instrument(level = tracing::Level::INFO, skip(conns))]
     pub async fn serve_hello(
         req_msg: &'static str,
         rsp_msg: &'static str,
+        conns: mpsc::Receiver<InboundConnect>,
+    ) {
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        serve_hello_with_shutdown(req_msg, rsp_msg, conns, shutdown).await
+    }
+
+    #[tracing::instrument(level = tracing::Level::INFO, skip(conns, shutdown))]
+    pub async fn serve_hello_with_shutdown(
+        req_msg: &'static str,
+        rsp_msg: &'static str,
         mut conns: mpsc::Receiver<InboundConnect>,
+        shutdown: Arc<tokio::sync::Notify>,
     ) {
         let mut worker = 1;
         while let Some(req) = conns.recv().await {
@@ -78,30 +96,47 @@ pub(crate) mod svcs {
             tracing::info!(?hello, "hello world service received connection");
             let (their_chan, my_chan) =
                 make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
-            tokio::spawn(hello_worker(worker, req_msg, rsp_msg, my_chan));
+            tokio::spawn(hello_worker(
+                worker,
+                req_msg,
+                rsp_msg,
+                my_chan,
+                shutdown.clone(),
+            ));
             worker += 1;
             let sent = rsp.send(Ok(their_chan)).is_ok();
             tracing::debug!(?sent);
         }
     }
 
-    #[tracing::instrument(level = tracing::Level::INFO, skip(chan))]
-    pub(super) async fn hello_worker(
+    #[tracing::instrument(level = tracing::Level::INFO, skip(chan, shutdown))]
+    pub async fn hello_worker(
         worker: usize,
         req_msg: &'static str,
         rsp_msg: &'static str,
         chan: BiDi<svcs::HelloWorldRequest, svcs::HelloWorldResponse, Reset>,
+        shutdown: Arc<tokio::sync::Notify>,
     ) {
         tracing::debug!("hello world worker {worker} running...");
-        while let Ok(req) = chan.rx().recv().await {
-            tracing::info!(?req);
-            assert_eq!(req.hello, req_msg);
-            chan.tx()
-                .send(svcs::HelloWorldResponse {
-                    world: rsp_msg.into(),
-                })
-                .await
-                .unwrap();
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.notified() => {
+                    tracing::info!("worker shutting down!");
+                    return;
+                }
+                req = chan.rx().recv() => {
+                    tracing::info!(?req);
+                    assert_eq!(req.expect("request should be Ok").hello, req_msg);
+                    chan.tx()
+                        .send(svcs::HelloWorldResponse {
+                            world: rsp_msg.into(),
+                        })
+                        .await
+                        .unwrap();
+                }
+
+            }
         }
     }
 }
@@ -144,7 +179,7 @@ impl<T, E> Fixture<T, E> {
             registry,
             TrickyPipe::new(8),
         );
-        let task = tokio::spawn(interface("name", machine, test_done.clone()));
+        let task = tokio::spawn(interface(name, machine, test_done.clone()));
         (iface, task)
     }
 }
@@ -354,6 +389,7 @@ impl TestRegistry {
         let mut chan = self.add_service(svcs::hello_with_hello_id());
         tokio::spawn(
             async move {
+                let shutdown = Arc::new(Notify::new());
                 let mut worker = 1;
                 while let Some(req) = chan.recv().await {
                     let InboundConnect { hello, rsp } = req;
@@ -364,7 +400,13 @@ impl TestRegistry {
                         tracing::info!(?hello, "hellohello service received hello");
                         let (their_chan, my_chan) =
                             make_bidis::<svcs::HelloWorldRequest, svcs::HelloWorldResponse>(8);
-                        tokio::spawn(svcs::hello_worker(worker, "hello", "world", my_chan));
+                        tokio::spawn(svcs::hello_worker(
+                            worker,
+                            "hello",
+                            "world",
+                            my_chan,
+                            shutdown.clone(),
+                        ));
                         worker += 1;
                         Ok(their_chan)
                     } else {
