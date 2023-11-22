@@ -1162,9 +1162,13 @@ impl<T: 'static, E> fmt::Debug for Sender<T, E> {
 // === impl Permit ===
 
 impl<T, E: Clone> Permit<'_, T, E> {
-    /// Write the given value into the [Permit], and send it
+    /// Write the given value into the [Permit], and send it.
     ///
     /// This makes the data available to the [Receiver].
+    ///
+    /// Capacity for the message has already been reserved. The message is sent
+    /// to the receiver and the permit is consumed. The operation will succeed
+    /// even if the receiver half has been closed.
     pub fn send(self, val: T) {
         // write the value...
         unsafe {
@@ -1173,7 +1177,7 @@ impl<T, E: Clone> Permit<'_, T, E> {
             self.cell.deref().write(val);
 
             // ...and commit.
-            self.commit();
+            self.commit()
         }
     }
 
@@ -1197,7 +1201,8 @@ impl<T, E: Clone> Permit<'_, T, E> {
         #[cfg_attr(not(loom), allow(clippy::drop_non_drop))]
         drop(self.cell);
 
-        self.pipe.commit_send();
+        // ignore errors here because capacity is already reserved.
+        let _ = self.pipe.commit_send();
     }
 }
 

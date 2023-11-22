@@ -398,8 +398,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             return false;
         }
 
-        let (_, mut rx) = channel.split();
-        rx.close_with_error(reason)
+        channel.close_with_error(reason)
     }
 
     /// Returns `true` if a connection with the provided ID was closed, `false` if

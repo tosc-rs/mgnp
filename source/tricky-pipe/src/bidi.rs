@@ -4,7 +4,10 @@
 //! [`Sender`] and [`Receiver`] or a [`DeserSender`] and [`SerReceiver`]
 //! (respectively) into a single bidirectional channel which can both send and
 //! receive messages to/from a remote peer.
-use crate::mpsc::*;
+use crate::mpsc::{
+    error::{RecvError, SendError},
+    *,
+};
 use core::fmt;
 use futures::FutureExt;
 
@@ -16,6 +19,8 @@ use futures::FutureExt;
 pub struct BiDi<In: 'static, Out: 'static, E: 'static> {
     tx: Sender<Out, E>,
     rx: Receiver<In, E>,
+    seen_rx_error: bool,
+    seen_tx_error: bool,
 }
 
 /// A bidirectional type-erased serializing channel.
@@ -27,6 +32,8 @@ pub struct BiDi<In: 'static, Out: 'static, E: 'static> {
 pub struct SerBiDi<E: 'static> {
     tx: DeserSender<E>,
     rx: SerReceiver<E>,
+    seen_rx_error: bool,
+    seen_tx_error: bool,
 }
 
 /// Events returned by [`BiDi::wait`] and [`SerBiDi::wait`].
@@ -39,6 +46,22 @@ pub enum Event<In, Out> {
     SendReady(Out),
 }
 
+/// [`Result`]s returned  by [`BiDi::wait`] and [`SerBiDi::wait`].
+pub type WaitResult<T, E> = Result<T, WaitError<E>>;
+
+/// Errors returned by [`BiDi::wait`] and [`SerBiDi::wait`].
+#[derive(Debug)]
+pub enum WaitError<E> {
+    /// The receive side of the channel has been closed with an error.
+    Recv(E),
+    /// The send side of the channel has been closed with an error.
+    Send(E),
+    /// Both the send and receive sides are disconnected (all corresponding
+    /// [`Sender`]/[`DeserSender`]s and the corresponding ([`Receiver`] or
+    /// [`SerReceiver`] have been dropped).
+    Disconnected,
+}
+
 impl<In, Out, E> BiDi<In, Out, E>
 where
     In: 'static,
@@ -47,7 +70,12 @@ where
 {
     /// Constructs a new `BiDi` from a [`Sender`] and a [`Receiver`].
     pub fn from_pair(tx: Sender<Out, E>, rx: Receiver<In, E>) -> Self {
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            seen_rx_error: false,
+            seen_tx_error: false,
+        }
     }
 
     /// Consumes `self`, extracting the inner [`Sender`] and [`Receiver`].
@@ -56,22 +84,55 @@ where
         (self.tx, self.rx)
     }
 
-    // /// Wait until the channel is either ready to send a message *or* a new
-    // /// incoming message is received, whichever occurs first.
-    // #[must_use]
-    // pub async fn wait(&self) -> Option<Event<In, Permit<'_, Out, ()>>> {
-    //     futures::select_biased! {
-    //         res = self.tx.reserve().fuse() => {
-    //             match res {
-    //                 Ok(permit) => Some(Event::SendReady(permit)),
-    //                 Err(_) => self.rx.recv().await.map(Event::Recv),
-    //             }
-    //         }
-    //         recv = self.rx.recv().fuse() => {
-    //             recv.map(Event::Recv)
-    //         }
-    //     }
-    // }
+    /// Wait until the channel is either ready to send a message *or* a new
+    /// incoming message is received, whichever occurs first.
+    #[must_use]
+    pub async fn wait(&mut self) -> WaitResult<Event<In, Permit<'_, Out, E>>, E> {
+        futures::select_biased! {
+            reserve = self.tx.reserve().fuse() => {
+                match reserve {
+                    Ok(permit) => Ok(Event::SendReady(permit)),
+                    // If the send channel has closed with an error, return it
+                    // immediately *if we haven't returned it already*. If we
+                    // *have* returned that error previously, fall through and
+                    // try a recv.
+                    Err(SendError::Error{ error, .. }) if !self.seen_tx_error => {
+                        self.seen_tx_error = true;
+                        Err(WaitError::Send(error))
+                    }
+                    Err(_) => self.rx.recv().await.map(Event::Recv).map_err(|error| match error {
+                        // both sides have disconnected
+                        RecvError::Disconnected => WaitError::Disconnected,
+                        RecvError::Error(e) => {
+                            self.seen_rx_error = true;
+                            WaitError::Recv(e)
+                        }
+                    }),
+                }
+            }
+            recv = self.rx.recv().fuse() => {
+                match recv {
+                    Ok(msg) => Ok(Event::Recv(msg)),
+                    // If the recv channel has closed with an error, return it
+                    // immediately *if we haven't returned it already*. If we
+                    // *have* returned that error previously, fall through and
+                    // try a send.
+                    Err(RecvError::Error(e)) if !self.seen_rx_error => {
+                        self.seen_rx_error = true;
+                        Err(WaitError::Recv(e))
+                    }
+                    Err(_) => self.tx.reserve().await.map(Event::SendReady).map_err(|error| match error {
+                        // both sides have disconnected
+                        SendError::Disconnected(()) => WaitError::Disconnected,
+                        SendError::Error { error, .. } => {
+                            self.seen_tx_error = true;
+                            WaitError::Send(error)
+                        }
+                    }),
+                }
+            }
+        }
+    }
 
     /// Borrows the **send half** of this bidirectional channel.
     ///
@@ -91,6 +152,17 @@ where
     #[must_use]
     pub fn rx(&self) -> &Receiver<In, E> {
         &self.rx
+    }
+
+    /// Closes both sides of this channel with an error.
+    ///
+    /// Returns `true` if *either* side of the channel was closed by this error.
+    /// If both sides of the channel have already closed, this method returns
+    /// `false`.
+    pub fn close_with_error(&self, error: E) -> bool {
+        let tx_closed = self.tx.close_with_error(error.clone());
+        let rx_closed = self.rx.close_with_error(error);
+        rx_closed || tx_closed
     }
 
     /// Returns `true` if **both halves** of this bidirectional channel are
@@ -129,10 +201,17 @@ where
     E: 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { tx, rx } = self;
+        let Self {
+            tx,
+            rx,
+            seen_rx_error,
+            seen_tx_error,
+        } = self;
         f.debug_struct("BiDi")
             .field("tx", tx)
             .field("rx", rx)
+            .field("seen_rx_error", seen_rx_error)
+            .field("seen_tx_error", seen_tx_error)
             .finish()
     }
 }
@@ -142,7 +221,12 @@ where
 impl<E: Clone + 'static> SerBiDi<E> {
     /// Constructs a new `SerBiDi` from a [`DeserSender`] and a [`SerReceiver`].
     pub fn from_pair(tx: DeserSender<E>, rx: SerReceiver<E>) -> Self {
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            seen_rx_error: false,
+            seen_tx_error: false,
+        }
     }
 
     /// Consumes `self`, extracting the inner [`DeserSender`] and [`SerReceiver`].
@@ -151,22 +235,65 @@ impl<E: Clone + 'static> SerBiDi<E> {
         (self.tx, self.rx)
     }
 
-    // /// Wait until the channel is either ready to send a message *or* a new
-    // /// incoming message is received, whichever occurs first.
-    // #[must_use]
-    // pub async fn wait(&self) -> Option<Event<SerRecvRef<'_>, SerPermit<'_, ()>>> {
-    //     futures::select_biased! {
-    //         res = self.tx.reserve().fuse() => {
-    //             match res {
-    //                 Ok(permit) => Some(Event::SendReady(permit)),
-    //                 Err(_) => self.rx.recv().await.map(Event::Recv),
-    //             }
-    //         }
-    //         recv = self.rx.recv().fuse() => {
-    //             recv.map(Event::Recv)
-    //         }
-    //     }
-    // }
+    /// Wait until the channel is either ready to send a message *or* a new
+    /// incoming message is received, whichever occurs first.
+    pub async fn wait(&mut self) -> WaitResult<Event<SerRecvRef<'_, E>, SerPermit<'_, E>>, E> {
+        futures::select_biased! {
+            reserve = self.tx.reserve().fuse() => {
+                match reserve {
+                    Ok(permit) => Ok(Event::SendReady(permit)),
+                    // If the send channel has closed with an error, return it
+                    // immediately *if we haven't returned it already*. If we
+                    // *have* returned that error previously, fall through and
+                    // try a recv.
+                    Err(SendError::Error{ error, .. }) if !self.seen_tx_error => {
+                        self.seen_tx_error = true;
+                        Err(WaitError::Send(error))
+                    }
+                    Err(_) => self.rx.recv().await.map(Event::Recv).map_err(|error| match error {
+                        // both sides have disconnected
+                        RecvError::Disconnected => WaitError::Disconnected,
+                        RecvError::Error(e) => {
+                            self.seen_rx_error = true;
+                            WaitError::Recv(e)
+                        }
+                    }),
+                }
+            }
+            recv = self.rx.recv().fuse() => {
+                match recv {
+                    Ok(msg) => Ok(Event::Recv(msg)),
+                    // If the recv channel has closed with an error, return it
+                    // immediately *if we haven't returned it already*. If we
+                    // *have* returned that error previously, fall through and
+                    // try a send.
+                    Err(RecvError::Error(e)) if !self.seen_rx_error => {
+                        self.seen_rx_error = true;
+                        Err(WaitError::Recv(e))
+                    }
+                    Err(_) => self.tx.reserve().await.map(Event::SendReady).map_err(|error| match error {
+                        // both sides have disconnected
+                        SendError::Disconnected(()) => WaitError::Disconnected,
+                        SendError::Error { error, .. } => {
+                            self.seen_tx_error = true;
+                            WaitError::Send(error)
+                        }
+                    }),
+                }
+            }
+        }
+    }
+
+    /// Closes both sides of this channel with an error.
+    ///
+    /// Returns `true` if *either* side of the channel was closed by this error.
+    /// If both sides of the channel have already closed, this method returns
+    /// `false`.
+    pub fn close_with_error(&self, error: E) -> bool {
+        let tx_closed = self.tx.close_with_error(error.clone());
+        let rx_closed = self.rx.close_with_error(error);
+        rx_closed || tx_closed
+    }
 
     /// Borrows the **send half** of this bidirectional channel.
     ///
@@ -219,10 +346,17 @@ impl<E: Clone + 'static> SerBiDi<E> {
 
 impl<E> fmt::Debug for SerBiDi<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { tx, rx } = self;
+        let Self {
+            tx,
+            rx,
+            seen_rx_error,
+            seen_tx_error,
+        } = self;
         f.debug_struct("SerBiDi")
             .field("tx", tx)
             .field("rx", rx)
+            .field("seen_rx_error", seen_rx_error)
+            .field("seen_tx_error", seen_tx_error)
             .finish()
     }
 }
