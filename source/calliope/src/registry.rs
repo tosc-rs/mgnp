@@ -21,7 +21,7 @@ pub trait Registry {
 
 /// A service definition.
 ///
-/// This trait defines the interface for a MGNP service.
+/// This trait defines the interface for a Calliope service.
 pub trait Service {
     /// The [universally unique identifier] (UUID) that identifies this service
     /// interface definition.

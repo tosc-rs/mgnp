@@ -1,4 +1,4 @@
-#![feature(async_fn_in_trait)]
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), no_std)]
 
 #[cfg(any(feature = "alloc", test))]
@@ -25,23 +25,23 @@ use tricky_pipe::{mpsc, oneshot, serbox};
 #[cfg(test)]
 mod tests;
 
-/// A wire-level transport for [MGNP frames](Frame).
+/// A wire-level transport for [Calliope frames](Frame).
 ///
-/// A `Wire` represents a point-to-point link between a local MGNP [`Interface`]
-/// and a remote MGNP interface. A [link state machine](Machine) is constructed
+/// A `Wire` represents a point-to-point link between a local Calliope [`Interface`]
+/// and a remote Calliope interface. A [link state machine](Machine) is constructed
 /// with an implementation of the `Wire` trait for the link on which that
 /// interface executes.
 ///
 /// # Responsibilities of the Wire
 ///
-/// A `Wire` provides two primary services to the MGNP layer: _framing_ and
+/// A `Wire` provides two primary services to the Calliope layer: _framing_ and
 /// _reliable delivery_.
 ///
 /// ## Framing
 ///
 /// Implementations of `Wire` are responsible for implementing some form of
 /// message framing. Each [`Wire::RecvFrame`] returned by [`Wire::recv`] must be
-/// a single MGNP frame. The framing strategy (e.g. COBS, leading length delimiter,
+/// a single Calliope frame. The framing strategy (e.g. COBS, leading length delimiter,
 /// or some lower-level transport's native framing) is left up to the
 /// implementation of `Wire`. Similarly, when [`Wire::send`] is called with an
 /// [`OutboundFrame`], the `Wire` is responsible for framing the binary
@@ -55,7 +55,7 @@ pub trait Wire {
     /// Wire-level errors.
     type Error: fmt::Display;
 
-    /// A buffer containing the raw bytes of a single [MGNP frame](Frame)
+    /// A buffer containing the raw bytes of a single [Calliope frame](Frame)
     /// received on this `Wire`. This is returned by the [`Wire::recv`] method.
     type RecvFrame: AsRef<[u8]>;
 
@@ -67,7 +67,7 @@ pub trait Wire {
     async fn recv(&mut self) -> Result<Self::RecvFrame, Self::Error>;
 }
 
-/// A MGNP network interface state machine for a particular [`Wire`].
+/// A Calliope network interface state machine for a particular [`Wire`].
 ///
 /// This type implements the connection-management state machine for connections
 /// over the provided `Wi`-typed [`Wire`] implementation. Local services are discovered using
@@ -79,7 +79,7 @@ pub struct Machine<Wi, R, const MAX_CONNS: usize = { DEFAULT_MAX_CONNS }> {
     conns_rx: mpsc::Receiver<OutboundConnect>,
 }
 
-/// A handle to a running MGNP network interface.
+/// A handle to a running Calliope network interface.
 ///
 /// This handle can be used to initiate new outbound connections.
 #[derive(Clone)]
@@ -166,7 +166,7 @@ where
     Wi: Wire,
     R: Registry,
 {
-    /// Runs the MGNP network state machine on this interface.
+    /// Runs the Calliope network state machine on this interface.
     ///
     /// This method will run in a loop indefinitely, processing any messages
     /// sent or received on the interface described by the provided [`Wire`]

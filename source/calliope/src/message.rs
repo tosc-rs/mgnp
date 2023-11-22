@@ -3,7 +3,7 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 use tricky_pipe::{mpsc::SerRecvRef, serbox};
 
-/// A MGNP frame consists of a [message header](Header), followed by a message
+/// A Calliope frame consists of a [message header](Header), followed by a message
 /// body of zero or more bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame<T> {
@@ -146,7 +146,7 @@ pub enum Reset {
     /// [`CONNECT`]: Header::Connect
     /// [`ACK`]: Header::Ack
     YesSuchConn,
-    /// The connection was reset because the peer is shutting down its MGNP
+    /// The connection was reset because the peer is shutting down its Calliope
     /// interface on this wire.
     ///
     /// No further connections will be accepted, and you should go away forever.
