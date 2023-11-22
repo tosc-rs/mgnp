@@ -111,7 +111,7 @@ pub enum Rejection {
     NotFound,
     /// The connection was rejected by the [`Service`](crate::registry::Service).
     ///
-    /// The body of this [`NAK`](Header::Nak) frame may contain additional bytes
+    /// The body of this [`REJECT`](Header::Reject) frame may contain additional bytes
     /// which can be interpreted as a [service-specific `ConnectError`
     /// value](crate::registry::Service::ConnectError).]
     ServiceRejected,
@@ -304,7 +304,7 @@ impl<'data> Frame<OutboundData<'data>> {
         }
     }
 
-    pub fn nak(remote_id: Id, reason: Rejection) -> Self {
+    pub fn reject(remote_id: Id, reason: Rejection) -> Self {
         Self {
             header: Header::Reject { remote_id, reason },
             body: OutboundData::Empty, // todo

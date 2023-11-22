@@ -119,6 +119,12 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
         .await
     }
 
+    pub(crate) async fn reset_all(&mut self) {
+        for entry in self.conns.iter_mut() {
+            if entry
+        }
+    }
+
     fn cleanup_dead(&mut self) {
         // receiving a data frame from the conn table borrows it, so we must
         // remove the dead index from the *previous* next_outbound call before
@@ -241,7 +247,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
                 tracing::trace!(id.remote = %local_id, ?identity, "process_inbound: CONNECT");
                 match registry.connect(identity, frame.body).await {
                     Ok(channel) => Some(self.accept(local_id, channel)),
-                    Err(reason) => Some(OutboundFrame::nak(local_id, reason)),
+                    Err(reason) => Some(OutboundFrame::reject(local_id, reason)),
                 }
             }
         }
@@ -342,7 +348,7 @@ impl<const CAPACITY: usize> ConnTable<CAPACITY> {
             // Accepted, we got a local ID!
             Some(local_id) => OutboundFrame::ack(local_id, remote_id),
             // Conn table is full, can't accept this stream.
-            None => OutboundFrame::nak(remote_id, Rejection::ConnTableFull(CAPACITY)),
+            None => OutboundFrame::reject(remote_id, Rejection::ConnTableFull(CAPACITY)),
         }
     }
 
