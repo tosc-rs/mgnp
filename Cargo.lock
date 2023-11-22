@@ -1063,6 +1063,7 @@ dependencies = [
  "loom 0.7.1",
  "maitake-sync",
  "mnemos-bitslab",
+ "mycelium-bitfield 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "portable-atomic",
  "postcard",
  "serde",

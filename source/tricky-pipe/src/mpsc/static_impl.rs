@@ -7,12 +7,16 @@ use super::{
 ///
 /// This variant is intended to be used in static storage on targets
 /// such as embedded systems, where channels are pre-allocated at compile time.
-pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize> {
+pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize, E = ()> {
     elements: [Cell<T>; CAPACITY],
-    core: Core,
+    core: Core<E>,
 }
 
-impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
+impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
+where
+    T: 'static,
+    E: 'static,
+{
     const EMPTY_CELL: Cell<T> = UnsafeCell::new(MaybeUninit::uninit());
 
     /// Create a new [`StaticTrickyPipe`].
@@ -33,7 +37,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     /// The maximum possible capacity of a [`StaticTrickyPipe`] on this platform
     pub const MAX_CAPACITY: usize = channel_core::MAX_CAPACITY;
 
-    const CORE_VTABLE: &'static CoreVtable = &CoreVtable {
+    const CORE_VTABLE: &'static CoreVtable<E> = &CoreVtable {
         get_core: Self::get_core,
         get_elems: Self::get_elems,
         clone: Self::erased_clone,
@@ -41,11 +45,11 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
         type_name: core::any::type_name::<T>,
     };
 
-    fn erased(&'static self) -> ErasedPipe {
+    fn erased(&'static self) -> ErasedPipe<E> {
         unsafe { ErasedPipe::new(self as *const _ as *const (), Self::CORE_VTABLE) }
     }
 
-    fn typed(&'static self) -> TypedPipe<T> {
+    fn typed(&'static self) -> TypedPipe<T, E> {
         unsafe { self.erased().typed() }
     }
 
@@ -53,7 +57,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn receiver(&'static self) -> Option<Receiver<T>> {
+    pub fn receiver(&'static self) -> Option<Receiver<T, E>> {
         self.core.try_claim_rx()?;
 
         Some(Receiver { pipe: self.typed() })
@@ -62,12 +66,12 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
     ///
     /// This function may be called multiple times.
-    pub fn sender(&'static self) -> Sender<T> {
+    pub fn sender(&'static self) -> Sender<T, E> {
         self.core.add_tx();
         Sender { pipe: self.typed() }
     }
 
-    fn get_core(ptr: *const ()) -> *const Core {
+    fn get_core(ptr: *const ()) -> *const Core<E> {
         unsafe {
             let ptr = ptr.cast::<Self>();
             ptr::addr_of!((*ptr).core)
@@ -88,7 +92,7 @@ impl<T: 'static, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY> {
     fn erased_drop(_: *const ()) {}
 }
 
-impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
+impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
 where
     T: Serialize + Send + 'static,
 {
@@ -97,7 +101,7 @@ where
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn ser_receiver(&'static self) -> Option<SerReceiver> {
+    pub fn ser_receiver(&'static self) -> Option<SerReceiver<E>> {
         self.core.try_claim_rx()?;
 
         Some(SerReceiver {
@@ -117,16 +121,17 @@ where
     };
 }
 
-impl<T, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY>
+impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
 where
     T: DeserializeOwned + Send + 'static,
+    E:,
 {
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn deser_sender(&'static self) -> DeserSender {
+    pub fn deser_sender(&'static self) -> DeserSender<E> {
         self.core.add_tx();
         DeserSender {
             pipe: self.erased(),
@@ -137,8 +142,18 @@ where
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
-unsafe impl<T: Send, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY> {}
-unsafe impl<T: Send, const CAPACITY: usize> Sync for StaticTrickyPipe<T, CAPACITY> {}
+unsafe impl<T, E, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY, E>
+where
+    T: Send,
+    E: Send,
+{
+}
+unsafe impl<T, E, const CAPACITY: usize> Sync for StaticTrickyPipe<T, CAPACITY, E>
+where
+    T: Send,
+    E: Send,
+{
+}
 
 #[cfg(all(test, not(loom)))]
 mod tests {
@@ -219,7 +234,10 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
+        assert_eq!(
+            tx.try_reserve().unwrap_err(),
+            TrySendError::Disconnected(()),
+        );
     }
 
     #[test]
@@ -233,7 +251,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
     }
 
     #[test]
@@ -249,7 +267,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
     }
 
     #[test]
@@ -302,7 +320,10 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(rx);
-        assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
+        assert_eq!(
+            tx.try_reserve().unwrap_err(),
+            TrySendError::Disconnected(())
+        );
     }
 
     #[test]
@@ -316,7 +337,7 @@ mod tests {
         let tx = CHAN.sender();
         let rx = CHAN.ser_receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -332,7 +353,7 @@ mod tests {
         let rx = CHAN.ser_receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -431,10 +452,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(rx);
         let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-        assert_eq!(
-            res.unwrap_err(),
-            SerTrySendError::Send(TrySendError::Closed(())),
-        );
+        assert_eq!(res.unwrap_err(), SerTrySendError::Disconnected,);
     }
 
     #[test]
@@ -448,7 +466,7 @@ mod tests {
         let tx = CHAN.deser_sender();
         let rx = CHAN.receiver().unwrap();
         drop(tx);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]
@@ -464,7 +482,7 @@ mod tests {
         let rx = CHAN.receiver().unwrap();
         drop(tx1);
         drop(tx2);
-        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+        assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
     }
 
     #[test]

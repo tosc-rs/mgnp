@@ -22,6 +22,9 @@ use futures::FutureExt;
 use message::{InboundFrame, OutboundFrame, Rejection};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
+#[cfg(test)]
+mod tests;
+
 /// A wire-level transport for [MGNP frames](Frame).
 ///
 /// A `Wire` represents a point-to-point link between a local MGNP [`Interface`]
@@ -133,7 +136,7 @@ impl Interface {
     /// [`serbox::Sharer`] and [`oneshot::Receiver`], which may be heap- or
     /// statically-allocated, use the [`Interface::connector_with`] method
     /// instead.
-    #[cfg(feature = "alloc")]
+    #[cfg(any(test, feature = "alloc"))]
     pub fn connector<S: Service>(&self) -> client::Connector<S> {
         self.connector_with(serbox::Sharer::new(), oneshot::Receiver::new())
     }
@@ -207,7 +210,7 @@ where
 
                 // locally-initiated connect request
                 conn = next_conn.fuse() => {
-                    if let Some(conn) = conn {
+                    if let Ok(conn) = conn {
                         out_conn = Some(conn);
                     } else {
                         tracing::info!("connection stream has terminated");

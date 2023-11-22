@@ -92,16 +92,16 @@ mod trait_impls {
 
     #[test]
     fn permit() {
-        assert_send::<Permit<'_, UnSerStruct>>();
-        assert_sync::<Permit<'_, UnSerStruct>>();
-        assert_unpin::<Permit<'_, UnSerStruct>>();
+        assert_send::<Permit<'_, UnSerStruct, ()>>();
+        assert_sync::<Permit<'_, UnSerStruct, ()>>();
+        assert_unpin::<Permit<'_, UnSerStruct, ()>>();
     }
 
     #[test]
     fn ser_permit() {
-        assert_send::<SerPermit<'_>>();
-        assert_sync::<SerPermit<'_>>();
-        assert_unpin::<SerPermit<'_>>();
+        assert_send::<SerPermit<'_, ()>>();
+        assert_sync::<SerPermit<'_, ()>>();
+        assert_unpin::<SerPermit<'_, ()>>();
     }
 }
 
@@ -174,7 +174,10 @@ mod single_threaded {
             let tx = test_dbg!(chan.sender());
             let rx = test_dbg!(chan.receiver().unwrap());
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()),);
+            assert_eq!(
+                tx.try_reserve().unwrap_err(),
+                TrySendError::Disconnected(()),
+            );
         });
     }
 
@@ -186,7 +189,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.receiver().unwrap());
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
         });
     }
 
@@ -200,7 +203,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed,);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected,);
         });
     }
 
@@ -257,7 +260,10 @@ mod single_threaded {
             let tx = test_dbg!(chan.sender());
             let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(rx);
-            assert_eq!(tx.try_reserve().unwrap_err(), TrySendError::Closed(()));
+            assert_eq!(
+                tx.try_reserve().unwrap_err(),
+                TrySendError::Disconnected(())
+            );
         });
     }
 
@@ -269,7 +275,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.ser_receiver()).unwrap();
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -283,7 +289,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -389,10 +395,7 @@ mod single_threaded {
             drop(chan);
             drop(rx);
             let res = tx.try_send([240, 223, 93, 160, 141, 6, 5, 104, 101, 108, 108, 111]);
-            assert_eq!(
-                res.unwrap_err(),
-                SerTrySendError::Send(TrySendError::Closed(())),
-            );
+            assert_eq!(res.unwrap_err(), SerTrySendError::Disconnected,);
         });
     }
 
@@ -404,7 +407,7 @@ mod single_threaded {
             let rx = test_dbg!(chan.receiver()).unwrap();
             drop(chan);
             drop(tx);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -418,7 +421,7 @@ mod single_threaded {
             drop(chan);
             drop(tx1);
             drop(tx2);
-            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Closed);
+            assert_eq!(rx.try_recv().unwrap_err(), TryRecvError::Disconnected);
         });
     }
 
@@ -505,7 +508,7 @@ fn spsc_try_send_in_capacity() {
 
         future::block_on(async move {
             let mut i = 0;
-            while let Some(msg) = test_dbg!(rx.recv().await) {
+            while let Ok(msg) = test_dbg!(rx.recv().await) {
                 assert_eq!(msg.get_ref(), &i);
                 i += 1;
             }
@@ -532,7 +535,7 @@ fn spsc_send() {
 
         future::block_on(async move {
             let mut i = 0;
-            while let Some(msg) = rx.recv().await {
+            while let Ok(msg) = rx.recv().await {
                 assert_eq!(msg.get_ref(), &i);
                 i += 1;
             }
@@ -565,7 +568,7 @@ fn mpsc_send() {
 
         let recvs = future::block_on(async move {
             let mut recvs = std::collections::BTreeSet::new();
-            while let Some(msg) = rx.recv().await {
+            while let Ok(msg) = rx.recv().await {
                 let msg = msg.into_inner();
                 tracing::info!(received = msg);
                 assert!(
@@ -586,6 +589,64 @@ fn mpsc_send() {
                 msg
             );
         }
+    })
+}
+
+#[test]
+fn rx_closes_error() {
+    const CAPACITY: u8 = 2;
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>, &'static str>::new(CAPACITY);
+
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx = chan.sender();
+
+        rx.close_with_error("fake rx error");
+
+        let t1 = thread::spawn(move || {
+            future::block_on(async move {
+                let err = test_dbg!(tx.send(loom::alloc::Track::new(1)).await.unwrap_err());
+                match err {
+                    SendError::Error { error, .. } => assert_eq!(error, "fake rx error"),
+                    err => panic!("expected SendError::Error, got {:?}", err),
+                }
+            })
+        });
+
+        t1.join().unwrap();
+    })
+}
+
+#[test]
+fn tx_closes_error() {
+    const CAPACITY: u8 = 2;
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>, &'static str>::new(CAPACITY);
+
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx1 = chan.sender();
+        let tx2 = chan.sender();
+
+        let t1 = thread::spawn(move || {
+            tx1.close_with_error("fake tx1 error");
+        });
+
+        let t2 = thread::spawn(move || {
+            tx2.close_with_error("fake tx2 error");
+        });
+
+        future::block_on(async move {
+            let err = test_dbg!(rx.recv().await).unwrap_err();
+            assert!(matches!(
+                err,
+                RecvError::Error("fake tx1 error") | RecvError::Error("fake tx2 error")
+            ))
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
     })
 }
 

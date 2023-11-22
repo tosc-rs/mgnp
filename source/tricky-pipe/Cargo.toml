@@ -25,6 +25,7 @@ alloc = ["postcard/alloc"]
 
 [dependencies]
 maitake-sync = "0.1.0"
+mycelium-bitfield = { version = "0.1.3", default-features = false}
 portable-atomic = "1.4.3"
 mnemos-bitslab = { git = "https://github.com/tosc-rs/mnemos", branch = "eliza/bitslab-loom" }
 futures = { version = "0.3", features = ["async-await"], default-features = false }

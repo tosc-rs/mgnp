@@ -1,4 +1,7 @@
-use crate::{message::Rejection, registry};
+use crate::{
+    message::{Rejection, Reset},
+    registry, Service,
+};
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
 pub struct Connector<S: registry::Service> {
@@ -14,7 +17,7 @@ pub struct OutboundConnect {
     /// The "hello" message to send to the remote service.
     pub(crate) hello: serbox::Consumer,
     /// The local bidirectional channel to bind to the remote service.
-    pub(crate) channel: bidi::SerBiDi,
+    pub(crate) channel: bidi::SerBiDi<Reset>,
     /// Sender for the response from the remote service.
     pub(crate) rsp: oneshot::Sender<Result<(), Rejection>>,
 }
@@ -25,20 +28,19 @@ pub enum ConnectError {
     Nak(Rejection),
 }
 
-pub type ClientChannel<S> =
-    bidi::BiDi<<S as registry::Service>::ServerMsg, <S as registry::Service>::ClientMsg>;
+pub type Connection<S> = bidi::BiDi<<S as Service>::ServerMsg, <S as Service>::ClientMsg, Reset>;
 
 pub struct Channels<S: registry::Service> {
-    srv_chan: bidi::SerBiDi,
-    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg>,
+    srv_chan: bidi::SerBiDi<Reset>,
+    client_chan: bidi::BiDi<S::ServerMsg, S::ClientMsg, Reset>,
 }
 
-pub struct StaticChannels<S: registry::Service, const CAPACITY: usize> {
+pub struct StaticChannels<S: Service, const CAPACITY: usize> {
     s2c: mpsc::StaticTrickyPipe<S::ServerMsg, CAPACITY>,
     c2s: mpsc::StaticTrickyPipe<S::ClientMsg, CAPACITY>,
 }
 
-impl<S: registry::Service> Channels<S> {
+impl<S: Service> Channels<S> {
     pub fn from_static<const CAPACITY: usize>(
         storage: &'static StaticChannels<S, CAPACITY>,
     ) -> Self {
@@ -58,7 +60,7 @@ impl<S: registry::Service> Channels<S> {
     }
 }
 
-impl<S: registry::Service> Connector<S> {
+impl<S: Service> Connector<S> {
     pub async fn connect(
         &mut self,
         identity: impl Into<registry::IdentityKind>,
@@ -67,7 +69,7 @@ impl<S: registry::Service> Connector<S> {
             srv_chan,
             client_chan,
         }: Channels<S>,
-    ) -> Result<ClientChannel<S>, ConnectError> {
+    ) -> Result<Connection<S>, ConnectError> {
         let permit = self
             .tx
             .reserve()

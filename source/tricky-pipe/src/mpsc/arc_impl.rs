@@ -11,10 +11,17 @@ use super::channel_core::{Core, CoreVtable};
 // TODO(eliza): we should probably replace the use of `Arc` here with manual ref
 // counting, since the `Core` tracks the number of senders and receivers
 // already. But, I was in a hurry to get a prototype working...
-pub struct TrickyPipe<T: 'static>(Arc<Inner<T>>);
+pub struct TrickyPipe<T, E = ()>(Arc<Inner<T, E>>)
+where
+    T: 'static,
+    E: Clone + 'static;
 
-struct Inner<T: 'static> {
-    core: Core,
+struct Inner<T, E>
+where
+    T: 'static,
+    E: Clone + 'static,
+{
+    core: Core<E>,
     // TODO(eliza): instead of boxing the elements array, we should probably
     // manually allocate a `Layout`. This works for now, though.
     //
@@ -26,7 +33,7 @@ struct Inner<T: 'static> {
     elements: Box<[Cell<T>]>,
 }
 
-impl<T: 'static> TrickyPipe<T> {
+impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
     /// Create a new [`TrickyPipe`] allocated on the heap.
     ///
     /// NOTE: `CAPACITY` MUST be a power of two, and must also be <= the number of bits
@@ -41,7 +48,7 @@ impl<T: 'static> TrickyPipe<T> {
         }))
     }
 
-    const CORE_VTABLE: &'static CoreVtable = &CoreVtable {
+    const CORE_VTABLE: &'static CoreVtable<E> = &CoreVtable {
         get_core: Self::get_core,
         get_elems: Self::get_elems,
         clone: Self::erased_clone,
@@ -49,19 +56,19 @@ impl<T: 'static> TrickyPipe<T> {
         type_name: core::any::type_name::<T>,
     };
 
-    fn erased(&self) -> ErasedPipe {
+    fn erased(&self) -> ErasedPipe<E> {
         let ptr = Arc::into_raw(self.0.clone()) as *const _;
         unsafe { ErasedPipe::new(ptr, Self::CORE_VTABLE) }
     }
 
-    fn typed(&self) -> TypedPipe<T> {
+    fn typed(&self) -> TypedPipe<T, E> {
         unsafe { self.erased().typed() }
     }
     /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn receiver(&self) -> Option<Receiver<T>> {
+    pub fn receiver(&self) -> Option<Receiver<T, E>> {
         self.0.core.try_claim_rx()?;
 
         Some(Receiver { pipe: self.typed() })
@@ -70,45 +77,46 @@ impl<T: 'static> TrickyPipe<T> {
     /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
     ///
     /// This function may be called multiple times.
-    pub fn sender(&self) -> Sender<T> {
+    pub fn sender(&self) -> Sender<T, E> {
         self.0.core.add_tx();
         Sender { pipe: self.typed() }
     }
 
-    unsafe fn get_core(ptr: *const ()) -> *const Core {
+    unsafe fn get_core(ptr: *const ()) -> *const Core<E> {
         unsafe {
-            let ptr = ptr.cast::<Inner<T>>();
+            let ptr = ptr.cast::<Inner<T, E>>();
             ptr::addr_of!((*ptr).core)
         }
     }
 
     unsafe fn get_elems(ptr: *const ()) -> ErasedSlice {
-        let ptr = ptr.cast::<Inner<T>>();
+        let ptr = ptr.cast::<Inner<T, E>>();
         ErasedSlice::erase(&(*ptr).elements)
     }
 
     unsafe fn erased_clone(ptr: *const ()) {
         test_println!("erased_clone({ptr:p})");
-        Arc::increment_strong_count(ptr.cast::<Inner<T>>())
+        Arc::increment_strong_count(ptr.cast::<Inner<T, E>>())
     }
 
     unsafe fn erased_drop(ptr: *const ()) {
-        let arc = Arc::from_raw(ptr.cast::<Inner<T>>());
+        let arc = Arc::from_raw(ptr.cast::<Inner<T, E>>());
         test_println!(refs = Arc::strong_count(&arc), "erased_drop({ptr:p})");
         drop(arc)
     }
 }
 
-impl<T> TrickyPipe<T>
+impl<T, E> TrickyPipe<T, E>
 where
     T: Serialize + Send + 'static,
+    E: Clone + Send + Sync,
 {
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn ser_receiver(&self) -> Option<SerReceiver> {
+    pub fn ser_receiver(&self) -> Option<SerReceiver<E>> {
         self.0.core.try_claim_rx()?;
 
         Some(SerReceiver {
@@ -128,16 +136,17 @@ where
     };
 }
 
-impl<T> TrickyPipe<T>
+impl<T, E> TrickyPipe<T, E>
 where
     T: DeserializeOwned + Send + 'static,
+    E: Clone + Send + Sync,
 {
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn deser_sender(&self) -> DeserSender {
+    pub fn deser_sender(&self) -> DeserSender<E> {
         self.0.core.add_tx();
         DeserSender {
             pipe: self.erased(),
@@ -148,7 +157,7 @@ where
     const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
-impl<T> Clone for TrickyPipe<T> {
+impl<T, E: Clone> Clone for TrickyPipe<T, E> {
     fn clone(&self) -> Self {
         test_span!("TrickyPipe::clone");
         // Since the `TrickyPipe` type can construct new `Sender`s, this
@@ -160,7 +169,7 @@ impl<T> Clone for TrickyPipe<T> {
     }
 }
 
-impl<T> Drop for TrickyPipe<T> {
+impl<T, E: Clone> Drop for TrickyPipe<T, E> {
     fn drop(&mut self) {
         test_span!("TrickyPipe::drop");
         // Since the `TrickyPipe` type can construct new `Sender`s, this
@@ -171,12 +180,12 @@ impl<T> Drop for TrickyPipe<T> {
     }
 }
 
-unsafe impl<T: Send> Send for TrickyPipe<T> {}
-unsafe impl<T: Send> Sync for TrickyPipe<T> {}
+unsafe impl<T: Send, E: Clone + Send + Sync> Send for TrickyPipe<T, E> {}
+unsafe impl<T: Send, E: Clone + Send + Sync> Sync for TrickyPipe<T, E> {}
 
 // === impl Inner ===
 
-impl<T> Drop for Inner<T> {
+impl<T, E: Clone> Drop for Inner<T, E> {
     fn drop(&mut self) {
         test_span!("Inner::drop");
 
