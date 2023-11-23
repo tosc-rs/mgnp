@@ -593,6 +593,52 @@ fn mpsc_send() {
 }
 
 #[test]
+#[cfg_attr(loom, ignore)] // this would probably run for 1000 years under loom...
+fn mpsc_send_full() {
+    const TX1_SENDS: usize = 64;
+    const TX2_SENDS: usize = 64;
+    const SENDS: usize = TX1_SENDS + TX2_SENDS;
+    const CAPACITY: u8 = 8;
+
+    loom::model(|| {
+        let chan = TrickyPipe::<loom::alloc::Track<usize>>::new(CAPACITY);
+
+        let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+        let tx1 = chan.sender();
+        let tx2 = chan.sender();
+        // drop the channel now so that the channel can be tx-closed.
+        drop(chan);
+
+        let t1 = thread::spawn(do_tx(TX1_SENDS, 0, tx1));
+        let t2 = thread::spawn(do_tx(TX2_SENDS, TX1_SENDS, tx2));
+
+        let recvs = future::block_on(async move {
+            let mut recvs = std::collections::BTreeSet::new();
+            while let Ok(msg) = rx.recv().await {
+                let msg = msg.into_inner();
+                tracing::info!(received = msg);
+                assert!(
+                    recvs.insert(msg),
+                    "each message should only have been received once\nmessage: {msg}\nreceived: {recvs:?}"
+                );
+            }
+            recvs
+        });
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        for msg in 0..SENDS {
+            assert!(
+                recvs.contains(&msg),
+                "didn't receive {}\nreceived: {recvs:?}",
+                msg
+            );
+        }
+    })
+}
+
+#[test]
 fn rx_closes_error() {
     const CAPACITY: u8 = 2;
 
