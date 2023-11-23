@@ -21,14 +21,22 @@ mod integration;
 
 pub(crate) mod svcs {
     use super::*;
+    use crate::req_rsp;
     use crate::service;
     use uuid::{uuid, Uuid};
 
     pub struct HelloWorld;
 
+    pub struct EchoDelayService;
+
     #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
     pub struct HelloWorldRequest {
         pub hello: String,
+    }
+
+    #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub struct Echo {
+        pub val: usize,
     }
 
     #[derive(Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -57,6 +65,57 @@ pub(crate) mod svcs {
         type ConnectError = ();
         type Hello = HelloHello;
         const UUID: Uuid = uuid!("9442b293-93d8-48b9-bbf7-52f636462bfe");
+    }
+
+    impl service::Service for EchoDelayService {
+        type ClientMsg = req_rsp::Request<Echo>;
+        type ServerMsg = req_rsp::Response<Echo>;
+        type ConnectError = ();
+        type Hello = ();
+        const UUID: Uuid = uuid!("5562a756-4d1d-4077-b8b9-7305f4a6b6a0");
+    }
+
+    impl EchoDelayService {
+        pub fn identity() -> service::Identity {
+            service::Identity::from_name::<Self>("echo-delay")
+        }
+
+        #[tracing::instrument(level = tracing::Level::INFO, name = "EchoDelayService::serve", skip(conns))]
+        pub async fn serve(mut conns: mpsc::Receiver<InboundConnect>) {
+            let mut worker = 1;
+            while let Some(req) = conns.recv().await {
+                let InboundConnect { hello, rsp } = req;
+                tracing::info!(?hello, "hello world service received connection");
+                let (their_chan, my_chan) = make_bidis(8);
+                tokio::spawn(Self::worker(worker, my_chan));
+                worker += 1;
+                let sent = rsp.send(Ok(their_chan)).is_ok();
+                tracing::debug!(?sent);
+            }
+        }
+
+        #[tracing::instrument(level = tracing::Level::INFO, name = "EchoDelayService::worker", skip(chan))]
+        async fn worker(
+            worker: usize,
+            chan: BiDi<req_rsp::Request<Echo>, req_rsp::Response<Echo>, Reset>,
+        ) {
+            while let Ok(req) = chan.rx().recv().await {
+                tracing::info!(?req, "echo-delay worker {worker} received request");
+                let (seq, Echo { val }) = req.into_parts();
+
+                let tx = chan.tx().clone();
+                let span = tracing::info_span!("respond", ?seq, val);
+                tokio::spawn(
+                    async move {
+                        tracing::debug!("responding in {val} ms...");
+                        tokio::time::sleep(tokio::time::Duration::from_millis(val as u64)).await;
+                        tx.send(seq.respond(Echo { val })).await.unwrap();
+                        tracing::info!("responded after {val} ms");
+                    }
+                    .instrument(span),
+                );
+            }
+        }
     }
 
     pub fn hello_with_hello_id() -> service::Identity {
