@@ -593,8 +593,9 @@ fn mpsc_send() {
 }
 
 #[test]
-#[cfg_attr(loom, ignore)] // this would probably run for 1000 years under loom...
-fn mpsc_send_full() {
+// this would probably run for 1000 years under loom...
+#[cfg_attr(any(loom, miri), ignore)]
+fn stress_mpsc_send() {
     const TX1_SENDS: usize = 64;
     const TX2_SENDS: usize = 64;
     const SENDS: usize = TX1_SENDS + TX2_SENDS;
