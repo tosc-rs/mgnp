@@ -156,6 +156,11 @@ where
                 Ok(_) => {}
                 Err(RequestError::Reset(reset)) => return Err(reset),
                 Err(RequestError::SeqInUse) => {
+                    // NOTE: yes, in theory, this loop *could* never terminate,
+                    // if *all* sequence numbers have a currently-in-flight
+                    // request. but, if you've somehow managed to spawn
+                    // `usize::MAX` request tasks at the same time, and none of
+                    // them have completed, you probably have worse problems...
                     tracing::trace!(seq, "sequence number in use, retrying...");
                     continue;
                 }
