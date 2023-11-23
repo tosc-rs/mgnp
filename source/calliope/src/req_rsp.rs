@@ -6,7 +6,7 @@ use maitake_sync::{
     WaitCell,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tracing::{instrument, Level};
+use tracing::Level;
 use tricky_pipe::mpsc::error::{RecvError, SendError, TrySendError};
 
 #[cfg(test)]
@@ -190,7 +190,7 @@ where
 
     /// Run the client's dispatcher in the background until cancelled or the
     /// connection is reset.
-    #[instrument(
+    #[tracing::instrument(
         level = Level::DEBUG,
         name = "Client::dispatcher",
         skip(self),
