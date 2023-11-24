@@ -8,6 +8,7 @@ use core::fmt;
 pub mod client;
 mod conn_table;
 pub mod message;
+pub mod req_rsp;
 pub mod service;
 
 pub use client::Connector;
@@ -23,7 +24,7 @@ use message::{InboundFrame, OutboundFrame, Rejection};
 use tricky_pipe::{mpsc, oneshot, serbox};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// A wire-level transport for [Calliope frames](Frame).
 ///

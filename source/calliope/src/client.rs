@@ -1,6 +1,6 @@
 use crate::{
     message::{Rejection, Reset},
-    service, Service,
+    req_rsp, service, Service,
 };
 use tricky_pipe::{bidi, mpsc, oneshot, serbox};
 
@@ -89,5 +89,18 @@ impl<S: Service> Connector<S> {
             Ok(Err(nak)) => Err(ConnectError::Nak(nak)),
             Ok(Ok(_)) => Ok(client_chan),
         }
+    }
+}
+
+impl<S: req_rsp::ReqRspService> Connector<S> {
+    pub async fn connect_req_rsp(
+        &mut self,
+        identity: impl Into<service::IdentityKind>,
+        hello: S::Hello,
+        channels: Channels<S>,
+    ) -> Result<req_rsp::Client<S>, ConnectError> {
+        self.connect(identity, hello, channels)
+            .await
+            .map(req_rsp::Client::new)
     }
 }
