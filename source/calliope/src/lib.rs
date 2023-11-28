@@ -7,6 +7,7 @@ use core::fmt;
 
 pub mod client;
 mod conn_table;
+pub mod discovery;
 pub mod message;
 pub mod req_rsp;
 pub mod service;
