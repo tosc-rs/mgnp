@@ -11,12 +11,12 @@ use crate::service::{self, Service};
 use serde::{Deserialize, Serialize};
 use uuid::{uuid, Uuid};
 
-pub struct EndpointListService;
+pub struct EndpointsService;
 
-impl Service for EndpointListService {
-    type Hello = ListEndpoints;
+impl Service for EndpointsService {
+    type Hello = WatchEndpoints;
     type ClientMsg = ();
-    type ServerMsg = EndpointPage;
+    type ServerMsg = EndpointsPage;
     type ConnectError = ();
 
     const UUID: Uuid = LIST_SERVICE_UUID;
@@ -24,49 +24,47 @@ impl Service for EndpointListService {
 
 pub const LIST_SERVICE_UUID: Uuid = uuid!("ec64bff3-7fc4-4ed5-a8f2-ed9e3b30f7be");
 
+/// Request type for [`EndpointListService`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum ListEndpoints {
-    /// List all endpoints available on the remote peer.
+pub enum WatchEndpoints {
+    /// Stream all endpoints available on the remote peer.
     All,
-    /// List all endpoints that implement the provided service.
+    /// Stream all endpoints that implement the provided service.
     Service(Uuid),
 }
 
-/// A single page of an endpoint list.
+/// A set of endpoint updates.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EndpointPage {
-    pub page_num: u32,
-    pub pages: u32,
-    pub bindings: heapless::Vec<Endpoint, { EndpointPage::PAGE_SIZE }>,
+pub struct EndpointsPage {
+    pub endpoints: heapless::Vec<Update, { EndpointsPage::PAGE_SIZE }>,
 }
 
-/// An endpoint binding, consisting of a [`service::Identity`] and metadata
-/// describing the endpoint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Endpoint {
+pub enum Update {
+    /// A new endpoint should be added to the remote peer's endpoint list.
+    Add(EndpointBinding),
+    /// A [`service::Identity`] no longer exists on this peer.
+    Remove(service::Identity),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EndpointBinding {
+    /// The identity of the endpoint.
     pub identity: service::Identity,
-    pub binding: BindingKind,
+    /// How this endpoint is routed to by this peer.
+    pub kind: EndpointKind,
 }
 
+/// Describes how an endpoint is routed to by this peer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum BindingKind {
+pub enum EndpointKind {
     /// The endpoint is local to this peer.
     Local,
     // TODO(eliza): allow discovering remote endpoints
 }
 
-impl EndpointPage {
+impl EndpointsPage {
     pub const PAGE_SIZE: usize = 32;
-
-    #[must_use]
-    pub fn is_first(&self) -> bool {
-        self.page_num == 0
-    }
-
-    #[must_use]
-    pub fn is_last(&self) -> bool {
-        self.page_num == self.pages - 1
-    }
 }
