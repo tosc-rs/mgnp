@@ -1,5 +1,8 @@
 use crate::{client, message, Service};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{
+    marker::PhantomData,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use futures::{future::FutureExt, pin_mut, select_biased};
 use maitake_sync::{
     wait_map::{WaitError, WaitMap, WakeOutcome},
@@ -29,15 +32,36 @@ pub struct Response<T> {
     body: T,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[must_use]
+pub struct StreamingResponse<T> {
+    seq: usize,
+    last: bool,
+    body: T,
+}
+
 pub struct Client<S>
 where
     S: ReqRspService,
 {
-    seq: AtomicUsize,
-    channel: client::Connection<S>,
-    shutdown: WaitCell,
-    dispatcher: WaitMap<usize, S::Response>,
-    has_dispatcher: AtomicBool,
+    inner: ClientDispatcher<S, S::Response>,
+}
+
+pub struct ServerStreamingClient<S>
+where
+    S: ServerStreamingService,
+{
+    inner: ClientDispatcher<S, StreamingResponse<S::Response>>,
+}
+
+pub struct ServerStream<S, C>
+where
+    S: ServerStreamingService,
+    C: AsRef<ServerStreamingClient<S>>,
+{
+    seq: usize,
+    client: C,
+    _s: PhantomData<S>,
 }
 
 pub trait ReqRspService:
@@ -47,11 +71,34 @@ pub trait ReqRspService:
     type Response: Serialize + DeserializeOwned + Send + Sync + 'static;
 }
 
+pub trait ServerStreamingService:
+    Service<ClientMsg = Request<Self::Request>, ServerMsg = StreamingResponse<Self::Response>>
+{
+    type Request: Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Response: Serialize + DeserializeOwned + Send + Sync + 'static;
+}
+
+struct ClientDispatcher<S: Service, R> {
+    seq: AtomicUsize,
+    channel: client::Connection<S>,
+    shutdown: WaitCell,
+    dispatcher: WaitMap<usize, R>,
+    has_dispatcher: AtomicBool,
+}
+
 // === impl Seq ===
 
 impl Seq {
     pub fn respond<T>(self, body: T) -> Response<T> {
         Response { seq: self.0, body }
+    }
+
+    pub fn respond_streaming<T>(&self, body: T, is_last: bool) -> StreamingResponse<T> {
+        StreamingResponse {
+            seq: self.0,
+            last: is_last,
+            body,
+        }
     }
 }
 
@@ -93,66 +140,36 @@ where
 {
     pub fn new(client: client::Connection<S>) -> Self {
         Self {
-            seq: AtomicUsize::new(0),
-            channel: client,
-            dispatcher: WaitMap::new(),
-            has_dispatcher: AtomicBool::new(false),
-            shutdown: WaitCell::new(),
+            inner: ClientDispatcher::new(client),
         }
     }
 
     pub async fn request(&self, body: S::Request) -> Result<S::Response, message::Reset> {
         #[cfg_attr(debug_assertions, allow(unreachable_code))]
-        let handle_wait_error = |err: WaitError| match err {
-            WaitError::Closed => {
-                let error = self.channel.tx().try_reserve().expect_err(
-                    "if the waitmap was closed, then the channel should \
-                        have been closed with an error!",
-                );
-                if let TrySendError::Error { error, .. } = error {
-                    return RequestError::Reset(error);
-                }
-
-                #[cfg(debug_assertions)]
-                unreachable!(
-                    "closing the channel with an error should have priority \
-                    over full/disconnected errors."
-                );
-
-                RequestError::Reset(message::Reset::BecauseISaidSo)
-            }
-            WaitError::Duplicate => RequestError::SeqInUse,
-            WaitError::AlreadyConsumed => {
-                unreachable!("data should not already be consumed, this is a bug")
-            }
-            WaitError::NeverAdded => {
-                unreachable!("we ensured the waiter was added, this is a bug!")
-            }
-            error => {
-                #[cfg(debug_assertions)]
-                todo!(
-                    "james added a new WaitError variant that we don't \
-                    know how to handle: {error:}"
-                );
-
-                #[cfg_attr(debug_assertions, allow(unreachable_code))]
-                RequestError::Reset(message::Reset::BecauseISaidSo)
-            }
-        };
-
         // aquire a send permit first --- this way, we don't increment the
         // sequence number until we actually have a channel reservation.
-        let permit = self.channel.tx().reserve().await.map_err(|e| match e {
-            SendError::Disconnected(()) => message::Reset::BecauseISaidSo,
-            SendError::Error { error, .. } => error,
-        })?;
+        let permit = self
+            .inner
+            .channel
+            .tx()
+            .reserve()
+            .await
+            .map_err(|e| match e {
+                SendError::Disconnected(()) => message::Reset::BecauseISaidSo,
+                SendError::Error { error, .. } => error,
+            })?;
 
         loop {
-            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
             // ensure waiter is enqueued before sending the request.
-            let wait = self.dispatcher.wait(seq);
+            let wait = self.inner.dispatcher.wait(seq);
             pin_mut!(wait);
-            match wait.as_mut().enqueue().await.map_err(handle_wait_error) {
+            match wait
+                .as_mut()
+                .enqueue()
+                .await
+                .map_err(|err| self.inner.handle_wait_error(err))
+            {
                 Ok(_) => {}
                 Err(RequestError::Reset(reset)) => return Err(reset),
                 Err(RequestError::SeqInUse) => {
@@ -170,7 +187,7 @@ where
             // actually send the message...
             permit.send(req);
 
-            return match wait.await.map_err(handle_wait_error) {
+            return match wait.await.map_err(|err| self.inner.handle_wait_error(err)) {
                 Ok(rsp) => Ok(rsp),
                 Err(RequestError::Reset(reset)) => Err(reset),
                 Err(RequestError::SeqInUse) => unreachable!(
@@ -186,11 +203,7 @@ where
     /// This will fail any outstanding `Request` futures, and reset the
     /// connection.
     pub fn shutdown(&self) {
-        tracing::debug!("shutting down client...");
-        self.shutdown.close();
-        self.channel
-            .close_with_error(message::Reset::BecauseISaidSo);
-        self.dispatcher.close();
+        self.inner.shutdown()
     }
 
     /// Run the client's dispatcher in the background until cancelled or the
@@ -205,7 +218,7 @@ where
     )]
     pub async fn dispatch(&self) -> Result<(), DispatchError> {
         #[cfg_attr(debug_assertions, allow(unreachable_code))]
-        if self.has_dispatcher.swap(true, Ordering::AcqRel) {
+        if self.inner.has_dispatcher.swap(true, Ordering::AcqRel) {
             #[cfg(debug_assertions)]
             panic!(
                 "a client connection may only have one running dispatcher \
@@ -221,11 +234,11 @@ where
             // wait for the next server message, or for the client to trigger a
             // shutdown.
             let msg = select_biased! {
-                _ = self.shutdown.wait().fuse() => {
+                _ = self.inner.shutdown.wait().fuse() => {
                     tracing::debug!("client dispatcher `shutting down...");
                     return Ok(());
                 }
-                msg = self.channel.rx().recv().fuse() => msg,
+                msg = self.inner.channel.rx().recv().fuse() => msg,
             };
 
             let Response { seq, body } = match msg {
@@ -237,15 +250,15 @@ where
                     };
 
                     tracing::debug!(%reset, "client connection reset, shutting down...");
-                    self.channel.close_with_error(reset);
-                    self.dispatcher.close();
+                    self.inner.channel.close_with_error(reset);
+                    self.inner.dispatcher.close();
                     return Err(DispatchError::ConnectionReset(reset));
                 }
             };
 
             tracing::trace!(seq, "dispatching response...");
 
-            match self.dispatcher.wake(&seq, body) {
+            match self.inner.dispatcher.wake(&seq, body) {
                 WakeOutcome::Woke => {
                     tracing::trace!(seq, "dispatched response");
                 }
@@ -269,4 +282,92 @@ where
 {
     type Request = Req;
     type Response = Rsp;
+}
+
+/// === impl ServerStream ====
+
+impl<S, C> ServerStream<S, C>
+where
+    C: AsRef<ServerStreamingClient<S>>,
+    S: ServerStreamingService,
+{
+    pub async fn next(&mut self) -> Result<Option<S::Response>, message::Reset> {
+        let inner = self.client.as_ref().inner;
+
+        match inner
+            .dispatcher
+            .wait(self.seq)
+            .await
+            .map_err(|err| inner.handle_wait_error(err))
+        {
+            Ok(rsp) => Ok(rsp),
+            Err(RequestError::Reset(reset)) => Err(reset),
+            Err(RequestError::SeqInUse) => unreachable!(
+                "we should have already enqueued the waiter, so its \
+                 sequence number should be okay. this is a bug!"
+            ),
+        };
+    }
+}
+
+// === impl ClientInner ===
+
+impl<S: Service, R> ClientDispatcher<S, R> {
+    fn new(client: client::Connection<S>) -> Self {
+        Self {
+            seq: AtomicUsize::new(0),
+            channel: client,
+            dispatcher: WaitMap::new(),
+            has_dispatcher: AtomicBool::new(false),
+            shutdown: WaitCell::new(),
+        }
+    }
+
+    fn shutdown(&self) {
+        tracing::debug!("shutting down client...");
+        self.shutdown.close();
+        self.channel
+            .close_with_error(message::Reset::BecauseISaidSo);
+        self.dispatcher.close();
+    }
+
+    fn handle_wait_error(&self, err: WaitError) -> RequestError {
+        match err {
+            WaitError::Closed => {
+                let error = self.channel.tx().try_reserve().expect_err(
+                    "if the waitmap was closed, then the channel should \
+                        have been closed with an error!",
+                );
+                if let TrySendError::Error { error, .. } = error {
+                    return RequestError::Reset(error);
+                }
+
+                #[cfg(debug_assertions)]
+                unreachable!(
+                    "closing the channel with an error should have priority \
+                    over full/disconnected errors."
+                );
+
+                #[cfg(not(debug_assertions))]
+                RequestError::Reset(message::Reset::BecauseISaidSo)
+            }
+            WaitError::Duplicate => RequestError::SeqInUse,
+            WaitError::AlreadyConsumed => {
+                unreachable!("data should not already be consumed, this is a bug")
+            }
+            WaitError::NeverAdded => {
+                unreachable!("we ensured the waiter was added, this is a bug!")
+            }
+            error => {
+                #[cfg(debug_assertions)]
+                todo!(
+                    "james added a new WaitError variant that we don't \
+                    know how to handle: {error:}"
+                );
+
+                #[cfg_attr(debug_assertions, allow(unreachable_code))]
+                RequestError::Reset(message::Reset::BecauseISaidSo)
+            }
+        }
+    }
 }
