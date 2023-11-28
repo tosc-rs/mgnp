@@ -1,3 +1,12 @@
+//! Calliope service discovery protocol.
+//!
+//! This module contains a [`Service`] definition, [`EndpointListService`], and
+//! messages used by that [`Service`]. [`EndpointListService`] provides a
+//! mechanism for a client to discover the endpoints available on its remote
+//! peer.
+//!
+//! In general, this service should be implemented by a peer using its
+//! [`service::Registry`] type.
 use crate::service::{self, Service};
 use serde::{Deserialize, Serialize};
 use uuid::{uuid, Uuid};
@@ -7,7 +16,7 @@ pub struct EndpointListService;
 impl Service for EndpointListService {
     type Hello = ListEndpoints;
     type ClientMsg = ();
-    type ServerMsg = EndpointListPage;
+    type ServerMsg = EndpointPage;
     type ConnectError = ();
 
     const UUID: Uuid = LIST_SERVICE_UUID;
@@ -26,16 +35,16 @@ pub enum ListEndpoints {
 
 /// A single page of an endpoint list.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EndpointListPage {
+pub struct EndpointPage {
     pub page_num: u32,
     pub pages: u32,
-    pub bindings: heapless::Vec<EndpointBinding, { EndpointListPage::PAGE_SIZE }>,
+    pub bindings: heapless::Vec<Endpoint, { EndpointPage::PAGE_SIZE }>,
 }
 
 /// An endpoint binding, consisting of a [`service::Identity`] and metadata
 /// describing the endpoint.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct EndpointBinding {
+pub struct Endpoint {
     pub identity: service::Identity,
     pub binding: BindingKind,
 }
@@ -48,7 +57,7 @@ pub enum BindingKind {
     // TODO(eliza): allow discovering remote endpoints
 }
 
-impl EndpointListPage {
+impl EndpointPage {
     pub const PAGE_SIZE: usize = 32;
 
     #[must_use]
