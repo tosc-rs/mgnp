@@ -113,6 +113,8 @@ pub(super) struct CoreVtable<E> {
     pub(super) type_name: fn() -> &'static str,
 }
 
+pub(super) struct Vtables<T>(PhantomData<fn(T)>);
+
 pub(super) struct SerVtable {
     #[cfg(any(test, feature = "alloc"))]
     pub(super) to_vec: SerVecFn,
@@ -600,21 +602,6 @@ impl ErasedSlice {
 // == impl ErasedPipe ===
 
 impl<E> ErasedPipe<E> {
-    pub(super) unsafe fn new(ptr: *const (), vtable: &'static CoreVtable<E>) -> Self {
-        Self { ptr, vtable }
-    }
-
-    /// # Safety
-    ///
-    /// This `ErasedPipe` must have been type-erased from a tricky-pipe with
-    /// elements of type `T`!
-    pub(super) unsafe fn typed<T>(self) -> TypedPipe<T, E> {
-        TypedPipe {
-            pipe: self,
-            _t: PhantomData,
-        }
-    }
-
     pub(super) fn core(&self) -> &Core<E> {
         unsafe { &*(self.vtable.get_core)(self.ptr) }
     }
@@ -658,6 +645,31 @@ unsafe impl<E: Send + Sync> Sync for ErasedPipe<E> {}
 // === impl TypedPipe ===
 
 impl<T: 'static, E> TypedPipe<T, E> {
+    pub(super) fn new(ptr: *const (), vtable: &'static CoreVtable<E>) -> Self {
+        Self {
+            pipe: ErasedPipe { ptr, vtable },
+            _t: PhantomData,
+        }
+    }
+
+    pub(super) unsafe fn erased(self) -> ErasedPipe<E> {
+        self.pipe
+    }
+
+    /// Clone this `TypedPipe` *without* incrementing the reference count. This
+    /// is intended to be used only when converting to a different reference
+    /// type, when the original `TypedPipe` will not have its destructor run.
+    ///
+    /// # Safety
+    ///
+    /// Do NOT `Drop` this `TypedPipe` after calling this method!!!!
+    pub(super) unsafe fn clone_no_ref_inc(&self) -> Self {
+        Self {
+            pipe: self.pipe.clone(),
+            _t: PhantomData,
+        }
+    }
+
     pub(super) fn core(&self) -> &Core<E> {
         self.pipe.core()
     }
@@ -682,6 +694,27 @@ impl<T: 'static, E> Clone for TypedPipe<T, E> {
 
 unsafe impl<T: Send, E: Send + Sync> Send for TypedPipe<T, E> {}
 unsafe impl<T: Send, E: Send + Sync> Sync for TypedPipe<T, E> {}
+
+// === impl MkVtables ===
+
+impl<T: Serialize + Send + 'static> Vtables<T> {
+    pub(crate) const SERIALIZE: &'static SerVtable = &SerVtable {
+        #[cfg(any(test, feature = "alloc"))]
+        to_vec: SerVtable::to_vec::<T>,
+        #[cfg(any(test, feature = "alloc"))]
+        to_vec_framed: SerVtable::to_vec_framed::<T>,
+        to_slice: SerVtable::to_slice::<T>,
+        to_slice_framed: SerVtable::to_slice_framed::<T>,
+        drop_elem: SerVtable::drop_elem::<T>,
+    };
+}
+
+impl<T: DeserializeOwned + Send + 'static> Vtables<T> {
+    pub(crate) const DESERIALIZE: &'static DeserVtable = &DeserVtable {
+        from_bytes: DeserVtable::from_bytes::<T>,
+        from_bytes_framed: DeserVtable::from_bytes_framed::<T>,
+    };
+}
 
 // === impl SerVtable ===
 
@@ -753,14 +786,9 @@ impl SerVtable {
     }
 }
 
-impl DeserVtable {
-    pub(super) const fn new<T: DeserializeOwned + 'static>() -> Self {
-        Self {
-            from_bytes: Self::from_bytes::<T>,
-            from_bytes_framed: Self::from_bytes_framed::<T>,
-        }
-    }
+// === impl DeserVtable ===
 
+impl DeserVtable {
     fn from_bytes<T: DeserializeOwned + 'static>(
         elems: ErasedSlice,
         idx: u8,

@@ -10,6 +10,7 @@ use crate::mpsc::{
 };
 use core::fmt;
 use futures::FutureExt;
+use serde::{de::DeserializeOwned, Serialize};
 
 /// A bidirectional typed channel.
 ///
@@ -78,6 +79,20 @@ where
         }
     }
 
+    /// Erase the message types of this `BiDi`, returning a [`SerBiDi`].
+    pub fn erase(self) -> SerBiDi<E>
+    where
+        In: Serialize + Send + Sync + 'static,
+        Out: DeserializeOwned + Send + Sync + 'static,
+    {
+        SerBiDi {
+            tx: self.tx.erased(),
+            rx: self.rx.erased(),
+            seen_rx_error: self.seen_rx_error,
+            seen_tx_error: self.seen_tx_error,
+        }
+    }
+
     /// Consumes `self`, extracting the inner [`Sender`] and [`Receiver`].
     #[must_use]
     pub fn split(self) -> (Sender<Out, E>, Receiver<In, E>) {
@@ -86,7 +101,6 @@ where
 
     /// Wait until the channel is either ready to send a message *or* a new
     /// incoming message is received, whichever occurs first.
-    #[must_use]
     pub async fn wait(&mut self) -> WaitResult<Event<In, Permit<'_, Out, E>>, E> {
         futures::select_biased! {
             reserve = self.tx.reserve().fuse() => {
