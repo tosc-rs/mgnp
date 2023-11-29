@@ -1,5 +1,8 @@
 use super::*;
-use crate::loom::sync::Arc;
+use crate::{
+    loom::{cell::CellWith, sync::Arc},
+    mpsc::channel_core::MAX_CAPACITY,
+};
 use alloc::boxed::Box;
 
 use super::channel_core::{Core, CoreVtable};
@@ -11,12 +14,15 @@ use super::channel_core::{Core, CoreVtable};
 // TODO(eliza): we should probably replace the use of `Arc` here with manual ref
 // counting, since the `Core` tracks the number of senders and receivers
 // already. But, I was in a hurry to get a prototype working...
-pub struct TrickyPipe<T, E = ()>(Arc<Inner<T, E>>)
+pub struct TrickyPipe<T, E = ()>(Arc<SharedState<T, E>>)
 where
     T: 'static,
     E: Clone + 'static;
 
-struct Inner<T, E>
+/// The shared state of a [`TrickyPipe`].
+///
+/// This is needed only when constructing new `tricky-pipe`s from a custom allocation.
+pub struct SharedState<T, E>
 where
     T: 'static,
     E: Clone + 'static,
@@ -39,8 +45,9 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
     /// NOTE: `CAPACITY` MUST be a power of two, and must also be <= the number of bits
     /// in a `usize`, e.g. <= 64 on a 64-bit system.
     // TODO(eliza): we would need to add a mnemos-alloc version of this...
+    #[must_use]
     pub fn new(capacity: u8) -> Self {
-        Self(Arc::new(Inner {
+        Self(Arc::new(SharedState {
             core: Core::new(capacity),
             elements: (0..capacity)
                 .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
@@ -84,23 +91,23 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
 
     unsafe fn get_core(ptr: *const ()) -> *const Core<E> {
         unsafe {
-            let ptr = ptr.cast::<Inner<T, E>>();
+            let ptr = ptr.cast::<SharedState<T, E>>();
             ptr::addr_of!((*ptr).core)
         }
     }
 
     unsafe fn get_elems(ptr: *const ()) -> ErasedSlice {
-        let ptr = ptr.cast::<Inner<T, E>>();
+        let ptr = ptr.cast::<SharedState<T, E>>();
         ErasedSlice::erase(&(*ptr).elements)
     }
 
     unsafe fn erased_clone(ptr: *const ()) {
         test_println!("erased_clone({ptr:p})");
-        Arc::increment_strong_count(ptr.cast::<Inner<T, E>>())
+        Arc::increment_strong_count(ptr.cast::<SharedState<T, E>>())
     }
 
     unsafe fn erased_drop(ptr: *const ()) {
-        let arc = Arc::from_raw(ptr.cast::<Inner<T, E>>());
+        let arc = Arc::from_raw(ptr.cast::<SharedState<T, E>>());
         test_println!(refs = Arc::strong_count(&arc), "erased_drop({ptr:p})");
         drop(arc)
     }
@@ -183,11 +190,32 @@ impl<T, E: Clone> Drop for TrickyPipe<T, E> {
 unsafe impl<T: Send, E: Clone + Send + Sync> Send for TrickyPipe<T, E> {}
 unsafe impl<T: Send, E: Clone + Send + Sync> Sync for TrickyPipe<T, E> {}
 
-// === impl Inner ===
+// === impl SharedState ===
 
-impl<T, E: Clone> Drop for Inner<T, E> {
+impl<T, E: Clone> SharedState<T, E> {
+    /// Construct a new `SharedState` from an array of `UnsafeCell`s.
+    ///
+    /// This may be used to construct a new [`TrickyPipe`]`<T>` from an
+    /// [`Arc`]`<`[`SharedState`]`<T>>`, allowing the use of custom allocations
+    /// for constructing a `TrickyPipe`.
+    #[cfg(not(loom))]
+    pub fn new(elements: Box<[core::cell::UnsafeCell<core::mem::MaybeUninit<T>>]>) -> Self {
+        let capacity = elements.len();
+        assert!(
+            capacity <= MAX_CAPACITY,
+            "capacity must be <= {}",
+            MAX_CAPACITY
+        );
+        Self {
+            core: Core::new(capacity as u8),
+            elements,
+        }
+    }
+}
+
+impl<T, E: Clone> Drop for SharedState<T, E> {
     fn drop(&mut self) {
-        test_span!("Inner::drop");
+        test_span!("SharedState::drop");
 
         // TODO(eliza): there is probably a more efficient way to implement this
         // rather than by using `try_dequeue`, since we know that we have

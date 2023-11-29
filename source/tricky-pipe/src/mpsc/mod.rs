@@ -3,7 +3,7 @@ use self::{
     channel_core::{DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe},
     error::*,
 };
-use crate::loom::cell::{self, UnsafeCell};
+use crate::loom::cell::{self, CellWith, UnsafeCell};
 use core::{
     fmt,
     future::Future,
