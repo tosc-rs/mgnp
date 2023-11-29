@@ -61,6 +61,7 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
         clone: Self::erased_clone,
         drop: Self::erased_drop,
         type_name: core::any::type_name::<T>,
+        type_id: core::any::TypeId::of::<T>,
     };
 
     fn pipe(&self) -> TypedPipe<T, E> {
