@@ -63,14 +63,11 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
         type_name: core::any::type_name::<T>,
     };
 
-    fn erased(&self) -> ErasedPipe<E> {
+    fn pipe(&self) -> TypedPipe<T, E> {
         let ptr = Arc::into_raw(self.0.clone()) as *const _;
-        unsafe { ErasedPipe::new(ptr, Self::CORE_VTABLE) }
+        TypedPipe::new(ptr, Self::CORE_VTABLE)
     }
 
-    fn typed(&self) -> TypedPipe<T, E> {
-        unsafe { self.erased().typed() }
-    }
     /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
@@ -78,7 +75,7 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
     pub fn receiver(&self) -> Option<Receiver<T, E>> {
         self.0.core.try_claim_rx()?;
 
-        Some(Receiver { pipe: self.typed() })
+        Some(Receiver { pipe: self.pipe() })
     }
 
     /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
@@ -86,7 +83,7 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
     /// This function may be called multiple times.
     pub fn sender(&self) -> Sender<T, E> {
         self.0.core.add_tx();
-        Sender { pipe: self.typed() }
+        Sender { pipe: self.pipe() }
     }
 
     unsafe fn get_core(ptr: *const ()) -> *const Core<E> {
@@ -111,57 +108,33 @@ impl<T: 'static, E: Clone + 'static> TrickyPipe<T, E> {
         test_println!(refs = Arc::strong_count(&arc), "erased_drop({ptr:p})");
         drop(arc)
     }
-}
 
-impl<T, E> TrickyPipe<T, E>
-where
-    T: Serialize + Send + 'static,
-    E: Clone + Send + Sync,
-{
     /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
     /// a serialized instance of `T`.
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn ser_receiver(&self) -> Option<SerReceiver<E>> {
+    pub fn ser_receiver(&self) -> Option<SerReceiver<E>>
+    where
+        T: Serialize + Send + 'static,
+    {
         self.0.core.try_claim_rx()?;
 
-        Some(SerReceiver {
-            pipe: self.erased(),
-            vtable: Self::SER_VTABLE,
-        })
+        Some(SerReceiver::new(self.pipe()))
     }
 
-    const SER_VTABLE: &'static SerVtable = &SerVtable {
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec: SerVtable::to_vec::<T>,
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec_framed: SerVtable::to_vec_framed::<T>,
-        to_slice: SerVtable::to_slice::<T>,
-        to_slice_framed: SerVtable::to_slice_framed::<T>,
-        drop_elem: SerVtable::drop_elem::<T>,
-    };
-}
-
-impl<T, E> TrickyPipe<T, E>
-where
-    T: DeserializeOwned + Send + 'static,
-    E: Clone + Send + Sync,
-{
     /// Try to obtain a [`DeserSender`] capable of sending bytes containing
     /// a serialized instance of `T`.
     ///
     /// This method will only return [`Some`] on the first call. All subsequent calls
     /// will return [`None`].
-    pub fn deser_sender(&self) -> DeserSender<E> {
+    pub fn deser_sender(&self) -> DeserSender<E>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
         self.0.core.add_tx();
-        DeserSender {
-            pipe: self.erased(),
-            vtable: Self::DESER_VTABLE,
-        }
+        DeserSender::new(self.pipe())
     }
-
-    const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
 impl<T, E: Clone> Clone for TrickyPipe<T, E> {

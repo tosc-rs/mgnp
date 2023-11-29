@@ -1,5 +1,5 @@
 use super::{
-    channel_core::{Core, CoreVtable, ErasedPipe, ErasedSlice},
+    channel_core::{Core, CoreVtable, ErasedSlice},
     *,
 };
 
@@ -15,7 +15,7 @@ pub struct StaticTrickyPipe<T: 'static, const CAPACITY: usize, E = ()> {
 impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
 where
     T: 'static,
-    E: 'static,
+    E: Clone + 'static,
 {
     const EMPTY_CELL: Cell<T> = UnsafeCell::new(MaybeUninit::uninit());
 
@@ -45,12 +45,8 @@ where
         type_name: core::any::type_name::<T>,
     };
 
-    fn erased(&'static self) -> ErasedPipe<E> {
-        unsafe { ErasedPipe::new(self as *const _ as *const (), Self::CORE_VTABLE) }
-    }
-
-    fn typed(&'static self) -> TypedPipe<T, E> {
-        unsafe { self.erased().typed() }
+    fn pipe(&'static self) -> TypedPipe<T, E> {
+        TypedPipe::new(self as *const _ as *const (), Self::CORE_VTABLE)
     }
 
     /// Try to obtain a [`Receiver<T>`] capable of receiving `T`-typed data
@@ -60,7 +56,7 @@ where
     pub fn receiver(&'static self) -> Option<Receiver<T, E>> {
         self.core.try_claim_rx()?;
 
-        Some(Receiver { pipe: self.typed() })
+        Some(Receiver { pipe: self.pipe() })
     }
 
     /// Obtain a [`Sender<T>`] capable of sending `T`-typed data
@@ -68,7 +64,33 @@ where
     /// This function may be called multiple times.
     pub fn sender(&'static self) -> Sender<T, E> {
         self.core.add_tx();
-        Sender { pipe: self.typed() }
+        Sender { pipe: self.pipe() }
+    }
+
+    /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
+    /// a serialized instance of `T`.
+    ///
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
+    pub fn ser_receiver(&'static self) -> Option<SerReceiver<E>>
+    where
+        T: Serialize + Send + 'static,
+    {
+        self.core.try_claim_rx()?;
+
+        Some(SerReceiver::new(self.pipe()))
+    }
+
+    /// Try to obtain a [`DeserSender`] capable of sending bytes containing
+    /// a serialized instance of `T`.
+    ///
+    /// This method will only return [`Some`] on the first call. All subsequent calls
+    /// will return [`None`].
+    pub fn deser_sender(&'static self) -> DeserSender<E>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        DeserSender::new(self.pipe())
     }
 
     fn get_core(ptr: *const ()) -> *const Core<E> {
@@ -90,56 +112,6 @@ where
     }
 
     fn erased_drop(_: *const ()) {}
-}
-
-impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
-where
-    T: Serialize + Send + 'static,
-{
-    /// Try to obtain a [`SerReceiver`] capable of receiving bytes containing
-    /// a serialized instance of `T`.
-    ///
-    /// This method will only return [`Some`] on the first call. All subsequent calls
-    /// will return [`None`].
-    pub fn ser_receiver(&'static self) -> Option<SerReceiver<E>> {
-        self.core.try_claim_rx()?;
-
-        Some(SerReceiver {
-            pipe: self.erased(),
-            vtable: Self::SER_VTABLE,
-        })
-    }
-
-    const SER_VTABLE: &'static SerVtable = &SerVtable {
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec: SerVtable::to_vec::<T>,
-        #[cfg(any(test, feature = "alloc"))]
-        to_vec_framed: SerVtable::to_vec_framed::<T>,
-        to_slice: SerVtable::to_slice::<T>,
-        to_slice_framed: SerVtable::to_slice_framed::<T>,
-        drop_elem: SerVtable::drop_elem::<T>,
-    };
-}
-
-impl<T, E, const CAPACITY: usize> StaticTrickyPipe<T, CAPACITY, E>
-where
-    T: DeserializeOwned + Send + 'static,
-    E:,
-{
-    /// Try to obtain a [`DeserSender`] capable of sending bytes containing
-    /// a serialized instance of `T`.
-    ///
-    /// This method will only return [`Some`] on the first call. All subsequent calls
-    /// will return [`None`].
-    pub fn deser_sender(&'static self) -> DeserSender<E> {
-        self.core.add_tx();
-        DeserSender {
-            pipe: self.erased(),
-            vtable: Self::DESER_VTABLE,
-        }
-    }
-
-    const DESER_VTABLE: &'static DeserVtable = &DeserVtable::new::<T>();
 }
 
 unsafe impl<T, E, const CAPACITY: usize> Send for StaticTrickyPipe<T, CAPACITY, E>

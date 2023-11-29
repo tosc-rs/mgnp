@@ -1,13 +1,15 @@
 //! Multi-Producer, Single-Consumer (MPSC) channels.
 use self::{
-    channel_core::{DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe},
+    channel_core::{
+        DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe, Vtables,
+    },
     error::*,
 };
 use crate::loom::cell::{self, CellWith, UnsafeCell};
 use core::{
     fmt,
     future::Future,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr,
@@ -269,6 +271,23 @@ where
         self.pipe.elems()[res.idx as usize].with(|ptr| unsafe { (*ptr).assume_init_read() })
     }
 
+    /// Erases the message type of this `Receiver`, returning a [`SerReceiver`]
+    /// that receives serialized byte representations of messages.
+    pub fn erased(self) -> SerReceiver<E>
+    where
+        T: Serialize + Send + Sync,
+    {
+        // don't run the destructor for this `Receiver`, as we are converting it
+        // into a `DeserReceiver`, which will keep the channel open.
+        let this = mem::ManuallyDrop::new(self);
+        unsafe {
+            // Safety: since we are not dropping the `Receiver`, we can safely
+            // duplicate the `TypedPipe`, preserving the existing receiver
+            // refcount.
+            SerReceiver::new(this.pipe.clone_no_ref_inc())
+        }
+    }
+
     /// Close this channel with an error. Any subsequent attempts to send
     /// messages to this channel will fail with `error`.
     ///
@@ -379,6 +398,16 @@ impl<T, E: Clone> futures::Stream for Receiver<T, E> {
 // === impl SerReceiver ===
 
 impl<E: Clone> SerReceiver<E> {
+    fn new<T>(pipe: TypedPipe<T, E>) -> Self
+    where
+        T: Serialize + Send + 'static,
+    {
+        Self {
+            pipe: unsafe { pipe.erased() },
+            vtable: Vtables::<T>::SERIALIZE,
+        }
+    }
+
     /// Attempts to receive the serialized representation of next message from
     /// the channel, without waiting for a new message to be sent if none are
     /// available.
@@ -683,6 +712,16 @@ unsafe impl<E: Send + Sync> Sync for SerRecvRef<'_, E> {}
 // === impl DeserSender ===
 
 impl<E: Clone> DeserSender<E> {
+    fn new<T>(pipe: TypedPipe<T, E>) -> Self
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        Self {
+            pipe: unsafe { pipe.erased() },
+            vtable: Vtables::<T>::DESERIALIZE,
+        }
+    }
+
     /// Reserve capacity to send a serialized message to the channel.
     ///
     /// If the channel is currently at capacity, this method waits until
@@ -1145,6 +1184,24 @@ impl<T, E: Clone> Sender<T, E> {
         let pipe = self.pipe.core().try_reserve()?;
         let cell = self.pipe.elems()[pipe.idx as usize].get_mut();
         Ok(Permit { cell, pipe })
+    }
+
+    /// Erases the message type of this `Sender`, returning a [`DeserSender`]
+    /// that sends messages from their serialized binary representations.
+    pub fn erased(self) -> DeserSender<E>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        // don't run the destructor for this `Sender`, as we are converting it
+        // into a `SerSender`, keeping the existing reference count held by
+        // this `Sender`.
+        let this = mem::ManuallyDrop::new(self);
+        DeserSender::new(unsafe {
+            // Safety: since we are not dropping the `Sender`, we can safely
+            // duplicate the `TypedPipe`, preserving the existing receiver
+            // refcount.
+            this.pipe.clone_no_ref_inc()
+        })
     }
 
     /// Close this channel with an error. Any subsequent attempts to send
