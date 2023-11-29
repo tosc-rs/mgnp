@@ -5,6 +5,7 @@ use crate::loom::{
     sync::atomic::{AtomicU16, AtomicUsize, Ordering::*},
 };
 use core::{
+    any::TypeId,
     cmp, fmt,
     marker::PhantomData,
     mem::{ManuallyDrop, MaybeUninit},
@@ -111,6 +112,7 @@ pub(super) struct CoreVtable<E> {
     pub(super) clone: unsafe fn(*const ()),
     pub(super) drop: unsafe fn(*const ()),
     pub(super) type_name: fn() -> &'static str,
+    pub(super) type_id: fn() -> TypeId,
 }
 
 pub(super) struct Vtables<T>(PhantomData<fn(T)>);
@@ -602,6 +604,31 @@ impl ErasedSlice {
 // == impl ErasedPipe ===
 
 impl<E> ErasedPipe<E> {
+    pub(super) fn typed<T: 'static>(self) -> Option<TypedPipe<T, E>> {
+        if TypeId::of::<T>() == (self.vtable.type_id)() {
+            Some(TypedPipe {
+                pipe: self,
+                _t: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Clone this `ErasedPipe` *without* incrementing the reference count. This
+    /// is intended to be used only when converting to a different reference
+    /// type, when the original `ErasedPipe` will not have its destructor run.
+    ///
+    /// # Safety
+    ///
+    /// Do NOT `Drop` this `ErasedPipe` after calling this method!!!!
+    pub(super) unsafe fn clone_no_ref_inc(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            vtable: self.vtable,
+        }
+    }
+
     pub(super) fn core(&self) -> &Core<E> {
         unsafe { &*(self.vtable.get_core)(self.ptr) }
     }
@@ -665,7 +692,7 @@ impl<T: 'static, E> TypedPipe<T, E> {
     /// Do NOT `Drop` this `TypedPipe` after calling this method!!!!
     pub(super) unsafe fn clone_no_ref_inc(&self) -> Self {
         Self {
-            pipe: self.pipe.clone(),
+            pipe: self.pipe.clone_no_ref_inc(),
             _t: PhantomData,
         }
     }

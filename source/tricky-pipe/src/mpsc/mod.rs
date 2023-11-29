@@ -9,7 +9,7 @@ use crate::loom::cell::{self, CellWith, UnsafeCell};
 use core::{
     fmt,
     future::Future,
-    mem::{self, MaybeUninit},
+    mem::{self, ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     pin::Pin,
     ptr,
@@ -527,6 +527,27 @@ impl<E: Clone> SerReceiver<E> {
         })
     }
 
+    /// Attempts to cast this type-erased `SerReceiver` back to a typed
+    /// [`Receiver`]`<T, E>`, if this `SerReceiver` is associated with a channel
+    /// of `T`-typed messages.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`Receiver`]`<T, E>)` if this `SerReceiver` is associated
+    ///   with a T`-typed channel.
+    /// - [`Err`]`(SerReceiver)` if this `SerReceiver` is associated with a
+    ///   channel with a  message type other than `T`, allowing the
+    ///   `SerReceiver` to be recovered.
+    pub fn try_cast<T>(self) -> Result<Receiver<T, E>, Self> {
+        // Don't drop this `SerReceiver`, as the return value will own this
+        // `SerReceiver`'s reference count.
+        let this = ManuallyDrop::new(self);
+        match unsafe { this.pipe.clone_no_ref_inc() }.typed::<T>() {
+            Some(pipe) => Ok(Receiver { pipe }),
+            None => Err(ManuallyDrop::into_inner(this)),
+        }
+    }
+
     /// Close this channel with an error. Any subsequent attempts to send
     /// messages to this channel will fail with `error`.
     ///
@@ -874,6 +895,26 @@ impl<E: Clone> DeserSender<E> {
             .await
             .map_err(SerSendError::from_send_error)?
             .send_framed(bytes)
+    }
+
+    /// Attempts to cast this type-erased `DeserSender` back to a typed
+    /// [`Sender`]`<T, E>`, if this `DeserSender` is associated with a channel of
+    /// `T`-typed messages.
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`Sender`]`<T, E>)` if this `DeserSender` is associated with a
+    ///   `T`-typed channel.
+    /// - [`Err`]`(DeserSender)` if this `DeserSender` is associated with a
+    ///   channel with a  message type other than `T`, allowing the `DeserSender` to be recovered.
+    pub fn try_cast<T>(self) -> Result<Sender<T, E>, Self> {
+        // Don't drop this `DeserSender`, as the return value will own this
+        // `DeserSender`'s reference count.
+        let this = ManuallyDrop::new(self);
+        match unsafe { this.pipe.clone_no_ref_inc() }.typed::<T>() {
+            Some(pipe) => Ok(Sender { pipe }),
+            None => Err(ManuallyDrop::into_inner(this)),
+        }
     }
 
     /// Close this channel with an error. Any subsequent attempts to send
