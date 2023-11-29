@@ -1,6 +1,6 @@
 use super::error::*;
 use crate::loom::{
-    cell::UnsafeCell,
+    cell::{CellWith, UnsafeCell},
     hint,
     sync::atomic::{AtomicU16, AtomicUsize, Ordering::*},
 };

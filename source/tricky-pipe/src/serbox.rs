@@ -2,7 +2,7 @@
 #![warn(missing_debug_implementations)]
 use crate::{
     loom::{
-        cell::UnsafeCell,
+        cell::{CellWith, UnsafeCell},
         sync::atomic::{AtomicU8, Ordering::*},
     },
     typeinfo::TypeInfo,

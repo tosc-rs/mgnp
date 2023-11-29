@@ -1,6 +1,18 @@
 #[allow(unused_imports)]
 pub(crate) use self::inner::*;
 
+pub(crate) trait CellWith<T> {
+    fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(*const T) -> R;
+
+    fn with_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(*mut T) -> R;
+
+    fn get_mut(&self) -> cell::MutPtr<T>;
+}
+
 #[cfg(all(loom, test))]
 mod inner {
     #![allow(dead_code)]
@@ -74,7 +86,35 @@ mod inner {
     }
 
     #[cfg(test)]
-    pub(crate) use loom::{cell, future, hint, thread};
+    pub(crate) use loom::{future, hint, thread};
+
+    #[cfg(test)]
+    pub(crate) mod cell {
+        pub(crate) use super::super::CellWith;
+        pub(crate) use loom::cell::*;
+        impl<T> CellWith<T> for UnsafeCell<T> {
+            #[inline(always)]
+            fn with<F, R>(&self, f: F) -> R
+            where
+                F: FnOnce(*const T) -> R,
+            {
+                loom::cell::UnsafeCell::with(self, f)
+            }
+
+            #[inline(always)]
+            fn with_mut<F, R>(&self, f: F) -> R
+            where
+                F: FnOnce(*mut T) -> R,
+            {
+                loom::cell::UnsafeCell::with_mut(self, f)
+            }
+
+            #[inline(always)]
+            fn get_mut(&self) -> MutPtr<T> {
+                loom::cell::UnsafeCell::get_mut(self)
+            }
+        }
+    }
 
     #[cfg(test)]
     pub(crate) fn model(f: impl Fn() + Send + Sync + 'static) {
@@ -222,60 +262,85 @@ mod inner {
     }
 
     pub(crate) mod cell {
-        #[derive(Debug)]
-        pub(crate) struct UnsafeCell<T: ?Sized>(core::cell::UnsafeCell<T>);
+        pub(crate) use super::super::CellWith;
+        pub(crate) use core::cell::UnsafeCell;
 
-        impl<T> UnsafeCell<T> {
-            pub const fn new(data: T) -> UnsafeCell<T> {
-                UnsafeCell(core::cell::UnsafeCell::new(data))
-            }
-        }
-
-        impl<T: ?Sized> UnsafeCell<T> {
+        impl<T> CellWith<T> for UnsafeCell<T> {
             #[inline(always)]
-            pub fn with<F, R>(&self, f: F) -> R
+            fn with<F, R>(&self, f: F) -> R
             where
                 F: FnOnce(*const T) -> R,
             {
-                f(self.0.get())
+                f(self.get())
             }
 
             #[inline(always)]
-            pub fn with_mut<F, R>(&self, f: F) -> R
+            fn with_mut<F, R>(&self, f: F) -> R
             where
                 F: FnOnce(*mut T) -> R,
             {
-                f(self.0.get())
+                f(self.get())
             }
 
             #[inline(always)]
-            pub(crate) fn get(&self) -> ConstPtr<T> {
-                ConstPtr(self.0.get())
-            }
-
-            #[inline(always)]
-            pub(crate) fn get_mut(&self) -> MutPtr<T> {
-                MutPtr(self.0.get())
+            fn get_mut(&self) -> MutPtr<T> {
+                MutPtr(self.get())
             }
         }
+        // #[derive(Debug)]
+        // pub(crate) struct UnsafeCell<T: ?Sized>(core::cell::UnsafeCell<T>);
 
-        #[derive(Debug)]
-        pub(crate) struct ConstPtr<T: ?Sized>(*const T);
+        // impl<T> UnsafeCell<T> {
+        //     pub const fn new(data: T) -> UnsafeCell<T> {
+        //         UnsafeCell(core::cell::UnsafeCell::new(data))
+        //     }
+        // }
 
-        impl<T: ?Sized> ConstPtr<T> {
-            #[inline(always)]
-            pub(crate) unsafe fn deref(&self) -> &T {
-                &*self.0
-            }
+        // impl<T: ?Sized> UnsafeCell<T> {
+        //     #[inline(always)]
+        //     pub fn with<F, R>(&self, f: F) -> R
+        //     where
+        //         F: FnOnce(*const T) -> R,
+        //     {
+        //         f(self.0.get())
+        //     }
 
-            #[inline(always)]
-            pub fn with<F, R>(&self, f: F) -> R
-            where
-                F: FnOnce(*const T) -> R,
-            {
-                f(self.0)
-            }
-        }
+        //     #[inline(always)]
+        //     pub fn with_mut<F, R>(&self, f: F) -> R
+        //     where
+        //         F: FnOnce(*mut T) -> R,
+        //     {
+        //         f(self.0.get())
+        //     }
+
+        //     #[inline(always)]
+        //     pub(crate) fn get(&self) -> ConstPtr<T> {
+        //         ConstPtr(self.0.get())
+        //     }
+
+        //     #[inline(always)]
+        //     pub(crate) fn get_mut(&self) -> MutPtr<T> {
+        //         MutPtr(self.0.get())
+        //     }
+        // }
+
+        // #[derive(Debug)]
+        // pub(crate) struct ConstPtr<T: ?Sized>(*const T);
+
+        // impl<T: ?Sized> ConstPtr<T> {
+        //     #[inline(always)]
+        //     pub(crate) unsafe fn deref(&self) -> &T {
+        //         &*self.0
+        //     }
+
+        //     #[inline(always)]
+        //     pub fn with<F, R>(&self, f: F) -> R
+        //     where
+        //         F: FnOnce(*const T) -> R,
+        //     {
+        //         f(self.0)
+        //     }
+        // }
 
         #[derive(Debug)]
         pub(crate) struct MutPtr<T: ?Sized>(*mut T);
