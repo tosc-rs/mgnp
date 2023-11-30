@@ -114,9 +114,10 @@ use crate::{
     typeinfo::TypeInfo,
 };
 use core::{
+    any::TypeId,
     fmt,
     future::Future,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     pin::Pin,
     task::{self, Context, Poll},
 };
@@ -145,9 +146,15 @@ use alloc::sync::Arc;
 #[must_use = "a `Receiver` does nothing unless used to receive a message"]
 pub struct Receiver<T> {
     chan: *const Oneshot<T>,
-    drop_erased: unsafe fn(*const Oneshot<()>),
-    drop: unsafe fn(*const Oneshot<T>),
-    clone: unsafe fn(*const Oneshot<T>),
+    vtable: &'static RefVtable,
+}
+
+/// A type-erased reusable one-shot channel.
+pub struct ErasedReceiver {
+    chan: *const Oneshot<()>,
+    vtable: &'static RefVtable,
+    type_id: TypeId,
+    drop_data: unsafe fn(*const Oneshot<()>),
 }
 
 /// Sends a single message to the corresponding [`Receiver`].
@@ -163,7 +170,7 @@ pub struct Receiver<T> {
 #[must_use = "a `Sender` does nothing unless used to send a message"]
 pub struct Sender<T> {
     chan: *const Oneshot<T>,
-    drop: unsafe fn(*const Oneshot<T>),
+    vtable: &'static RefVtable,
     sent: bool,
 }
 
@@ -185,8 +192,8 @@ pub struct Sender<T> {
 #[must_use = "a `DeserSender` does nothing unless used to receive a message"]
 pub struct DeserSender {
     chan: *const Oneshot<()>,
-    drop: unsafe fn(*const Oneshot<()>),
-    vtable: &'static DeserVtable,
+    vtable: &'static RefVtable,
+    ser_vtable: &'static DeserVtable,
     sent: bool,
 }
 
@@ -195,6 +202,20 @@ pub struct DeserSender {
 #[derive(Debug)]
 pub struct Recv<'rx, T> {
     rx: &'rx Receiver<T>,
+}
+
+/// Future returned by [`ErasedReceiver::recv_erased`].
+#[must_use = "futures do nothing unless `.await`ed or `poll`ed"]
+#[derive(Debug)]
+pub struct RecvErased<'rx> {
+    rx: &'rx ErasedReceiver,
+}
+
+/// A type-erased reference to a value received from an [`ErasedReceiver`].
+#[derive(Debug)]
+pub struct ErasedRecvRef<'rx> {
+    rx: &'rx ErasedReceiver,
+    taken: bool,
 }
 
 /// Errors returned by [`Receiver::recv`] and [`Receiver::poll_recv`].
@@ -225,6 +246,15 @@ pub enum SenderError {
     /// [`Receiver::deser_sender`] methods on this [`Receiver`] will *never*
     /// return [`Ok`] again.
     Closed,
+}
+
+/// Errors returned by [`ErasedReceiver::downcast_sender`].
+#[derive(Debug, Eq, PartialEq)]
+pub enum ErasedSenderError {
+    /// A sender could not be acquired.
+    Sender(SenderError),
+    /// The `ErasedReceiver` is of a different type.
+    WrongType,
 }
 
 /// Errors returned by [`Sender::send`], indicating that the [`Receiver`] has
@@ -270,6 +300,12 @@ struct DeserVtable {
     typeinfo: TypeInfo,
 }
 
+#[derive(Debug)]
+struct RefVtable {
+    drop: unsafe fn(*const Oneshot<()>),
+    clone: unsafe fn(*const Oneshot<()>),
+}
+
 /// Not waiting for anything.
 const HAS_RX: u8 = 1 << 0;
 /// A Sender has been created, but no writes have begun yet
@@ -293,6 +329,17 @@ impl<T> Oneshot<T> {
             cell: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
+
+    #[cfg(any(test, feature = "alloc"))]
+    const ARC_VTABLE: &'static RefVtable = &RefVtable {
+        drop: |ptr| unsafe { Arc::decrement_strong_count(ptr.cast::<Self>()) },
+        clone: |ptr| unsafe { Arc::increment_strong_count(ptr.cast::<Self>()) },
+    };
+
+    const STATIC_VTABLE: &'static RefVtable = &RefVtable {
+        drop: |_| {},
+        clone: |_| {},
+    };
 
     /// Constructs a [`Receiver`] for this `Oneshot` channel, using a `static`
     /// to store the shared state between the [`Receiver`] and any [`Sender`]s.
@@ -325,9 +372,7 @@ impl<T> Oneshot<T> {
             .ok()?;
         Some(Receiver {
             chan: self as *const _,
-            drop: |_| {},
-            clone: |_| {},
-            drop_erased: |_| {},
+            vtable: Self::STATIC_VTABLE,
         })
     }
 
@@ -368,6 +413,40 @@ impl<T> Oneshot<T> {
             .compare_exchange(0, HAS_RX, AcqRel, Acquire)
             .ok()?;
         Some(Receiver::from_arc(self))
+    }
+
+    fn poll_recv(&self, cx: &mut task::Context<'_>) -> Poll<Result<(), RecvError>> {
+        test_span!("Oneshot::poll_recv");
+        loop {
+            let state = test_dbg!(self.head.state.fetch_or(RX_WAITING, AcqRel));
+
+            if test_dbg!(state & CLOSED != 0) {
+                return Poll::Ready(Err(RecvError::Closed));
+            }
+
+            if test_dbg!(state & SENT != 0) {
+                return Poll::Ready(Ok(()));
+            }
+
+            if test_dbg!(state & HAS_TX == 0) {
+                return Poll::Ready(Err(RecvError::NoSender));
+            }
+
+            // We are still waiting for the Sender to start or complete.
+            // Trigger another wait cycle.
+            task::ready!(test_dbg!(self.head.wait.poll_wait(cx))).map_err(|_| RecvError::Closed)?;
+            hint::spin_loop();
+        }
+    }
+
+    unsafe fn take_value(&self) -> T {
+        let mut ret = MaybeUninit::<T>::uninit();
+        self.cell.with_mut(|cell| {
+            core::ptr::copy_nonoverlapping(cell.cast(), ret.as_mut_ptr(), 1);
+        });
+
+        test_dbg!(self.head.state.store(HAS_RX, Release));
+        ret.assume_init()
     }
 }
 
@@ -419,21 +498,17 @@ impl<T> Receiver<T> {
     fn from_arc(oneshot: Arc<Oneshot<T>>) -> Self {
         Self {
             chan: Arc::into_raw(oneshot),
-            drop: Arc::decrement_strong_count,
-            drop_erased: |ptr| unsafe { Arc::decrement_strong_count(ptr.cast::<Oneshot<T>>()) },
-            clone: Arc::increment_strong_count,
+            vtable: Oneshot::<T>::ARC_VTABLE,
         }
     }
 
-    /// Create a [`Sender`] for this channel, using an [`Arc`]
-    /// allocation to [store the shared state](../heap-and-static-storage).
+    /// Create a [`Sender`] for this channel.
     ///
     /// If a [`Sender`] or [`DeserSender`] currently exists and has not been
     /// used, this method returns a [`SenderError`]. If a message has been sent
     /// but not received, this method will call [`Receiver::recv`] to receive
     /// that message, drop it, and then create a new [`Sender`].
     ///
-    /// This method requires the "alloc" feature flag to be enabled.
     ///
     /// # Examples
     ///
@@ -452,13 +527,12 @@ impl<T> Receiver<T> {
     /// assert_eq!(rx.recv().await, Ok(1));
     /// # }
     /// ```
-    #[cfg(any(test, feature = "alloc"))]
     pub async fn sender(&self) -> Result<Sender<T>, SenderError> {
         self.take_sender().await?;
-        unsafe { (self.clone)(self.chan) }
+        unsafe { (self.vtable.clone)(self.chan.cast()) }
         Ok(Sender {
             chan: self.chan,
-            drop: self.drop,
+            vtable: self.vtable,
             sent: false,
         })
     }
@@ -500,36 +574,8 @@ impl<T> Receiver<T> {
 
     /// Await a message from a [`Sender`] or [`DeserSender`].
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
-        test_span!("Oneshot::poll_recv");
         let this = unsafe { &*self.chan };
-        loop {
-            let state = test_dbg!(this.head.state.fetch_or(RX_WAITING, AcqRel));
-
-            if test_dbg!(state & CLOSED != 0) {
-                return Poll::Ready(Err(RecvError::Closed));
-            }
-
-            if test_dbg!(state & SENT != 0) {
-                let mut ret = MaybeUninit::<T>::uninit();
-                unsafe {
-                    this.cell.with_mut(|cell| {
-                        core::ptr::copy_nonoverlapping(cell.cast(), ret.as_mut_ptr(), 1);
-                    });
-
-                    test_dbg!(this.head.state.store(HAS_RX, Release));
-                    return Poll::Ready(Ok(ret.assume_init()));
-                }
-            }
-
-            if test_dbg!(state & HAS_TX == 0) {
-                return Poll::Ready(Err(RecvError::NoSender));
-            }
-
-            // We are still waiting for the Sender to start or complete.
-            // Trigger another wait cycle.
-            task::ready!(test_dbg!(this.head.wait.poll_wait(cx))).map_err(|_| RecvError::Closed)?;
-            hint::spin_loop();
-        }
+        this.poll_recv(cx).map_ok(|_| unsafe { this.take_value() })
     }
 
     /// Close the Oneshot. This will cause any pending senders to fail.
@@ -540,15 +586,38 @@ impl<T> Receiver<T> {
                 .with_mut(|cell| unsafe { core::ptr::drop_in_place(cell.cast::<T>()) });
         }
     }
+
+    /// Convert this [`Receiver`]`<T>` into a type-erased [`ErasedReceiver`],
+    /// which erases the generic message type.
+    ///
+    /// The [`ErasedReceiver::recv_erased`] method returns an [`ErasedRecvRef`],
+    /// which may then be dynamically downcast to the original message type.
+    pub fn into_erased(self) -> ErasedReceiver
+    where
+        T: Send + 'static,
+    {
+        let this = mem::ManuallyDrop::new(self);
+        ErasedReceiver {
+            chan: this.chan.cast(),
+            vtable: this.vtable,
+            type_id: TypeId::of::<T>(),
+            drop_data: |chan| unsafe {
+                let chan = chan.cast::<Oneshot<T>>();
+                (*chan).cell.with_mut(|cell| {
+                    core::ptr::drop_in_place(cell.cast::<T>());
+                });
+            },
+        }
+    }
 }
 
 impl<T> Receiver<T>
 where
     T: DeserializeOwned + Send + 'static,
 {
-    const VTABLE: DeserVtable = DeserVtable {
+    const DESER_VTABLE: DeserVtable = DeserVtable {
         drop_data: |this| unsafe {
-            this.vtable
+            this.ser_vtable
                 .typeinfo
                 .assert_matches::<T>("oneshot::DeserSender");
             let chan = this.chan.cast::<Oneshot<T>>();
@@ -557,7 +626,7 @@ where
             });
         },
         from_bytes: |this, bytes| -> postcard::Result<()> {
-            this.vtable
+            this.ser_vtable
                 .typeinfo
                 .assert_matches::<T>("oneshot::DeserSender");
             let val = postcard::from_bytes::<T>(bytes)?;
@@ -570,7 +639,7 @@ where
             Ok(())
         },
         from_bytes_framed: |this, bytes| {
-            this.vtable
+            this.ser_vtable
                 .typeinfo
                 .assert_matches::<T>("oneshot::DeserSender");
             let val = postcard::from_bytes_cobs::<T>(bytes)?;
@@ -595,12 +664,12 @@ where
     pub async fn deser_sender(&self) -> Result<DeserSender, SenderError> {
         self.take_sender().await?;
         unsafe {
-            (self.clone)(self.chan);
+            (self.vtable.clone)(self.chan.cast());
         }
         Ok(DeserSender {
             chan: self.chan.cast::<Oneshot<()>>(),
-            drop: self.drop_erased,
-            vtable: &Self::VTABLE,
+            vtable: self.vtable,
+            ser_vtable: &Self::DESER_VTABLE,
             sent: false,
         })
     }
@@ -626,13 +695,152 @@ impl<T> Drop for Receiver<T> {
         unsafe {
             // decrement the ref count, if this sender was constructed from an
             // `Arc<Oneshot>`.
-            (self.drop)(self.chan)
+            (self.vtable.drop)(self.chan.cast())
         }
     }
 }
 
 unsafe impl<T: Send> Send for Receiver<T> {}
 unsafe impl<T: Send> Sync for Receiver<T> {}
+
+// === impl ErasedReceiver ===
+
+impl ErasedReceiver {
+    /// Create a [`Sender`] for this channel, if it was erased from a
+    /// [`Receiver`] for `T`-typed messages.
+    ///
+    /// If a [`Sender`] or [`DeserSender`] currently exists and has not been
+    /// used, this method returns a [`ErasedSenderError::Sender`]. If a message
+    /// has been sent but not received, this method will call
+    /// [`ErasedReceiver::recv_erased`] to receive
+    /// that message, drop it, and then create a new [`Sender`]. Finally, if
+    /// this `ErasedReceiver` was *not* erased from a [`Receiver`]`<T>`, this
+    /// method returns [`ErasedSenderError::WrongType`].
+    ///
+    /// # Examples
+    ///
+    /// Downcasting to a matching type:
+    ///
+    /// ```
+    /// use tricky_pipe::oneshot;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let rx = oneshot::Receiver::<usize>::new().into_erased();
+    /// // Because the `Receiver` was erased from a `Receiver<usize>`, we
+    /// //  can downcast it to a `Sender<usize>`.
+    /// let tx = rx.downcast_sender::<usize>().await.unwrap();
+    /// # drop(tx)
+    /// # }
+    /// ```
+    ///
+    /// An error is returned when the erased type does not match the
+    /// requested type:
+    ///
+    /// ```
+    /// use tricky_pipe::oneshot;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let rx = oneshot::Receiver::<usize>::new().into_erased();
+    ///
+    /// // Requesting a differently-typed sender, such as `&'static str`,
+    /// // will return an error:
+    /// let err = rx.downcast_sender::<&'static str>().await
+    ///     .unwrap_err();
+    /// assert_eq!(err, oneshot::ErasedSenderError::WrongType);
+    /// # }
+    pub async fn downcast_sender<T: Send + 'static>(&self) -> Result<Sender<T>, ErasedSenderError> {
+        if TypeId::of::<T>() != self.type_id {
+            return Err(ErasedSenderError::WrongType);
+        }
+
+        self.take_sender()
+            .await
+            .map_err(ErasedSenderError::Sender)?;
+        unsafe { (self.vtable.clone)(self.chan) }
+        Ok(Sender {
+            chan: self.chan.cast(),
+            vtable: self.vtable,
+            sent: false,
+        })
+    }
+
+    async fn take_sender(&self) -> Result<(), SenderError> {
+        test_span!("Oneshot::sender");
+        let this = unsafe { &*self.chan };
+        while let Err(state) =
+            test_dbg!(this
+                .head
+                .state
+                .compare_exchange(HAS_RX, HAS_RX | HAS_TX, AcqRel, Acquire))
+        {
+            if state & SENT != 0 {
+                let _ = test_dbg!(self.recv_erased().await.map(|_| ()));
+            }
+
+            if state & CLOSED != 0 {
+                return Err(SenderError::Closed);
+            }
+
+            if state & HAS_TX != 0 {
+                return Err(SenderError::SenderAlreadyActive);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Await a message from a [`Sender`] or [`DeserSender`].
+    ///
+    /// If a sender has not been created, this function will immediately return
+    /// [`RecvError::NoSender`]. If the sender is dropped without sending a
+    /// response, this function will return [`RecvError::NoSender`] after the
+    /// sender has been dropped.
+    pub fn recv_erased(&self) -> RecvErased<'_> {
+        RecvErased { rx: self }
+    }
+
+    /// Await a message from a [`Sender`] or [`DeserSender`].
+    pub fn poll_recv_erased<'rx>(
+        &'rx self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<ErasedRecvRef<'rx>, RecvError>> {
+        let this = unsafe { &*self.chan };
+        this.poll_recv(cx).map_ok(|_| ErasedRecvRef {
+            rx: self,
+            taken: false,
+        })
+    }
+
+    /// Close the Oneshot. This will cause any pending senders to fail.
+    pub fn close(&self) {
+        unsafe {
+            if (*self.chan).head.close() {
+                (self.drop_data)(self.chan);
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ErasedReceiver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("oneshot::ErasedReceiver")
+            .field("chan", &format_args!("{:p}", self.chan))
+            .finish()
+    }
+}
+
+impl Drop for ErasedReceiver {
+    fn drop(&mut self) {
+        unsafe {
+            // decrement the ref count, if this sender was constructed from an
+            // `Arc<Oneshot>`.
+            (self.vtable.drop)(self.chan)
+        }
+    }
+}
+
+unsafe impl Send for ErasedReceiver {}
+unsafe impl Sync for ErasedReceiver {}
 
 // === impl Header ===
 
@@ -692,6 +900,51 @@ impl<T> Future for Recv<'_, T> {
     }
 }
 
+// === impl ErasedRecv ===
+
+impl<'rx> Future for RecvErased<'rx> {
+    type Output = Result<ErasedRecvRef<'rx>, RecvError>;
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.rx.poll_recv_erased(cx)
+    }
+}
+
+// === impl ErasedRecvRef ===
+
+impl ErasedRecvRef<'_> {
+    /// Attempts to downcast the received value to a `T`-typed value.
+    ///
+    /// If the [`ErasedReceiver`] that returned this `ErasedRecvRef` holds a
+    /// `T`-typed message, this method returns [`Ok`]`<T>`. Otherwise, this
+    /// method returns [`Err`]`(Self)`, allowing the `ErasedRecvRef` to be
+    /// downcast to a different type.
+    pub fn downcast<T: Send + 'static>(mut self) -> Result<T, Self> {
+        if TypeId::of::<T>() != self.rx.type_id {
+            return Err(self);
+        }
+
+        self.taken = true;
+        unsafe {
+            let chan = self.rx.chan.cast::<Oneshot<T>>();
+            Ok((*chan).take_value())
+        }
+    }
+}
+
+impl Drop for ErasedRecvRef<'_> {
+    fn drop(&mut self) {
+        if self.taken {
+            return;
+        }
+
+        unsafe {
+            (self.rx.drop_data)(self.rx.chan);
+            test_dbg!((*self.rx.chan).head.state.store(HAS_RX, Release));
+        }
+    }
+}
+
 // === impl Sender ===
 
 impl<T> Sender<T> {
@@ -733,17 +986,17 @@ impl<T> Drop for Sender<T> {
         unsafe {
             // decrement the ref count, if this sender was constructed from an
             // `Arc<Oneshot>`.
-            (self.drop)(self.chan)
+            (self.vtable.drop)(self.chan.cast())
         }
     }
 }
 
 impl<T> fmt::Debug for Sender<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { drop, sent, .. } = self;
+        let Self { vtable, sent, .. } = self;
         f.debug_struct("oneshot::Sender")
             // .field("chan", self.chan())
-            .field("drop", drop)
+            .field("vtable", vtable)
             .field("sent", sent)
             .finish()
     }
@@ -767,7 +1020,7 @@ impl DeserSender {
     /// - [`Err`]`(`[`DeserSendError::Closed`]`)` if the [`Receiver::close`]
     ///   method has been called.
     pub fn send(self, bytes: &[u8]) -> Result<(), DeserSendError> {
-        (self.vtable.from_bytes)(&self, bytes).map_err(self.deser_error())?;
+        (self.ser_vtable.from_bytes)(&self, bytes).map_err(self.deser_error())?;
 
         self.finish_write()
     }
@@ -784,13 +1037,13 @@ impl DeserSender {
     /// - [`Err`]`(`[`DeserSendError::Closed`]`)` if the [`Receiver::close`]
     ///   method has been called.
     pub fn send_framed(self, bytes: &mut [u8]) -> Result<(), DeserSendError> {
-        (self.vtable.from_bytes_framed)(&self, bytes).map_err(self.deser_error())?;
+        (self.ser_vtable.from_bytes_framed)(&self, bytes).map_err(self.deser_error())?;
 
         self.finish_write()
     }
 
     fn deser_error(&self) -> impl FnOnce(postcard::Error) -> DeserSendError {
-        let info = self.vtable.typeinfo;
+        let info = self.ser_vtable.typeinfo;
         move |error| DeserSendError::Deserialize {
             error,
             message_type: info.name(),
@@ -802,7 +1055,7 @@ impl DeserSender {
             Err(_) => {
                 // Yup, a close happened WHILE we were writing. Go ahead and drop
                 // the contents
-                (self.vtable.drop_data)(&self);
+                (self.ser_vtable.drop_data)(&self);
                 Err(DeserSendError::Closed)
             }
             Ok(_) => {
@@ -828,7 +1081,7 @@ impl Drop for DeserSender {
         unsafe {
             // decrement the ref count, if this sender was constructed from an
             // `Arc<Oneshot>`.
-            (self.drop)(self.chan)
+            (self.vtable.drop)(self.chan)
         }
     }
 }
@@ -836,12 +1089,15 @@ impl Drop for DeserSender {
 impl fmt::Debug for DeserSender {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
-            drop, sent, vtable, ..
+            sent,
+            vtable,
+            ser_vtable,
+            ..
         } = self;
         f.debug_struct("oneshot::DeserSender")
-            .field("type", &vtable.typeinfo)
+            .field("type", &ser_vtable.typeinfo)
             .field("head", self.head())
-            .field("drop", drop)
+            .field("vtable", vtable)
             .field("sent", sent)
             .finish()
     }
@@ -917,6 +1173,39 @@ mod tests {
             });
 
             assert_eq!(test_dbg!(block_on(rx.recv())), Ok(2));
+        });
+    }
+
+    #[test]
+    fn erased_rx() {
+        loom::model(|| {
+            let rx = Receiver::<usize>::new().into_erased();
+
+            for i in 1..2 {
+                let tx_err = block_on(rx.downcast_sender::<&'static str>())
+                    .expect_err("downcasting sender to the wrong type should fail");
+                assert_eq!(ErasedSenderError::WrongType, tx_err);
+
+                let tx = block_on(rx.downcast_sender::<usize>())
+                    .expect("downcasting sender to the correct type should succeed");
+
+                thread::spawn(move || {
+                    block_on(async move {
+                        test_dbg!(tx.send(i)).unwrap();
+                    });
+                });
+
+                let recv =
+                    test_dbg!(block_on(rx.recv_erased())).expect("recv_erased should succeed");
+                let recv = recv
+                    .downcast::<&'static str>()
+                    .expect_err("downcasting ErasedRecvRef to the wrong type should fail");
+                assert_eq!(
+                    recv.downcast::<usize>()
+                        .expect("downcasting to the correct type should succeed"),
+                    i
+                );
+            }
         });
     }
 
