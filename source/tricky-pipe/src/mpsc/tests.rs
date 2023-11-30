@@ -547,6 +547,46 @@ fn spsc_send() {
 }
 
 #[test]
+fn downcast_send() {
+    const SENDS: u8 = 2;
+
+    loom::model(|| {
+        let (rx, tx) = {
+            let chan = TrickyPipe::<loom::alloc::Track<u8>>::new(SENDS);
+            let rx = test_dbg!(chan.receiver()).expect("can't get rx");
+            let tx = test_dbg!(chan.sender().into_erased());
+            (rx, tx)
+        };
+
+        let thread = thread::spawn(move || {
+            future::block_on(async move {
+                for i in 0..SENDS {
+                    let permit = tx.reserve().await.unwrap();
+                    let permit = permit
+                        .downcast::<u8>()
+                        .expect_err("wrong type, should not downcast");
+                    permit
+                        .downcast()
+                        .expect("correct type should downcast")
+                        .send(loom::alloc::Track::new(i));
+                }
+            })
+        });
+
+        future::block_on(async move {
+            let mut i = 0;
+            while let Ok(msg) = rx.recv().await {
+                assert_eq!(msg.get_ref(), &i);
+                i += 1;
+            }
+            assert_eq!(i, SENDS);
+        });
+
+        thread.join().unwrap();
+    })
+}
+
+#[test]
 fn mpsc_send() {
     // try not to make the test run for > 300 seconds under loom/miri...
     const TX1_SENDS: usize = if cfg!(loom) || cfg!(miri) { 2 } else { 16 };

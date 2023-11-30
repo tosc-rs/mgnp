@@ -80,14 +80,14 @@ where
     }
 
     /// Erase the message types of this `BiDi`, returning a [`SerBiDi`].
-    pub fn erase(self) -> SerBiDi<E>
+    pub fn into_serde(self) -> SerBiDi<E>
     where
         In: Serialize + Send + Sync + 'static,
         Out: DeserializeOwned + Send + Sync + 'static,
     {
         SerBiDi {
-            tx: self.tx.erased(),
-            rx: self.rx.erased(),
+            tx: self.tx.into_serde(),
+            rx: self.rx.into_serde(),
             seen_rx_error: self.seen_rx_error,
             seen_tx_error: self.seen_tx_error,
         }
