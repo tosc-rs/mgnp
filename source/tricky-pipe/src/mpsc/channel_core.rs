@@ -89,7 +89,7 @@ pub(super) struct Reservation<'core, E> {
 /// Erases both a pipe and its element type.
 pub(super) struct ErasedPipe<E: 'static> {
     ptr: *const (),
-    vtable: &'static CoreVtable<E>,
+    pub(super) vtable: &'static CoreVtable<E>,
 }
 
 pub(super) struct TypedPipe<T: 'static, E: 'static> {
@@ -590,7 +590,7 @@ impl ErasedSlice {
         }
     }
 
-    unsafe fn unerase<'a, T: 'static>(self) -> &'a [T] {
+    pub(super) unsafe fn unerase<'a, T: 'static>(self) -> &'a [T] {
         #[cfg(debug_assertions)]
         debug_assert_eq!(
             self.typ,

@@ -1,12 +1,59 @@
-//! Multi-Producer, Single-Consumer (MPSC) channels.
+//! Multi-Producer, Single-Consumer (MPSC), optionally type-erased channels.
+//!
+//! # Type Erasure
+//!
+//! The MSPC channels in this module differ from other similar MPSC channels in
+//! that they provide multiple mechanisms for erasing the type of a [`Sender`]
+//! or [`Receiver`], creating a dynamically-typed sender or receiver handle.
+//! These dynamically-typed handles erase the generic type of the channel's
+//! messages.
+//!
+//! There are two forms of channel type erasure:
+//!
+//! * **Serialization-based type erasure** allows sending or receiving messages
+//!   as their `postcard`-serialized byte representations, rather than as Rust
+//!   types.
+//!
+//!   The [`Sender::into_serde`] method converts a [`Sender`] into a
+//!   [`DeserSender`]. A [`DeserSender`] provides [`send`](DeserSender::send),
+//!   [`try_send`](DeserSender::try_send), and [`reserve`](DeserSender::reserve)
+//!   methods that accept a `&[u8]` rather than a typed message, and attempt to
+//!   automatically deserialize the channel's message type from the provided bytes.
+//!   [`SerReceiver`] handles, respectively.
+//!
+//!   Similarly, the [`Receiver::into_serde`] method converts a [`Receiver`]
+//!   into a [`SerReceiver`], which provides [`recv`](SerReceiver::recv) and
+//!   [`try_recv`](SerReceiver::try_recv) methods that return a [`SerRecvRef`]
+//!   type. A [`SerRecvRef`] can be used to serialize the received message into
+//!   a buffer ([`SerRecvRef::to_slice`]) or into a new [`Vec`](alloc::vec::Vec)
+//!   ([`SerRecvRef::to_vec`], if the "alloc" crate feature flag is enabled).
+//!
+//!   A [`DeserSender`] can only be constructed for a channel where the message
+//!   type implements [`serde::de::DeserializeOwned`], and a [`SerReceiver`] may
+//!   only be constructed for a channel where the message type implements
+//!   [`Serialize`].
+//!
+//! * **Downcasting-based type erasure** allows converting a typed [`Sender`]
+//!   into a type-erased [`ErasedSender`], which can be used to reserve capacity
+//!   to send a message to a channel without knowing its message type. The
+//!   [`ErasedSender::reserve`] and [`ErasedSender::try_reserve`] methods return
+//!   an [`ErasedPermit`], which behaves similarly to a [`dyn
+//!   Any`](core::any::Any) value: they may be downcast back to a typed
+//!   [`Permit`] using the [`ErasedPermit::downcast`] method.
+//!
+//!   This is intended to allow code that stores sender handles for a number of
+//!   channels with different message types in the same data structure, and
+//!   performs runtime type dispatch when sending messages to those channels.
 use self::{
     channel_core::{
-        DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe, Vtables,
+        CoreVtable, DeserVtable, ErasedPipe, ErasedSlice, Reservation, SerVtable, TypedPipe,
+        Vtables,
     },
     error::*,
 };
 use crate::loom::cell::{self, CellWith, UnsafeCell};
 use core::{
+    any::TypeId,
     fmt,
     future::Future,
     mem::{self, ManuallyDrop, MaybeUninit},
@@ -74,6 +121,23 @@ pub struct DeserSender<E: 'static = ()> {
     vtable: &'static DeserVtable,
 }
 
+/// An `ErasedSender` can be used to reserve channel capacity while hiding the
+/// type of a channel's messages.
+///
+/// This type provides [`reserve`](Self::reserve) and
+/// [`try_reserve`](Self::try_reserve) methods, which behave similarly to the
+/// [`Sender::reserve`] and [`Sender::try_reserve`] methods, but return an
+/// [`ErasedPermit`], which hides the channel's message type. The
+/// [`ErasedPermit`] may later be downcast into a [`Permit`] for the associated
+/// channel's message type, using [`ErasedPermit::downcast`], which may be used
+/// to send a message.
+///
+/// See the [module-level documentation on type erasure](super#type-erasure) for
+/// details.
+pub struct ErasedSender<E: 'static = ()> {
+    pipe: ErasedPipe<E>,
+}
+
 /// Future returned by [`Receiver::recv`].
 ///
 /// See [the method documentation for `recv`](Receiver::recv) for details.
@@ -110,8 +174,8 @@ pub struct SerRecv<'rx, E: 'static = ()> {
 /// [`to_vec_framed`]: Self::to_vec_framed
 #[must_use = "a `SerRecvRef` does nothing unless the `to_slice`, \
     `to_slice_framed`, `to_vec`, or `to_vec_framed` methods are called"]
-pub struct SerRecvRef<'pipe, E: 'static = ()> {
-    res: Reservation<'pipe, E>,
+pub struct SerRecvRef<'rx, E: 'static = ()> {
+    res: Reservation<'rx, E>,
     elems: ErasedSlice,
     vtable: &'static SerVtable,
 }
@@ -137,10 +201,10 @@ pub struct SerRecvRef<'pipe, E: 'static = ()> {
 /// [`commit`]: Self::commit
 #[must_use = "a `Permit` does nothing unless the `send` or `commit` \
               methods are called"]
-pub struct Permit<'core, T, E> {
+pub struct Permit<'tx, T, E> {
     // load bearing drop ordering lol lmao
     cell: cell::MutPtr<MaybeUninit<T>>,
-    pipe: Reservation<'core, E>,
+    pipe: Reservation<'tx, E>,
 }
 
 /// A permit to send a single serialized value to a channel.
@@ -156,12 +220,28 @@ pub struct Permit<'core, T, E> {
 ///
 /// [`send`]: Self::send
 /// [`send_framed`]: Self::send_framed
-#[must_use = "a `SerPermit` does nothing unless the `send` or `send_framed` '
+#[must_use = "a `SerPermit` does nothing unless the `send` or `send_framed`
               methods are called"]
-pub struct SerPermit<'core, E> {
-    res: Reservation<'core, E>,
+pub struct SerPermit<'tx, E> {
+    res: Reservation<'tx, E>,
     elems: ErasedSlice,
     vtable: &'static DeserVtable,
+}
+
+/// A type-erased permit returned by [`ErasedSender::reserve`] and
+/// [`ErasedSender::try_reserve`].
+///
+/// This type may be downcast back into a typed [`Permit`] using the
+/// [`ErasedPermit::downcast`] method, which may then be used to send a typed
+/// message to the channel.
+///
+/// See the [module-level documentation on type erasure](super#type-erasure) for
+/// details on dynamically type-erased senders.
+#[must_use = "a `ErasedPermit` does nothing unless the `downcast` method is called"]
+pub struct ErasedPermit<'tx, E: 'static> {
+    res: Reservation<'tx, E>,
+    elems: ErasedSlice,
+    vtable: &'static CoreVtable<E>,
 }
 
 type Cell<T> = UnsafeCell<MaybeUninit<T>>;
@@ -273,7 +353,7 @@ where
 
     /// Erases the message type of this `Receiver`, returning a [`SerReceiver`]
     /// that receives serialized byte representations of messages.
-    pub fn erased(self) -> SerReceiver<E>
+    pub fn into_serde(self) -> SerReceiver<E>
     where
         T: Serialize + Send + Sync,
     {
@@ -538,7 +618,7 @@ impl<E: Clone> SerReceiver<E> {
     /// - [`Err`]`(SerReceiver)` if this `SerReceiver` is associated with a
     ///   channel with a  message type other than `T`, allowing the
     ///   `SerReceiver` to be recovered.
-    pub fn try_cast<T>(self) -> Result<Receiver<T, E>, Self> {
+    pub fn downcast<T>(self) -> Result<Receiver<T, E>, Self> {
         // Don't drop this `SerReceiver`, as the return value will own this
         // `SerReceiver`'s reference count.
         let this = ManuallyDrop::new(self);
@@ -907,7 +987,7 @@ impl<E: Clone> DeserSender<E> {
     ///   `T`-typed channel.
     /// - [`Err`]`(DeserSender)` if this `DeserSender` is associated with a
     ///   channel with a  message type other than `T`, allowing the `DeserSender` to be recovered.
-    pub fn try_cast<T>(self) -> Result<Sender<T, E>, Self> {
+    pub fn downcast<T>(self) -> Result<Sender<T, E>, Self> {
         // Don't drop this `DeserSender`, as the return value will own this
         // `DeserSender`'s reference count.
         let this = ManuallyDrop::new(self);
@@ -1006,6 +1086,7 @@ impl<E> fmt::Debug for DeserSender<E> {
         self.pipe.fmt_into(&mut f.debug_struct("DeserSender"))
     }
 }
+
 // === impl SerPermit ===
 
 impl<E: Clone> SerPermit<'_, E> {
@@ -1229,7 +1310,7 @@ impl<T, E: Clone> Sender<T, E> {
 
     /// Erases the message type of this `Sender`, returning a [`DeserSender`]
     /// that sends messages from their serialized binary representations.
-    pub fn erased(self) -> DeserSender<E>
+    pub fn into_serde(self) -> DeserSender<E>
     where
         T: DeserializeOwned + Send + Sync,
     {
@@ -1238,6 +1319,30 @@ impl<T, E: Clone> Sender<T, E> {
         // this `Sender`.
         let this = mem::ManuallyDrop::new(self);
         DeserSender::new(unsafe {
+            // Safety: since we are not dropping the `Sender`, we can safely
+            // duplicate the `TypedPipe`, preserving the existing receiver
+            // refcount.
+            this.pipe.clone_no_ref_inc()
+        })
+    }
+
+    /// Erases the message type of this `Sender`, returning a [`ErasedSender`]
+    /// which is not generic over `T`.
+    ///
+    /// An [`ErasedSender`] may be used to reserve channel capacity without
+    /// requiring the channel's message type to be known, returning a
+    /// type-erased [`ErasedPermit`]. The [`ErasedPermit`] may then be downcast back
+    /// into a [`Permit`] and used to send a message, using
+    /// [`ErasedPermit::downcast`].
+    pub fn into_erased(self) -> ErasedSender<E>
+    where
+        T: Send + Sync + 'static,
+    {
+        // don't run the destructor for this `Sender`, as we are converting it
+        // into an `ErasedSender`, keeping the existing reference count held by
+        // this `Sender`.
+        let this = mem::ManuallyDrop::new(self);
+        ErasedSender::new(unsafe {
             // Safety: since we are not dropping the `Sender`, we can safely
             // duplicate the `TypedPipe`, preserving the existing receiver
             // refcount.
@@ -1407,3 +1512,312 @@ unsafe impl<T: Send + Sync, E: Send + Sync> Send for Permit<'_, T, E> {}
 // Safety: a `Permit` allows referencing a `T`, so it's morally equivalent to a
 // reference: a `Permit` is `Sync` if `T` is `Sync`.
 unsafe impl<T: Sync, E: Send + Sync> Sync for Permit<'_, T, E> {}
+
+// === impl ErasedSender ===
+
+impl<E: Clone> ErasedSender<E> {
+    fn new<T>(pipe: TypedPipe<T, E>) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            pipe: unsafe { pipe.erased() },
+        }
+    }
+
+    /// Reserve capacity to send a message to the channel.
+    ///
+    /// If the channel is currently at capacity, this method waits until
+    /// capacity for one message is available. When capacity is available,
+    /// capacity for one message is reserved for the caller. This method returns
+    /// a [`ErasedPermit`], which represents the reserved capacity. The
+    /// [`downcast`] method on the returned [`ErasedPermit`] can be used to
+    /// downcast the [`ErasedPermit`] back into a [`Permit`], which may be used to
+    /// send a message to the channel using the [`Permit::send`] method.
+    ///
+    /// Dropping the [`ErasedPermit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To attempt to reserve capacity *without* waiting if the channel is full,
+    /// use the [`try_reserve`] method, instead.
+    ///
+    /// [`ErasedPermit`]: ErasedPermit
+    /// [`downcast`]: ErasedPermit::downcast
+    /// [`try_reserve`]: Self::try_reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`ErasedPermit`]`)` if the channel is not closed.
+    /// - [`Err`]`(`[`SendError::Disconnected`]`<()>)` if the [`Receiver`] or
+    ///   [`SerReceiver`]) has been dropped.
+    /// - [`Err`]`(`[`SendError::Error`]`<E, ()>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to [`try_reserve`] or `reserve` on this channel will always fail.
+    ///
+    /// # Cancellation Safety
+    ///
+    /// If a `reserve` future is dropped before it has completed, no capacity
+    /// will be reserved.
+    ///
+    /// This channel uses a queue to ensure that calls to `send` and `reserve`
+    /// complete in the order they were requested. Cancelling a call to
+    /// `reserve` causes the caller to lose its place in that queue.
+    pub async fn reserve(&self) -> Result<ErasedPermit<'_, E>, SendError<E>> {
+        self.pipe.core().reserve().await.map(|res| ErasedPermit {
+            res,
+            elems: self.pipe.elems(),
+            vtable: self.pipe.vtable,
+        })
+    }
+
+    /// Attempt to reserve capacity to send a message to the channel,
+    /// without waiting for capacity to become available.
+    ///
+    /// If the channel is currently at capacity, this method returns
+    /// [`TrySendError::Full`]. If the channel has capacity available, capacity
+    /// for one message is reserved for the caller, returning a [`ErasedPermit`]
+    /// which represents the reserved capacity. The [`downcast`] method on the
+    /// returned [`ErasedPermit`] can be used to downcast the [`ErasedPermit`] back
+    /// into a [`Permit`], which may be used to send a message to the channel
+    /// using the [`Permit::send`] method.
+    ///
+    /// Dropping the [`ErasedPermit`] without sending a message releases the
+    /// capacity back to the channel.
+    ///
+    /// To wait for capacity to become available when the channel is full,
+    /// rather than returning an error, use the [`reserve`] method, instead.
+    ///
+    /// [`ErasedPermit`]: SerPermit
+    /// [`downcast`]: ErasedPermit::downcast
+    /// [`reserve`]: Self::reserve
+    ///
+    /// # Returns
+    ///
+    /// - [`Ok`]`(`[`ErasedPermit`]`)` if the channel has capacity available and
+    ///   has not closed.
+    /// - [`Err`]`(`[`TrySendError::Disconnected`]`<()>)` if the [`Receiver`] or
+    ///   [`SerReceiver`] has been dropped. This indicates that subsequent calls
+    ///   to `try_reserve` or [`reserve`] on this channel will always fail.
+    /// - [`Err`]`(`[`TrySendError::Error`]`<E, ()>)` if the channel has been closed
+    ///   with an error using the [`Sender::close_with_error`] or
+    ///   [`Receiver::close_with_error`] methods. This indicates that subsequent
+    ///   calls to `try_reserve` or [`reserve`] on this channel will always fail.
+    /// - [`Err`]`(`[`TrySendError::Full`]`)` if the channel does not currently
+    ///   have capacity to send another message without waiting. A subsequent
+    ///   call to `try_reserve` may complete successfully, once capacity has
+    ///   become available again.
+    pub fn try_reserve(&self) -> Result<ErasedPermit<'_, E>, TrySendError<E>> {
+        self.pipe.core().try_reserve().map(|res| ErasedPermit {
+            res,
+            elems: self.pipe.elems(),
+            vtable: self.pipe.vtable,
+        })
+    }
+
+    /// Returns `true` if this `ErasedSender` is associated with a channel of
+    /// `T`-typed messages, or `false` if the channel's message type is not `T`.
+    ///
+    /// If this method returns `true`, then calling
+    /// [`ErasedPermit::downcast::<T>()`](ErasedPermit::downcast) on the
+    /// [`ErasedPermit`]s returned by this `ErasedSender`'s [`reserve`] or
+    /// [`try_reserve`] methods will return [`Ok`]`(`[`Permit`]`<'_, T, E>)`. If
+    /// this method returns `false` for a given `T`, then downcasting
+    /// [`ErasedPermit`]s returned by this sender to a `T` will return an
+    /// [`Err`].
+    ///
+    /// [`reserve`]: Self::reserve
+    /// [`try_reserve`]: Self::try_reserve
+    #[inline]
+    #[must_use]
+    pub fn is<T>(&self) -> bool
+    where
+        T: Send + Sync + 'static,
+    {
+        self.type_id() == TypeId::of::<T>()
+    }
+
+    /// Returns the [`TypeId`] of the type of messages sent by this
+    /// `ErasedSender`.
+    #[inline]
+    #[must_use]
+    pub fn type_id(&self) -> TypeId {
+        (self.pipe.vtable.type_id)()
+    }
+
+    /// Returns a `&'static str` representation of the type of messages sent by
+    /// this `ErasedSender`.
+    #[inline]
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        (self.pipe.vtable.type_name)()
+    }
+
+    /// Close this channel with an error. Any subsequent attempts to send
+    /// messages to this channel will fail with `error`.
+    ///
+    /// This method returns `true` if the channel was successfully closed. If
+    /// this channel has already been closed with an error, this method does
+    /// nothing and returns `false`.
+    pub fn close_with_error(&self, error: E) -> bool {
+        self.pipe.core().close_with_error(error)
+    }
+
+    /// Returns `true` if this channel is empty.
+    ///
+    /// If this method returns `true`, calling [`Receiver::recv`] or
+    /// [`SerReceiver::try_recv`] will yield until a new message is sent to the
+    /// channel. Any calls to [`Receiver::try_recv`] or
+    /// [`SerReceiver::try_recv`] while the channel is empty will return
+    /// [`TryRecvError::Empty`].
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pipe.core().is_empty()
+    }
+
+    /// Returns `true` if this channel is full.
+    ///
+    /// If this method returns `true`, then any calls to [`Sender::reserve`] or
+    /// [`DeserSender::reserve`] will yield until the queue is empty. Any calls to
+    /// [`Sender::try_reserve`] or [`DeserSender::try_send`] will return an error.
+    #[inline]
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.pipe.core().is_full()
+    }
+
+    /// Returns the number of messages currently in the channel.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.pipe.core().len()
+    }
+
+    /// Returns the **maximum capacity** of the channel.
+    ///
+    /// This is the maximum number of messages that may be queued before senders
+    /// must wait for additional capacity to become available. The capacity of
+    /// the channel is determined *when it is constructed*, and the value
+    /// returned by this method will never change over the channel's lifetime,
+    /// regardless of the current [length](Self::len) of the channel.
+    ///
+    /// To determine the current remaining capacity in the channel, use the
+    /// [`remaining`](Self::remaining) method, instead.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.pipe.core().capacity as usize
+    }
+
+    /// Returns the **current remaining capacity** of this channel.
+    ///
+    /// This is equivalent to subtracting [`self.len()`](Self::len) from
+    /// [`self.capacity()`](Self::capacity).
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.len() - self.capacity()
+    }
+}
+
+impl<E> Clone for ErasedSender<E> {
+    fn clone(&self) -> Self {
+        self.pipe.core().add_tx();
+        Self {
+            pipe: self.pipe.clone(),
+        }
+    }
+}
+
+impl<E> Drop for ErasedSender<E> {
+    fn drop(&mut self) {
+        self.pipe.core().drop_tx();
+    }
+}
+
+impl<E> fmt::Debug for ErasedSender<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.pipe.fmt_into(&mut f.debug_struct("ErasedSender"))
+    }
+}
+
+// === impl ErasedPermit ===
+
+impl<'tx, E> ErasedPermit<'tx, E> {
+    /// Attempts to downcast this `ErasedPermit to a `T`-typed [`Permit`].
+    ///
+    /// If this `ErasedPermit` was produced by a channel of `T`-typed messages,
+    /// then this method returns an [`Ok`]`(`[`Permit`]`<'_, T, E>)`, which may
+    /// be used to send a `T`-typed message to the channel. Otherwise, if the
+    /// message type of this channel is not `T`, this method returns an [`Err`]
+    /// containing the original `ErasedPermit`, so that it may be downcast to a
+    /// different channel type.
+    pub fn downcast<T>(self) -> Result<Permit<'tx, T, E>, Self>
+    where
+        T: Send + Sync + 'static,
+    {
+        if !self.is::<T>() {
+            return Err(self);
+        }
+
+        let elems = unsafe {
+            // Safety: we just checked that the requested type matches the type
+            // of the erased slice, so unerasing it to that type is okay.
+            self.elems.unerase::<Cell<T>>()
+        };
+        let cell = elems[self.res.idx as usize].get_mut();
+        Ok(Permit {
+            cell,
+            pipe: self.res,
+        })
+    }
+
+    /// Returns `true` if this `ErasedPermit` is associated with a channel of
+    /// `T`-typed messages, or `false` if the channel's message type is not `T`.
+    ///
+    /// If this method returns `true`, then [`self.downcast::<T>()`] will return
+    /// [`Ok`]`(`[`Permit`]`<'_, T, E>)`. If this method returns `false`, then
+    /// [`self.downcast::<T>()`] will return an [`Err`].
+    ///
+    /// [`self.downcast::<T>()`]: Self::downcast
+    #[inline]
+    #[must_use]
+    pub fn is<T>(&self) -> bool
+    where
+        T: Send + Sync + 'static,
+    {
+        self.type_id() == TypeId::of::<T>()
+    }
+
+    /// Returns the [`TypeId`] of the type of messages sent by this
+    /// [`ErasedPermit`].
+    #[inline]
+    #[must_use]
+    pub fn type_id(&self) -> TypeId {
+        (self.vtable.type_id)()
+    }
+
+    /// Returns a `&'static str` representation of the type of messages sent by
+    /// this `ErasedPermit`.
+    #[inline]
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        (self.vtable.type_name)()
+    }
+}
+
+impl<E> fmt::Debug for ErasedPermit<'_, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ErasedPermit")
+            .field("res", &self.res)
+            .field("type", &format_args!("{}", self.type_name()))
+            .finish()
+    }
+}
+
+// Safety: an ``ErasedPermit` can only be constructed if `T` is `Send + Sync`.
+unsafe impl<E: Send + Sync> Send for ErasedPermit<'_, E> {}
+
+// Safety: an ``ErasedPermit` can only be constructed if `T` is `Send + Sync`.
+unsafe impl<E: Send + Sync> Sync for ErasedPermit<'_, E> {}
