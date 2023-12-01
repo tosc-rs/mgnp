@@ -50,10 +50,6 @@ pub trait ReqRspService:
 // === impl Seq ===
 
 impl Seq {
-    pub fn from_usize(n: usize) -> Self {
-        Self(n)
-    }
-
     pub fn respond<T>(self, body: T) -> Response<T> {
         Response { seq: self.0, body }
     }
@@ -62,6 +58,10 @@ impl Seq {
 // === impl Request ===
 
 impl<T> Request<T> {
+    pub fn new(seq: usize, body: T) -> Self {
+        Self { seq, body }
+    }
+
     pub fn body(&self) -> &T {
         &self.body
     }
