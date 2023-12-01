@@ -54,10 +54,6 @@ impl Seq {
         Self(n)
     }
 
-    pub fn into_usize(self) -> usize {
-        self.0
-    }
-
     pub fn respond<T>(self, body: T) -> Response<T> {
         Response { seq: self.0, body }
     }
@@ -79,6 +75,20 @@ impl<T> Request<T> {
             seq: self.seq,
             body,
         }
+    }
+}
+
+impl<T> Response<T> {
+    pub fn body(&self) -> &T {
+        &self.body
+    }
+
+    pub fn into_body(self) -> T {
+        self.body
+    }
+
+    pub fn seq(&self) -> usize {
+        self.seq
     }
 }
 
